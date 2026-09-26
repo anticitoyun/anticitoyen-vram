@@ -27,6 +27,7 @@ Um gateway de inferência compatível com a API OpenAI, que trata a memória com
 
 - [As duas ideias](#idees)
 - [Início rápido](#demarrage)
+- [Instalação](#installer)
 - [O que `acvram plan` diz](#plan)
 - [Ir mais rápido](#optimisations)
 - [Pontos de entrada HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Instalação
+
+A partir do código-fonte (todas as plataformas):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Ou por pacote, um arquivo anexado a cada [release do GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Canal | Arquivo anexado à release | Comando |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nomes gerados pelo `rpmbuild`, não fixos) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (ou `rpmbuild --rebuild *.src.rpm` a partir do `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+O Pip não é publicado como pacote (sem wheel compilada): `pip install -e '.[dev]'` instala a partir de um clone do código-fonte, como `./install.sh`.
 
 ---
 
@@ -242,6 +267,7 @@ Duas constatações dessas medições mudaram os valores padrão :
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **retomar o projeto em outra máquina** (French) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | como as peças se encaixam |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 puro ou attention+GDN em int8 por canal, num híbrido Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ajustar esta máquina precisa |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **o que ainda não está feito**, leia isso primeiro |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | convenções de trabalho no código (idioma, estilo, verificações antes de enviar) |

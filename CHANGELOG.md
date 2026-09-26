@@ -5,8 +5,10 @@
   salve unique de 20 s, 5 + 5) donnait 1 = **+12,8 % / −18,4 % J** ; la 229 (poste3, `banc-llamacpp-16-09.py`, invites réelles, lots
   répétés en débit SOUTENU, 5 passes par bras) donne 1 = **−15,3 % / +25,4 % J** (B 1 547,3 contre C 1 784,0 t/s ; A = be837ca1 contre C :
   +1,9 %, neutre). Tant que l'écart entre les deux protocoles n'est pas expliqué (pièce nsys à venir), la release garde l'ancien
-  comportement (piles à sous-normales refusées, naturel + decode_mma) et `ACVRAM_MARLIN_PAR_LIGNE=1` reste disponible ; la 209 reste
-  exacte au bit des poids et gagnante sur qkvo-i8c (209 c). Test cassant si le défaut revient à 1 :
+  comportement (piles à sous-normales refusées, naturel + decode_mma) et `ACVRAM_MARLIN_PAR_LIGNE=1` reste disponible ; la 209 réempaquette
+  les poids au bit (aucun poids changé), mais la SORTIE servie n'est pas identique : à 0 et à 1, les 8 séquences réelles
+  du Coder b=8 divergent dès le jeton 6 à 55 selon la séquence (237 b, poste2) ; KL contre HF bf16 en cours. Elle reste
+  gagnante sur qkvo-i8c (209 c). Test cassant si le défaut revient à 1 :
   `tests/test_marlin_pile_par_ligne_209.py::test_232_le_facteur_par_ligne_est_a_la_demande_et_0_le_defaut`.
 ## 0.7.0 (26/09/2026)
 

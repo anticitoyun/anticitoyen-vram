@@ -27,6 +27,7 @@ Un gateway de inferență compatibil cu API-ul OpenAI, care tratează memoria ca
 
 - [Cele două idei](#idees)
 - [Start rapid](#demarrage)
+- [Instalare](#installer)
 - [Ce spune `acvram plan`](#plan)
 - [Mai rapid](#optimisations)
 - [Puncte finale HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Instalare
+
+Din sursă (toate platformele):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Sau pe pachet, un fișier atașat fiecărei [versiuni GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Canal | Fișier atașat versiunii | Comandă |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nume generate de `rpmbuild`, nefixe) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (sau `rpmbuild --rebuild *.src.rpm` din `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip nu este publicat ca pachet (nicio roată construită): `pip install -e '.[dev]'` instalează dintr-o clonă a sursei, la fel ca `./install.sh`.
 
 ---
 
@@ -242,6 +267,7 @@ Două constatări din aceste măsurători au schimbat valorile implicite:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **reluarea proiectului pe altă mașină** (franceză) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | cum se asamblează piesele |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 pur sau attention+GDN în int8 pe canal, pe un hibrid Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | reglarea acestei mașini precise |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **ce nu este încă făcut**, de citit primul |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | convenții de lucru pe cod (limbă, stil, verificări înainte de a împinge) |

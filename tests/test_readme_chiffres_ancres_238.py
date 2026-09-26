@@ -63,17 +63,46 @@ def _normalise_nombre(brut: str) -> str:
 # perdait ses propres chiffres, alors que docs/README.en.md n'est même pas modifié par la 238).
 _JOUR = r"0?[1-9]|[12]\d|3[01]"
 _MOIS = r"0[1-9]|1[0-2]"
-_DATE = re.compile(rf"\b(?:{_JOUR})[/.](?:{_MOIS})(?:[/.]\d{{4}})?\b|\b\d{{4}}-\d{{2}}-\d{{2}}\b")
+_MOIS1 = r"0?[1-9]|1[0-2]"          # 249 : mois sur 1 chiffre (finnois « 22.9.2026 », tchèque « 22. 9. 2026 »)
+_DATE = re.compile(
+    rf"\b(?:{_JOUR})[/.] ?(?:{_MOIS1})\.?(?: ?[/.]? ?\d{{4}})?\b"      # 22/09, 22.09, 22.9., 22. 9. 2026, 22/09/2026
+    rf"|\b\d{{4}}[-.](?:{_MOIS})[-.](?:{_JOUR})\b"                       # 2026-09-22, 2026.09.22 (hongrois)
+    rf"|\b(?:{_MOIS})\.(?:[0-2]\d|3[01])\b")                            # 09.22 (hongrois : « 09.22-i »)
 
 
-def _sans_dates(texte: str) -> str:
-    """Les dates (22/09, 22/09/2026, 2026-09-22) ne sont pas un « chiffre mesuré » au sens de ce
-    contrôle : `docs/README.en.md` (référence, déjà acceptée par le chef) écrit certaines en ISO
-    avec l'année et d'autres notes FR l'omettent (« Erratum du 22/09 » / une date complète ailleurs)
-    — une convention de rédaction, pas une valeur qui a changé. Retirées avant l'extraction plutôt
-    que réordonnées : le nombre de champs (jour/mois seuls ou avec année) diffère déjà entre les
-    deux, pas seulement l'ordre."""
-    return _DATE.sub("", texte)
+# Le FR n'écrit ses dates qu'avec « / » ou en ISO : c'est cette forme stricte qui s'applique à la SOURCE
+# (`garder` None) — la forme large ci-dessus, appliquée au FR, prendrait « 4.7 » (GLM-4.7-Flash) pour une date.
+_DATE_FR = re.compile(rf"\b(?:{_JOUR})/(?:{_MOIS})(?:/\d{{4}})?\b|\b\d{{4}}-\d{{2}}-\d{{2}}\b")
+
+
+def _sans_dates(texte: str, garder: frozenset | None = None) -> str:
+    """Les dates (22/09, 22/09/2026, 2026-09-22, et depuis la 249 les formes locales 22.9.2026, 22. 9. 2026,
+    2026.09.22, 09.22) ne sont pas un « chiffre mesuré » au sens de ce contrôle : `docs/README.en.md`
+    (référence, déjà acceptée par le chef) écrit certaines en ISO avec l'année et d'autres notes FR
+    l'omettent (« Erratum du 22/09 » / une date complète ailleurs) — une convention de rédaction, pas
+    une valeur qui a changé. Retirées avant l'extraction plutôt que réordonnées : le nombre de champs
+    (jour/mois seuls ou avec année) diffère déjà entre les deux, pas seulement l'ordre.
+    ``garder`` (249) : les nombres du FR, normalisés — un candidat-date dont les chiffres sont un nombre
+    du FR est un NOMBRE écrit au point décimal (« 16.02 » Gio, « 9.1 » %), pas une date : aucune règle
+    de forme ne sépare « 16.02 » de « 22.09 », le FR le fait (il n'écrit jamais 22.09, ni 16,02 en date)."""
+    if garder is None:
+        return _DATE_FR.sub("", texte)
+
+    def rempl(m):
+        return m.group(0) if re.sub(r"\D", "", m.group(0)) in garder else ""
+    return _DATE.sub(rempl, texte)
+
+
+# 249 : en japonais, chinois et coréen les grands nombres se comptent en 億 / 亿 / 억 (10⁸) — « 56 milliards »
+# s'écrit « 560 億 ». Ramené au milliard (÷ 10) pour comparer au FR. Un nombre d'億 qui n'est PAS un multiple
+# de 10 (« 56 億 » = 5,6 milliards) n'est pas une conversion d'unité mais un chiffre changé : il est rendu
+# INVISIBLE au compte (lettre collée devant, que `_NOMBRE` exclut) pour que le « 56 » du FR manque — et non
+# laissé tel quel, où « 56 億 » compterait comme le « 56 » du FR (témoin de test_l_elargissement_249_sait_dire_faux).
+_OKU = re.compile(r"(\d+)\s*[億亿억]")
+
+
+def _sans_oku(texte: str) -> str:
+    return _OKU.sub(lambda m: str(int(m.group(1)) // 10) if int(m.group(1)) % 10 == 0 else "x" + m.group(0), texte)
 
 
 def _sans_cibles(texte: str) -> str:
@@ -88,10 +117,10 @@ def _sans_cibles(texte: str) -> str:
     return texte
 
 
-def _nombres(texte: str) -> list[str]:
+def _nombres(texte: str, garder: frozenset | None = None) -> list[str]:
     # hors blocs de code (une sortie de commande n'est pas de la prose ; déjà vérifiée AU BIT par
     # test_readme_traductions.py:_blocs_de_code — la revérifier ici ferait doublon, pas un défaut).
-    sans_code = re.sub(r"```.*?```", "", _sans_cibles(_sans_dates(texte)), flags=re.S)
+    sans_code = re.sub(r"```.*?```", "", _sans_cibles(_sans_dates(_sans_oku(texte), garder)), flags=re.S)
     return [_normalise_nombre(m.group(0)) for m in _NOMBRE.finditer(sans_code)]
 
 
@@ -134,6 +163,7 @@ def test_les_chiffres_sont_recopies_a_l_identique():
     src_nombres = _nombres(src)
     assert len(src_nombres) >= 30, "gabarit du test obsolète : moins de 30 chiffres dans README.md"
     src_compte = Counter(src_nombres)
+    garder = frozenset(src_nombres)          # 249 : « 16.02 » n'est une date que si le FR n'a pas 16,02
     for code in LANGUES - {"en"}:
         # `docs/README.en.md` écrit ses décimales au point (« 16.02 ») ET certaines de ses dates
         # n'existent qu'avec année (ISO, jamais de DD.MM nu) — mais le FR écrit AUSSI des dates nues
@@ -147,7 +177,7 @@ def test_les_chiffres_sont_recopies_a_l_identique():
         t = p.read_text(encoding="utf-8")
         if not _migree_au_nouveau_modele(t):
             continue
-        t_compte = Counter(_nombres(t))
+        t_compte = Counter(_nombres(t, garder))
         manquent = list((src_compte - t_compte).elements())
         en_trop = list((t_compte - src_compte).elements())
         assert not manquent and not en_trop, {
@@ -199,3 +229,74 @@ def test_le_test_sait_dire_faux(tmp_path):
     altere = src.replace("1 995,1", "1 995,2", 1)
     assert Counter(_nombres(altere)) != Counter(_nombres(src)), (
         "l'altération n'a pas changé le multiset de chiffres — gabarit du test à revoir")
+
+
+# ---- 249 : les dates aussi, et les témoins de l'élargissement ----------------------------------------------
+
+def _dates_jour_mois(texte: str, garder: frozenset | None) -> Counter:
+    """Multiset des (jour, mois) des dates du texte — l'année est omise parce que le FR l'omet lui-même
+    dans ses notes (« Erratum du 22/09 ») là où d'autres langues l'écrivent (« 2026-09-22 »). Source
+    (`garder` None) : forme stricte du FR ; traduction : forme large, hors nombres du FR (« 16.02 »)."""
+    t = re.sub(r"```.*?```", "", _sans_cibles(texte), flags=re.S)
+    out = []
+    for m in (_DATE_FR if garder is None else _DATE).finditer(t):
+        if garder is not None and re.sub(r"\D", "", m.group(0)) in garder:
+            continue
+        champs = re.findall(r"\d+", m.group(0))
+        if len(champs[0]) == 4:                                   # 2026-09-22, 2026.09.22
+            jour, mois = int(champs[2]), int(champs[1])
+        elif len(champs) == 2 and len(champs[0]) == 2 and int(champs[0]) <= 12 < int(champs[1]):
+            jour, mois = int(champs[1]), int(champs[0])           # 09.22 (hongrois, mois d'abord)
+        else:
+            jour, mois = int(champs[0]), int(champs[1])
+        out.append((jour, mois))
+    return Counter(out)
+
+
+def test_les_dates_sont_les_memes():
+    """Une date changée par la traduction est une erreur comme un chiffre changé — retirer les dates
+    des chiffres (ci-dessus) ne doit pas les soustraire à tout contrôle. Comparées en (jour, mois),
+    toutes langues, le FR comme référence."""
+    src = README.read_text(encoding="utf-8")
+    garder = frozenset(_nombres(src))
+    src_dates = _dates_jour_mois(src, None)
+    assert len(src_dates) >= 3, "gabarit du test obsolète : moins de 3 dates distinctes dans README.md"
+    for code in LANGUES:
+        p = DOCS / f"README.{code}.md"
+        if not p.exists():
+            continue
+        t = p.read_text(encoding="utf-8")
+        if not _migree_au_nouveau_modele(t):
+            continue
+        assert _dates_jour_mois(t, garder) == src_dates, {
+            "code": code, "dates (jour, mois)": dict(_dates_jour_mois(t, garder)), "FR": dict(src_dates)}
+
+
+def test_l_elargissement_249_sait_dire_faux():
+    """REGLES n° 5 : l'élargissement de la 249 (dates locales, nombres du FR gardés, 億 ÷ 10) doit rester
+    un contrôle — chaque témoin ci-dessous DOIT casser, sinon c'est un relâchement."""
+    src = README.read_text(encoding="utf-8")
+    garder = frozenset(_nombres(src))
+    src_compte = Counter(_nombres(src))
+    ja = (DOCS / "README.ja.md").read_text(encoding="utf-8")
+    zh = (DOCS / "README.zh.md").read_text(encoding="utf-8")
+    fi = (DOCS / "README.fi.md").read_text(encoding="utf-8")
+    hu = (DOCS / "README.hu.md").read_text(encoding="utf-8")
+    for nom, t in (("ja", ja), ("zh", zh), ("fi", fi), ("hu", hu)):
+        assert Counter(_nombres(t, garder)) == src_compte, f"{nom} : le témoin part d'un fichier déjà rouge"
+    # un débit altéré (312,3 → 321,3), en japonais et en chinois
+    for nom, t in (("ja", ja), ("zh", zh)):
+        assert t.count("312.3") >= 1, f"{nom} : gabarit du témoin obsolète (312.3 absent)"
+        assert Counter(_nombres(t.replace("312.3", "321.3", 1), garder)) != src_compte, f"{nom} : débit altéré non vu"
+    # 560 億 → 56 億 (ce n'est plus 56 milliards mais 5,6)
+    assert ja.count("560 億") >= 1 and zh.count("560 亿") >= 1, "gabarit du témoin obsolète (560 億/亿 absent)"
+    assert Counter(_nombres(ja.replace("560 億", "56 億", 1), garder)) != src_compte, "ja : 560 億 → 56 億 non vu"
+    assert Counter(_nombres(zh.replace("560 亿", "56 亿", 1), garder)) != src_compte, "zh : 560 亿 → 56 亿 non vu"
+    # une date réelle changée, dans une forme locale (finnois 22.9.2026, hongrois 2026.09.22)
+    src_dates = _dates_jour_mois(src, None)
+    assert fi.count("22.9.2026") >= 1 and hu.count("2026.09.22") >= 1, "gabarit du témoin obsolète (date absente)"
+    assert _dates_jour_mois(fi.replace("22.9.2026", "21.9.2026", 1), garder) != src_dates, "fi : date changée non vue"
+    assert _dates_jour_mois(hu.replace("2026.09.22", "2026.09.21", 1), garder) != src_dates, "hu : date changée non vue"
+    # un « 16.02 » (nombre du FR au point décimal) altéré reste vu, même s'il ressemble à une date
+    assert ja.count("16.02") >= 1
+    assert Counter(_nombres(ja.replace("16.02", "16.03", 1), garder)) != src_compte, "ja : 16.02 → 16.03 non vu"

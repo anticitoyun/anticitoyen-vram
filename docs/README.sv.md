@@ -27,6 +27,7 @@ En OpenAI-API-kompatibel inferensgateway som behandlar minnet som en hierarki, g
 
 - [Två idéer](#idees)
 - [Snabbstart](#demarrage)
+- [Installation](#installer)
 - [Vad `acvram plan` säger](#plan)
 - [Gå snabbt](#optimisations)
 - [HTTP-slutpunkter](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Installation
+
+Från källkoden (alla plattformar):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Eller via paket, en fil bifogad till varje [GitHub-release](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Kanal | Fil bifogad till release | Kommando |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (namn genererade av `rpmbuild`, inte fasta) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (eller `rpmbuild --rebuild *.src.rpm` utifrån `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip publiceras inte som paket (inget byggt wheel): `pip install -e '.[dev]'` installerar från en klon av källkoden, precis som `./install.sh`.
 
 ---
 
@@ -242,6 +267,7 @@ Två slutsatser från dessa mätningar har ändrat standardvärdena:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **återuppta projektet på en annan maskin** (franska) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | hur delarna sitter ihop |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | ren NVFP4 eller attention+GDN i int8 per kanal, på en Gated DeltaNet-hybrid |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ställa in denna specifika maskin |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **vad som inte är klart**, läs detta först |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | arbetskonventioner för koden (språk, stil, kontroller innan push) |

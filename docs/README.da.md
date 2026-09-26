@@ -27,6 +27,7 @@ En OpenAI-API-kompatibel inferensgateway, der behandler hukommelse som et hierar
 
 - [To ideer](#idees)
 - [Kom hurtigt i gang](#demarrage)
+- [Installation](#installer)
 - [Hvad `acvram plan` siger](#plan)
 - [Gå hurtigere](#optimisations)
 - [HTTP-endepunkter](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Installation
+
+Fra kildekoden (alle platforme):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Eller som pakke, en fil vedhæftet hver [GitHub-udgivelse](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Kanal | Fil vedhæftet udgivelsen | Kommando |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (navne genereret af `rpmbuild`, ikke faste) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (eller `rpmbuild --rebuild *.src.rpm` ud fra `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip udgives ikke som pakke (ingen bygget wheel): `pip install -e '.[dev]'` installerer fra en klon af kilden, ligesom `./install.sh`.
 
 ---
 
@@ -242,6 +267,7 @@ To konstateringer fra disse målinger har ændret standardværdierne:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **at genoptage projektet på en anden maskine** (fransk) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | hvordan delene passer sammen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | ren NVFP4 eller attention+GDN i int8 pr. kanal, på en Gated DeltaNet-hybrid |
 | [`docs/MATERIEL.md`](MATERIEL.md) | at tilpasse denne bestemte maskine |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **hvad der ikke er gjort endnu**, læs dette først |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | arbejdskonventioner for koden (sprog, stil, kontroller før push) |

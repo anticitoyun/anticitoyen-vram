@@ -27,6 +27,7 @@ Ein OpenAI-API-kompatibles Inference-Gateway, das Speicher als Hierarchie behand
 
 - [Zwei Ideen](#idees)
 - [Schnellstart](#demarrage)
+- [Installation](#installer)
 - [Was `acvram plan` sagt](#plan)
 - [Schneller werden](#optimisations)
 - [HTTP-Endpunkte](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Installation
+
+Aus dem Quellcode (alle Plattformen):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Oder per Paket, eine Datei angehängt an jedes [GitHub-Release](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Kanal | Der Release angehängte Datei | Befehl |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (von `rpmbuild` generierte Namen, nicht fest) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (oder `rpmbuild --rebuild *.src.rpm` ausgehend von der `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip wird nicht als Paket veröffentlicht (kein gebautes Wheel): `pip install -e '.[dev]'` installiert aus einem Quell-Klon, wie `./install.sh`.
 
 ---
 
@@ -242,6 +267,7 @@ Zwei Erkenntnisse aus diesen Messungen haben die Standardwerte verändert:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **das Projekt auf einer anderen Maschine fortsetzen** (Französisch) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | wie die Teile zusammenpassen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | reines NVFP4 oder Attention+GDN in Int8 pro Kanal, auf einem Gated-DeltaNet-Hybrid |
 | [`docs/MATERIEL.md`](MATERIEL.md) | diese spezifische Maschine einstellen |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **was noch nicht fertig ist**, zuerst lesen |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | Arbeitskonventionen für den Code (Sprache, Stil, Prüfungen vor dem Push) |

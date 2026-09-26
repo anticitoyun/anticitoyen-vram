@@ -27,6 +27,7 @@ Een met de OpenAI-API compatibele inferentie-gateway die geheugen als een hiëra
 
 - [Twee ideeën](#idees)
 - [Snel starten](#demarrage)
+- [Installeren](#installer)
 - [Wat `acvram plan` zegt](#plan)
 - [Sneller gaan](#optimisations)
 - [HTTP-eindpunten](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Installeren
+
+Vanuit de broncode (alle platforms):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Of via een pakket, een bestand toegevoegd aan elke [GitHub-release](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Kanaal | Bestand toegevoegd aan de release | Commando |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (namen gegenereerd door `rpmbuild`, niet vast) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (of `rpmbuild --rebuild *.src.rpm` vanuit de `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip wordt niet als pakket gepubliceerd (geen gebouwde wheel): `pip install -e '.[dev]'` installeert vanuit een kloon van de broncode, net als `./install.sh`.
 
 ---
 
@@ -242,6 +267,7 @@ Twee vaststellingen uit deze metingen hebben de standaardwaarden veranderd:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **het project op een andere machine hervatten** (Frans) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | hoe de onderdelen samenkomen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | puur NVFP4 of attention+GDN in int8 per kanaal, op een Gated DeltaNet-hybride |
 | [`docs/MATERIEL.md`](MATERIEL.md) | deze specifieke machine afstellen |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **wat nog niet gedaan is**, lees dit eerst |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | werkconventies voor de code (taal, stijl, controles voor het pushen) |

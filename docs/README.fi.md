@@ -1,16 +1,51 @@
-<p align="center"><img src="logo-acvram.png" alt="acvram" width="420"></p>
+<p align="center">
+  <img src="../docs/logo-acvram.png" alt="acvram" width="200">
+</p>
 
 # anticitoyen VRAM/RAM (`acvram`)
 
-🌐 [Français](../README.md) · [العربية](README.ar.md) · [বাংলা](README.bn.md) · [Català](README.ca.md) · [Čeština](README.cs.md) · [Dansk](README.da.md) · [Deutsch](README.de.md) · [Ελληνικά](README.el.md) · [English](README.en.md) · [Esperanto](README.eo.md) · [Español](README.es.md) · [فارسی](README.fa.md) · [Suomi](README.fi.md) · [עברית](README.he.md) · [हिन्दी](README.hi.md) · [Magyar](README.hu.md) · [Bahasa Indonesia](README.id.md) · [Italiano](README.it.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Norsk bokmål](README.nb.md) · [Nederlands](README.nl.md) · [Polski](README.pl.md) · [Português](README.pt.md) · [Română](README.ro.md) · [Русский](README.ru.md) · [Svenska](README.sv.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [Tiếng Việt](README.vi.md) · [中文](README.zh.md)
+<p align="center">
+  <a href="https://github.com/anticitoyun/anticitoyen-vram/releases/latest"><img src="https://img.shields.io/github/v/release/anticitoyun/anticitoyen-vram" alt="Release"></a>
+  <a href="https://github.com/anticitoyun/anticitoyen-vram/actions/workflows/tests.yml"><img src="https://github.com/anticitoyun/anticitoyen-vram/actions/workflows/tests.yml/badge.svg" alt="CI"></a>
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg" alt="GPL-3.0-or-later-lisenssi"></a>
+  <a href="https://buymeacoffee.com/anticitoyen"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-tue-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
 
-> Tue: [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)
+OpenAI-API-yhteensopiva päättelyportti, joka kohtelee muistia hierarkiana, antaa jokaiselle GPU:lle sen piirin parhaiten lukeman lukumuodon ja optimoi jokaisen tokenin jouleina yhtä lailla kuin sekunteina.
 
-OpenAI-rajapinnan kanssa yhteensopiva päättelyväylä, joka käsittelee muistia
-hierarkiana ja antaa jokaiselle näytönohjaimelle sen lukuformaatin, jota sen
-piiri lukee parhaiten.
+<div align="center">
 
-Suunniteltu yhdelle tietylle koneelle:
+[🇫🇷 Français](../README.md) · [🇬🇧 English](README.en.md) · [🇸🇦 العربية](README.ar.md) · [🇧🇩 বাংলা](README.bn.md) · [🇪🇸 Català](README.ca.md) · [🇨🇿 Čeština](README.cs.md) · [🇩🇰 Dansk](README.da.md) · [🇩🇪 Deutsch](README.de.md) · [🇬🇷 Ελληνικά](README.el.md) · [🌐 Esperanto](README.eo.md) · [🇪🇸 Español](README.es.md) · [🇮🇷 فارسی](README.fa.md) · **🇫🇮 Suomi** · [🇮🇱 עברית](README.he.md) · [🇮🇳 हिन्दी](README.hi.md) · [🇭🇺 Magyar](README.hu.md) · [🇮🇩 Bahasa Indonesia](README.id.md) · [🇮🇹 Italiano](README.it.md) · [🇯🇵 日本語](README.ja.md) · [🇰🇷 한국어](README.ko.md) · [🇳🇴 Norsk bokmål](README.nb.md) · [🇳🇱 Nederlands](README.nl.md) · [🇵🇱 Polski](README.pl.md) · [🇵🇹 Português](README.pt.md) · [🇷🇴 Română](README.ro.md) · [🇷🇺 Русский](README.ru.md) · [🇸🇪 Svenska](README.sv.md) · [🇹🇭 ไทย](README.th.md) · [🇹🇷 Türkçe](README.tr.md) · [🇺🇦 Українська](README.uk.md) · [🇻🇳 Tiếng Việt](README.vi.md) · [🇨🇳 中文](README.zh.md)
+
+</div>
+
+<p align="center"><img src="captures/resultats-22-09.png" alt="Läpäisyn ja energiankulutuksen vertailu vLLM:ään ja llama.cpp:hen" width="720"></p>
+
+---
+
+## Sisällys
+
+- [Kaksi ajatusta](#idees)
+- [Pika-aloitus](#demarrage)
+- [Asennus](#installer)
+- [Mitä `acvram plan` kertoo](#plan)
+- [Nopeuttaminen](#optimisations)
+- [HTTP-päätepisteet](#http)
+- [Mistä luvut tulevat](#chiffres)
+- [Dokumentaatio](#documentation)
+- [Mitatut tulokset](#resultats)
+- [Tila](#etat)
+- [Kiitokset](#credits)
+- [Lisenssi](#licence)
+- [Tue projektia](#soutien)
+
+---
+
+<a id="idees"></a>
+
+## Kaksi ajatusta
+
+Suunniteltu tietylle koneelle:
 
 | | |
 |---|---|
@@ -19,71 +54,93 @@ Suunniteltu yhdelle tietylle koneelle:
 | Muisti | 96 Gt DDR5 |
 | GPU 0 | ASUS RTX 5090 Astral LC OC, 32 Gt — Blackwell, `sm_120` |
 | GPU 1 | ASUS RTX 3080 Ti, 12 Gt — Ampere, `sm_86` |
-| Järjestelmä | Ubuntu 26.04 LTS (CUDA 13); molemmat kortit PCIe x8/x8 -väylässä, rajoitettu 400 W / 275 W |
+| Järjestelmä | Ubuntu 26.04 LTS (CUDA 13); molemmat kortit PCIe x8/x8:ssa, rajoitettu 400 W / 275 W |
 
-## Kaksi ideaa
-
-**Yksi formaatti per GPU.** RTX 5090:ssä on FP4-tensoriytimet; RTX 3080 Ti:ssä
-ei ole, eikä FP8:aa myöskään. Molempien pakottaminen yhteiseen formaattiin
-hukkaisi 5090:n. Muunnin kirjoittaa siis *saman mallin kahdesti*, siinä
-formaatissa, jota kukin kohde osaa todella hyödyntää:
+**Yksi muoto per GPU.** RTX 5090:ssä on FP4-tensoriytimet; RTX 3080 Ti:ssä ei ole niitä eikä FP8:aa. Molempien sovittaminen yhteiseen muotoon hukkaisi 5090:n potentiaalin. Muunnin kirjoittaa siis *saman mallin kahdesti*, muodossa, jota kukin kohde todella pystyy hyödyntämään:
 
 | | RTX 5090 | RTX 3080 Ti |
 |---|---|---|
-| painot | **NVFP4** — E2M1 + FP8 E4M3 -skaala joka 16. | **INT4** — uint4 + fp16-skaala ja -nollakohta joka 128. |
+| painot | **NVFP4** — E2M1 + FP8 E4M3 -skaala joka 16. | **INT4** — uint4 + fp16-skaala ja nolla joka 128. |
 | bittiä per paino | 4,50 | 4,16 |
-| suhteessa BF16:een | ×3,56 pienempi | ×3,85 pienempi |
-| laskentatapa | FP4-tensoriytimet | dekvantisoidaan FP16:ksi ytimessä, FP16-tensoriytimet |
+| verrattuna BF16:een | ×3,56 pienempi | ×3,85 pienempi |
+| laskentatila | FP4-tensoriytimet | dekvantisoidaan FP16:ksi ytimessä, FP16-tensoriytimet |
 | KV-välimuisti | INT8 | INT8 |
 
-32 Gt VRAM-muistia 4,5 bitillä per paino sisältää noin **56 miljardia
-parametria**, kun BF16:ssa mahtuu 16 miljardia. Molemmilla korteilla se
-tekee noin **78 miljardia residenttiä parametria** ennen kuin keskusmuistiin
-edes kosketaan.
+32 Gt VRAM:ia 4,5 bitillä per paino mahduttaa noin **56 miljardia parametria**, kun BF16:ssa vastaava on 16 miljardia. Molemmilla korteilla yhteensä tämä tekee noin **78 miljardia residenttiä parametria** ennen kuin isäntämuistiin edes koskaan.
 
-**Muisti on hierarkia, ei seinä.** Kolme tasoa, ja suunnittelija mittaa,
-mitä kukin maksaa, sen sijaan että toivoisi mallin mahtuvan:
+**Muisti on hierarkia, ei seinä.** Kolme tasoa, ja suunnittelija mittaa, mitä kukin todella maksaa, sen sijaan että toivoisi mallin mahtuvan:
 
 ```
-RTX 5090     32 Go   ~1790 Go/s     NVFP4
-RTX 3080 Ti  12 Go    ~912 Go/s     INT4
-DDR5 hôte    96 Go   limité par le PCIe ou la DDR
+RTX 5090     32 Gt   ~1790 Gt/s     NVFP4
+RTX 3080 Ti  12 Gt    ~912 Gt/s     INT4
+Isännän DDR5   96 Gt   PCIe:n tai DDR:n rajoittama
 ```
+
+---
+
+<a id="demarrage"></a>
 
 ## Pika-aloitus
 
 ```bash
-./install.sh                       # environnement virtuel + torch cu128 + acvram
-acvram doctor                      # cette machine est-elle prête, et pour quoi
-acvram detect                      # qu'y a-t-il réellement ici
+./install.sh                       # virtuaaliympäristö + torch cu128 + acvram
+acvram doctor                      # onko tämä kone valmis, ja mihin
+acvram detect                      # mitä täällä todella on
 
-acvram plan  ~/modeles/Qwen3-32B                    # où irait chaque couche
-acvram convert ~/modeles/Qwen3-32B -o ~/acv/qwen3-32b
+acvram plan  ~/mallit/Qwen3-32B                     # minne kukin kerros menisi
+acvram convert ~/mallit/Qwen3-32B -o ~/acv/qwen3-32b
 acvram serve ~/acv/qwen3-32b --port 8000
 ```
 
-Mikä tahansa OpenAI-asiakas kytkeytyy sen jälkeen:
+Mikä tahansa OpenAI-asiakas kytkeytyy sitten heti:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3-32b","messages":[{"role":"user","content":"Bonjour"}],"stream":true}'
+  -d '{"model":"qwen3-32b","messages":[{"role":"user","content":"Hei"}],"stream":true}'
 ```
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="ei_kaytossa")
 client.chat.completions.create(model="qwen3-32b",
-                               messages=[{"role": "user", "content": "Bonjour"}])
+                               messages=[{"role": "user", "content": "Hei"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Asennus
+
+Lähdekoodista (kaikki alustat):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Tai pakettina, jolloin kukin tiedosto on liitetty jokaiseen [GitHub-julkaisuun](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Kanava | Julkaisuun liitetty tiedosto | Komento |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nimet muodostaa `rpmbuild`, eivätkä ne ole kiinteitä) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (tai `rpmbuild --rebuild *.src.rpm` lähtien `.src.rpm`-tiedostosta) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip-pakettia ei julkaista (valmista wheel-pakettia ei rakenneta): `pip install -e '.[dev]'` asentaa lähdekoodin kloonista, samoin kuin `./install.sh`.
+
+---
+
+<a id="plan"></a>
 
 ## Mitä `acvram plan` kertoo
 
-Suunnittelija kannattaa ajaa ennen mitään latausta. Se vastaa kysymyksiin,
-jotka ratkaisevat, onko malli käyttökelpoinen tällä koneella:
+Suunnittelija kannattaa ajaa ennen jokaista latausta. Se vastaa kysymyksiin, jotka ratkaisevat, onko malli ylipäätään käyttökelpoinen tällä koneella:
 
 ```
-$ acvram plan ~/modeles/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
+$ acvram plan ~/mallit/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
 
   etage   format      capacite      poids         KV  tranche
   cuda:0  nvfp4        30,3 Gio   25,5 Gio   4,5 Gio  couches 0-58
@@ -99,43 +156,31 @@ $ acvram plan ~/modeles/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
   prefill estime     847 jetons/s
 ```
 
-Se tutkii kokoonpanoavaruuden sen sijaan, että pitäisi ensimmäisen sopivan,
-ja kaksi sen päätöksistä on riittävän epäintuitiivisia, että ne on syytä
-sanoa ääneen:
+Se tutkii konfiguraatioavaruuden sen sijaan, että pysähtyisi ensimmäiseen, joka mahtuu, ja kaksi sen päätöksistä ovat riittävän vastaintuitiivisia ansaitakseen maininnan:
 
-* **Se jättää 3080 Ti:n käyttämättä**, kun malli mahtuu pelkkään 5090:een.
-  Liukuhihnan viipaleet suoritetaan peräkkäin: 912 Gt/s -vaiheen lisääminen
-  1790 Gt/s -liukuhihnaan hidastaa yhden virran dekoodausta. Pakotetaan
-  valitsimella `--gpus all`.
-* **Se kutistaa KV-välimuistia pitääkseen painot VRAM-muistissa.** Jokainen
-  välimuistille annettu gigatavu on gigatavu painoja, jotka työnnetään
-  PCIe-väylälle, ja painon lukeminen PCIe:n yli maksaa noin kolmekymmentä
-  kertaa sen, mitä VRAM-muistista lukeminen. Yllä olevalla 70B:llä pelkkä tämä
-  punninta vie 2,3:sta 17,8 tokeniin/s.
+* **Se jättää 3080 Ti:n käyttämättä**, kun malli mahtuu pelkälle 5090:lle. Putkilinjan vaiheet suoritetaan sarjassa: 912 Gt/s -vaiheen lisääminen 1790 Gt/s -putkeen hidastaa yksivirtaista dekoodausta. Pakotetaan `--gpus all`:lla.
+* **Se pienentää KV-välimuistia pitääkseen painot VRAM:ssa.** Jokainen välimuistille annettu gigatavu on gigatavu painoja, jotka työnnetään PCIe-väylälle, ja painon lukeminen PCIe:n kautta maksaa noin kolmekymmentä kertaa sen, mitä se maksaisi VRAM:sta. Yllä olevalla 70B:llä tämä yksi kompromissi nostaa nopeuden 2,3:sta 17,8 tokeniin/s.
 
-## Nopeasti
+---
 
-Neljä optimointia, jokainen varmennettu ekvivalenssitodistuksella eikä vain
-sekuntikellolla: optimointi, joka muuttaa vastausta, on virhe.
+<a id="optimisations"></a>
+
+## Nopeuttaminen
+
+Neljä optimointia, joista jokainen on varmennettu ekvivalenssitodistuksella eikä pelkällä sekuntikellolla: optimointi, joka muuttaa vastauksen, on bugi.
+
+Tiheiden mallien NVFP4-lineaarikerrokset kulkevat oletuksena Marlin-asettelun kautta (+57–90 % läpäisyä b = 8:lla, TTFT +2–4 ms lähteen revue/poste6-piece147-verdict-24-09.md mukaan; paluu `ACVRAM_PROJ_MARLIN=0`, ks. [CHANGELOG.md](../CHANGELOG.md)).
 
 ### Spekulatiivinen dekoodaus (`--speculative`)
 
-Yhden tokenin dekoodaus eräkoolla 1 on muistirajoitteista: kone lukee kaikki
-aktiiviset painot tuottaakseen yhden ainoan tokenin. K ehdotetun tokenin
-tarkistus lukee samat painot **vain kerran**. Kaksi ehdottajaa:
+Yhden tokenin dekoodaus eräkoolla 1 on muistirajoitteista: kone lukee kaikki aktiiviset painot tuottaakseen vain yhden tokenin. K:n ehdotetun tokenin tarkistaminen lukee samat painot **vain kerran**. Kaksi ehdottajaa:
 
-* `ngram` (oletus) — etsii nykyisen loppuliitteen aiemmasta kontekstista ja
-  ehdottaa sitä, mikä seurasi. Ei maksa mitään, ei vaadi mallia. Kannattaa,
-  kun tuloste kopioi syötettä: koodin muokkaus, RAG, tiivistys.
-* `draft` — pieni malli toisella laitteella. Tällä kokoonpanolla se laite on
-  RTX 3080 Ti, jonka suunnittelija jättää tarkoituksella joutilaaksi kaikille
-  5090:een mahtuville malleille.
+* `ngram` (oletus) — etsii nykyistä loppuliitettä aiemmin kontekstista ja ehdottaa sitä, mikä sitä seurasi. Ei maksa mitään, ei vaadi mallia. Kannattaa, kun tuloste toistaa syötteen: koodin muokkaus, RAG, tiivistäminen.
+* `draft` — pieni malli toisella laitteella. Tässä kokoonpanossa tuo laite on RTX 3080 Ti, jonka suunnittelija jättää tarkoituksella joutilaaksi jokaiselle mallille, joka mahtuu 5090:lle.
 
-Hyväksyntä on tarkka, ei likimääräinen: ehdotus hyväksytään todennäköisyydellä
-`min(1, p/q)`, ja hylkäys uudelleenotostaa `p - q`:n normalisoidusta
-positiivisesta osasta. 40 000 arvonnalla tahallaan huonosti kalibroitua
-luonnosta vastaan mitattuna tuotettu jakauma pysyy 0,002 kokonaisvariaation
-sisällä kohteesta — spekulaatio ostaa nopeutta, ei koskaan eri vastausta.
+Myös `mtp` (mallin `nextn`-pää) ja `auto` ovat olemassa; eivät kannattavia nykyisellään eivätkä oletuksena päällä — ks. `docs/ARCHITECTURE.md`.
+
+Hyväksyntä on tarkka, ei likimääräinen: ehdotus hyväksytään todennäköisyydellä `min(1, p/q)`, ja hylkäys uudelleennäytteistää `p - q`:n normalisoidusta positiivisesta osasta. Mitattuna 40 000 nostolla tarkoituksella huonosti kalibroitua luonnosta vastaan, tuotettu jakauma pysyy 0,002:n sisällä kohteen kokonaisvariaatiosta — spekulaatio ostaa nopeutta, ei koskaan erilaista vastausta.
 
 ```
 modele jouet, glouton, k=4    etapes   jetons/etape   sortie
@@ -144,54 +189,29 @@ modele jouet, glouton, k=4    etapes   jetons/etape   sortie
   brouillon (= cible)              5           4,60   identique
 ```
 
-### Etuliitevälimuisti (oletuksena päällä)
+### Etuliitevälimuisti (päällä oletuksena)
 
-Lohkot osoitetaan niiden tokeniviipaleen *ketjutetulla* tiivisteellä: kaksi
-pyyntöä, jotka jakavat järjestelmäohjeen, jakavat sen lohkot, eikä
-jälkimmäisen tarvitse enää esilaskea niitä. Ketjutus on välttämätön: samat
-kuusitoista tokenia eri kontekstissa eivät sisällä samoja avaimia ja arvoja,
-ja pelkän viipaleen tiivistäminen tarjoilisi yhden sekvenssin välimuistin
-toiselle.
+Lohkot osoitetaan token-viipaleensa *ketjutetulla* tiivisteellä: kaksi pyyntöä, jotka jakavat järjestelmäkehotteen, jakavat myös sen lohkot, eikä toisen enää tarvitse esilaskea niitä. Ketjutus on välttämätöntä: samat kuusitoista tokenia eri kontekstissa eivät sisällä samoja avaimia ja arvoja, ja pelkän viipaleen tiivistäminen palvelisi yhden sekvenssin välimuistia toisen pyynnöllä.
 
-Vapautettu lohko, jonka sisältö on yhä tunnistettavissa, siirtyy LRU-jonoon
-vapaiden lohkojen listan sijaan: välimuisti säilyy näin pyyntöjen välillä
-kieltäytymättä koskaan varauksesta, jonka se olisi voinut palvella.
+Vapautettu lohko, jonka sisältö on yhä tunnistettavissa, liittyy LRU-jonoon vapaiden lohkojen listan sijaan: välimuisti selviää näin pyyntöjen välillä koskaan kieltäytymättä varauksesta, jonka se olisi voinut palvella.
 
-### Laskenta isäntätasolla (`--host-exec`)
+### Isäntätason laskenta (`--host-exec`)
 
-Kerros, jonka painot ovat keskusmuistissa, voidaan kopioida GPU:lle tai
-laskea paikallaan. Molemmat polut ovat muistirajoitteisia ja lukevat samat
-tavut: nopeampi on se, jolla on leveämpi väylä — PCIe 5.0 x16 antaa noin
-54 Gt/s, kaksikanavainen DDR5 noin 70 Gt/s — ja paikallaan laskeminen jättää
-lisäksi GPU:n vapaaksi sen sijaan, että se odottaisi kopiota.
+Kerros, jonka painot asuvat RAM:ssa, voidaan kopioida GPU:lle tai laskea paikan päällä. Molemmat reitit ovat muistirajoitteisia ja lukevat samat tavut: nopeampi on se, jonka väylä on leveämpi — PCIe 5.0 x16 antaa noin 54 Gt/s, kaksikanavainen DDR5 noin 70 Gt/s — ja paikallaan laskeminen jättää lisäksi GPU:n vapaaksi sen sijaan, että se odottaisi kopiota.
 
-Tämä kannattaa vain, jos suoritin lukee 4-bittisiksi pakatut painot suoraan.
-Siitä pieni C++-ydin AVX2-polulla (`acvram_cpu.cpp`, ladataan ctypesillä,
-ilman Python-otsikoita tai ninjaa). Jopa **skalaarisella** varahaarallaan se
-voittaa `dequantize() @ x`:n kertoimella 1,44 INT4:ssä ja 3,21 NVFP4:ssä, koska
-jälkimmäinen kirjoittaa ensin 32-bittisen kopion koko matriisista.
+Tämä kannattaa vain, jos suoritin lukee suoraan 4 bittiin pakatut painot. Siitä pieni C++-ydin AVX2-polulla (`acvram_cpu.cpp`, ladattu ctypesillä, ilman Python-otsikoita tai ninjaa). Jopa varajärjestelmänsä **skalaarihaarassa** se voittaa `dequantize() @ x`:n kertoimella 1,44 INT4:ssä ja 3,21 NVFP4:ssä, koska jälkimmäinen kirjoittaa ensin 32-bittisen kopion koko matriisista.
 
 Mistral-Large-123B:llä suunnittelijan arvio nousee 1,35:stä 2,42 tokeniin/s.
 
-### Sekatarkkuus (`--snr-floor`, oletuksena pois)
+### Sekatarkkuus (`--snr-floor`, pois päältä oletuksena)
 
-Muunnin mittaa signaali-kohinasuhteen jokaisen kerroksen ulostulossa
-jokaiselle tensorille ja voi ylentää leveämpään formaattiin ne, jotka jäävät
-alle `--snr-floor`-rajan, enintään 15 % tensoreista ja hintakaton rajoissa
-(`--promotion-cout-max`, lisättyinä mebitavuina).
+Muunnin mittaa signaali-kohinasuhteen kerroksen ulostulossa jokaiselle tensorille ja voi ylentää leveämpään muotoon ne, jotka jäävät `--snr-floor`-arvon alle, enintään 15 %:iin tensoreista ja hintakattoon asti (`--promotion-cout-max`, lisättyinä mebitavuina).
 
-Lattia on **oletuksena nolla**: mitään ei ylennetä. Dekoodausta rajoittaa
-muistikaista, ja mittaus mallilla `Huihui-Qwen3.8-27B` ratkaisee — 25 dB:n
-lattia maksaa 13,4 % muistia ja 10,6 % läpimenoa (18,50 GiB ja 41,8 t/s vastaan
-16,02 ja 46,2) 2,0 %:n perpleksiteetistä (42,591 vastaan 43,447, 16 383 tokenin
-korpus). `--snr-floor 25` palauttaa vanhan käytöksen, kun laatu menee nopeuden
-edelle.
+Kynnys on **oletuksena nolla**: mitään ei ylennetä. Dekoodaus on muistikaistanleveysrajoitteista, ja mittaus `Huihui-Qwen3.8-27B`:llä ratkaisee asian — 25 dB:n kynnys maksaa 13,4 % muistia ja 10,6 % läpäisyä (18,50 GiB ja 41,8 t/s vs. 16,02 ja 46,2) 2,0 %:n perpleksiteetistä (42,591 vs. 43,447, 16 383 tokenin korpus). `--snr-floor 25` palauttaa vanhan käytöksen, kun laatu menee nopeuden edelle.
 
 ### Ja `acvram eval`
 
-Signaali-kohinasuhde ja logit-kosini ovat likiarvoja.
-`acvram eval HAK [HAK ...]` mittaa perpleksiteetin liukuvalla ikkunalla, jotta
-formaattivalinta ratkaistaan todisteilla:
+Signaali-kohinasuhde ja logittien kosini ovat approksimaatioita. `acvram eval REP [REP ...]` mittaa perpleksiteetin liukuvalla ikkunalla, jotta muotovalinta ratkaistaan todisteilla:
 
 ```
 $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
@@ -200,26 +220,31 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
   qwen3-32b-int4         6,583    4,17    16,1 Gio      8192  (+2,7 %)
 ```
 
+---
+
+<a id="http"></a>
+
 ## HTTP-päätepisteet
 
-| päätepiste | huomautukset |
+| päätepiste | huomiot |
 |---|---|
 | `POST /v1/chat/completions` | SSE-virta tai yksittäinen vastaus; käyttää mallin keskustelumallia |
-| `POST /v1/completions` | kehote tekstinä tai tokenitunnisteina |
-| `POST /v1/embeddings` | viimeisten piilotilojen keskiarvo, L2-normalisoitu, `dimensions` huomioidaan |
-| `GET /v1/models` | lisäksi `acvram`-lohko: formaatit, laitteet, KV-välimuistin kapasiteetti |
-| `GET /health`, `GET /metrics` | dekoodauksen läpimeno, KV-lohkojen täyttöaste |
+| `POST /v1/completions` | kehote tekstinä tai token-tunnisteina |
+| `POST /v1/embeddings` | keskiarvoistetut lopulliset piilotilat, L2-normalisoitu, `dimensions` huomioitu |
+| `GET /v1/models` | plus `acvram`-lohko: muodot, laitteet, KV-välimuistin kapasiteetti |
+| `GET /health`, `GET /metrics` | dekoodausnopeus, KV-lohkojen käyttöaste |
 
-Näiden vastausten kenttänimet pysyvät englanniksi: kyseessä on
-OpenAI-protokolla, ja niiden kääntäminen rikkoisi kaikki olemassa olevat
-asiakkaat.
+Näiden vastausten kenttänimet pysyvät englanniksi: kyseessä on OpenAI-protokolla, ja niiden kääntäminen rikkoisi kaikki olemassa olevat asiakkaat.
+
+---
+
+<a id="chiffres"></a>
 
 ## Mistä luvut tulevat
 
-Jokainen yllä mainittu arvo on tämän arkiston koodin tuottama ja `pytest`in
-tarkistama. Mittaukset tehty suorittimella viiteytimillä:
+Jokainen yllä mainittu arvo tulee tämän arkiston koodista ja on `pytest`in varmentama. Mittaukset tehty suorittimella referenssiytimillä:
 
-| formaatti | bittiä/paino | painojen SNR | logit-kosini vs BF16 |
+| muoto | bittiä/paino | painojen SNR | logit-kosini vs BF16 |
 |---|---|---|---|
 | BF16 | 16,00 | — | 1,0000 |
 | INT8 | 8,19 | 44,6 dB | 0,9998 |
@@ -227,80 +252,96 @@ tarkistama. Mittaukset tehty suorittimella viiteytimillä:
 | INT4 | 4,16 | 20,0 dB | 0,9427 |
 | INT4 + Hadamard | 4,16 | 21,0 dB | 0,9582 |
 
-Kaksi näistä mittauksista saatua havaintoa muutti oletusarvoja:
+Kaksi näistä mittauksista tehtyä havaintoa muuttivat oletusarvoja:
 
-* **Hadamard-rotaatio auttaa INT4:ää mutta ei NVFP4:ää.** INT4:n 128:n ryhmät
-  eivät pysty vaimentamaan yksittäistä poikkeavaa kanavaa, joten ääriarvojen
-  levittäminen on n log n -muunnoksen arvoinen aktivointia kohden. NVFP4:n
-  16:n lohkot kantavat jo oman skaalansa. Siitä `--hadamard auto`, joka
-  soveltaa sitä vain INT4:ään.
-* **INT8 voittaa FP8 E4M3:n KV-välimuistissa**, 44 dB vastaan 32 dB samalla
-  koolla, koska skaala per (token, pää) tarjoaa jo sen dynaamisen alueen, johon
-  FP8 kuluttaa eksponenttibittejä. Molemmat kortit käyttävät siis INT8-
-  KV-välimuistia, vaikka 5090 osaisi FP8:aa.
+* **Hadamard-rotaatio auttaa INT4:ää mutta ei NVFP4:ää.** INT4:n 128:n ryhmät eivät pysty imemään eristynyttä poikkeavaa kanavaa, joten ääriarvojen levittäminen kannattaa n log n -muunnoksen verran per aktivointi. NVFP4:n 16:n lohkoilla on jo oma skaalansa. Siitä `--hadamard auto`, joka soveltaa sitä vain INT4:ään.
+* **INT8 voittaa FP8 E4M3:n KV-välimuistissa**, 44 dB vs. 32 dB samalla koolla, koska (token, pää) -kohtainen skaala tarjoaa jo sen dynamiikka-alueen, johon FP8 kuluttaa eksponenttibittejä. Molemmat kortit käyttävät siis INT8-KV-välimuistia, vaikka 5090 osaisikin FP8:aa. `k8v4`-muoto (arvot INT4:ssä, −22 % välimuistitavuja) on olemassa vaihtoehtona, **kelpuuttamattomana** — ks. `docs/ARCHITECTURE.md`.
+
+---
+
+<a id="documentation"></a>
 
 ## Dokumentaatio
 
-* [`REPRISE.md`](../REPRISE.md) — **projektin jatkaminen toisella koneella**
-* [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — miten osat sopivat yhteen
-* [`docs/MATERIEL.md`](MATERIEL.md) — juuri tämän koneen säätäminen
-* [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **mitä ei ole tehty**, lue ensin
-* [`CONVENTIONS.md`](../CONVENTIONS.md) — koodin työskentelykäytännöt (kieli, tyyli, tarkistukset ennen pushia)
+| Asiakirja | Sisältö |
+|---|---|
+| [`REPRISE.md`](../REPRISE.md) | **projektin jatkaminen toisella koneella** (ranskaksi) |
+| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | miten palaset sopivat yhteen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | puhdas NVFP4 tai attention+GDN kanavakohtaisena int8:na, Gated DeltaNet -hybridissä |
+| [`docs/MATERIEL.md`](MATERIEL.md) | tämän tietyn koneen säätäminen |
+| [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **mitä ei ole vielä tehty**, lue tämä ensin |
+| [`CONVENTIONS.md`](../CONVENTIONS.md) | koodityön käytännöt (kieli, tyyli, tarkistukset ennen pushia) |
 
-## Mitatut tulokset (22.9.2026, RTX 5090 400 W:ssa, ≥ 20 s:n ajo energiamittarilla)
+---
 
-Qwen3-Coder-30B-A3B NVFP4:nä (asiantuntijat) + INT8:na (huomio, pää), sama
-protokolla kaikille moottoreille (`outils/`, yksi kortti, `energie.py`):
+<a id="resultats"></a>
 
-| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+## Mitatut tulokset (22.9.2026, RTX 5090, 400 W:ssa, ≥ 20 s ikkuna energiamittarilla)
+
+Qwen3-Coder-30B-A3B NVFP4:ssä (asiantuntijat) + INT8:ssa (huomio, pää), sama protokolla kaikille moottoreille (`outils/`, yksi kortti, `energie.py`):
+
+| | acvram | vLLM 0.29 (`vllm serve`) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekoodaus, 12 sekvenssiä | **1 634 t/s** | 1 782 t/s | — |
-| dekoodaus, 1 sekvenssi | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
-| prefill pp2048 | **22 707 tokenia/s** | 21 054 | 8 671 (TabbyAPI, vedetty pois) |
+| dekoodaus, 12 sekvenssiä | 1 995,1 t/s ² | 2 027,0 t/s ² | — |
+| dekoodaus, 1 sekvenssi | 312,3 t/s ³ ⁴ | 284,8 t/s ³ | **329,9 t/s** ⁴ |
+| esitäyttö pp2048 | **22 707 tokenia/s** | 21 054 | 8 671 (TabbyAPI, poistettu) |
 
-Päivän läpimenot (asema 1030, säästöajotila `-lgc 2700`, liukuhihna palvelussa;
-ahne otanta talletettu CUDA-graafiin, version 0.6.35 oletus). b=12 on virallinen
-sinetöity solu (6 lomitetun ikkunan mediaani, kello ikkunaa kohden).
+¹ 22.9. oikaisu: `serve` spekuloi oletuksena (`--speculative ngram`, cli.py), kilpailijat eivät; tähän asti julkaistu 380,8 t/s oli mitattu SPEKULAATION KANSSA. Ilman spekulaatiota (`--speculative none`, sama ketju, revue/poste2-piece44-speculation-none-22-09.md): 283,6 t/s — acvram on **kolmas** b=1:llä, llama.cpp:n ja vLLM:n jäljessä. Energiassa se pysyy llama.cpp:n edellä (0,601 vs. 0,700 J/token netto). b=12:lla spekulaatio ei ole koskaan aktiivinen (`lot_max=2`-suoja): tuo solu oli jo tasavertainen.
 
-> **Erratum (22.9.2026).** Version 0.6.35 ensimmäinen julkaisu johti tuloksen « +1,84 % vLLM:n edellä » vLLM-viitteestä 1 596 t/s (21.9.), joka tuli offline-generoinnista (`LLM().generate()`), ei vertailukelpoinen palvelimeen: ei jatkuvaa ajoitusta, ei `acvram serve` -polkua. Korjattu 22.9. vuorottelevalla A/V-solulla (A1 V1 A2 V2 A3 V3) `vllm serve` -palvelinta (HTTP) vastaan, sama kortti ja sama polku kuin `acvram serve`: vLLM:n mediaani 1 782 t/s. Vertailukelpoisella mittauksella acvram (1 634 t/s) on b=12:ssa noin 8 % vLLM:n JÄLJESSÄ, ei edellä. J/token samalla kellotaajuudella on yhä uusintamittauksessa.
+² 23.9., sama istunto, sama HTTP-asiakas (`banc-llamacpp-16-09.py` `acvram serve`- ja `vllm serve`-palvelimia vastaan), `-lgc 2700` asetettu eksplisiittisesti molempien ympärille, solut vuorotellen A V V A, ≥ 5 erää per haara, ero ilmoitettu vain yli 2σ:n (revue/poste2-piece96-vllm-b12-rejeu-89-23-09.md). acvram 0.6.38 (w13 dekoodauksessa, purettu huomion redusointi): ero −1,6 %, **alle 2σ: läpäisyn pariteetti**. J/tokenissa **vLLM pysyy edellä 7,0 %:lla** (yli 2σ). Versiolla 0.6.37 sama protokolla antoi −4,7 %.
 
-Aamulla 14.9. acvram oli samassa solussa 630 t/s ja 0,619 J/token: parannukset
-tulevat Blackwellin natiivista FP4-MMA:sta (`mma.sync … kind::mxf4nvf4`, ×7,9
-bf16:een nähden), MoE:stä ryhmiteltynä GEMM:nä erä-ämpäriä kohden,
-yhden ytimen reitityksestä (3 677 → 1 517 käynnistystä per askel) ja kapeasta
-tensoriydin-GEMM:stä projektioille. Jokaisella luvulla on muistiinpanonsa
-hakemistossa `acvram-memoire/revue/` ennen mittausta sinetöityine
-ennusteineen, instrumentteineen ja ajotiloineen — lukua ilman ajotilaa ei
-julkaista.
+³ Sama istunto ja protokolla kuin ²:ssa, ilman spekulaatiota kummallakaan puolella: acvram 312,3 vs. vLLM 284,8 — **acvram edellä 9,7 %:lla läpäisyssä** (yli 2σ); J/token: **pariteetti** (0,04 %:n ero, alle 2σ).
 
-Missä acvram on edellä: MLA-mallit (GLM-4.7-Flash) natiivina sm_120-NVFP4:nä,
-joita vLLM tarjoilee vain FP8:na (b=1: 165,35 t/s palvelussa); mallit, jotka
-eivät mahdu VRAM-muistiin; ja yhden sekvenssin dekoodaus (b=1: 380,8 t/s vLLM:n
-290,6:ta vastaan). Suurilla erillä sen sijaan, VRAM-muistiin mahtuvassa MoE:ssä,
-vLLM pysyy edellä b=12:ssa (1 782 vastaan 1 634 t/s, vrt. erratum); acvram on
-siinä edistynyt (1 540 versiossa 0.6.34 → 1 634) menemättä edelle. Energiaero on
-mitattava uudelleen.
+⁴ 23.9., sama protokolla llama.cpp:tä vastaan (revue/poste2-piece72-llamacpp-b1-23-09.md), acvram 0.6.37 uudelleenkirjoitetulla reitityksellä (+5,6 %): acvram 310,8 vs. llama.cpp 329,9 t/s — **llama.cpp edellä 5,8 %:lla läpäisyssä, acvram edellä 13,4 %:lla J/tokenissa** (0,598 vs. 0,691).
+
+Päivän läpäisyt (asema 1030, eco-tila `-lgc 2700`, putki käytössä; ahne näytteistys otettu CUDA-graafiin, oletus versiosta 0.6.35 lähtien). acvram-moottorin b=12-arvo on virallinen sinetöity solu (mediaani 6:sta lomitetusta ikkunasta, kello ikkunaa kohti).
+
+> **Oikaisu (23.9.2026).** Tähän asti julkaistu vLLM-vertailu (b=12: 1 782 vs. 1 634 t/s; b=1: 290,6) asetti HTTP:llä mitatun acvram-moottorin vastakkain **offline**-mitatun vLLM:n kanssa (`LLM().generate()`), ja 22.9. oikaisu väitti virheellisesti, että vLLM-solu kulki `vllm serve`:n kautta. 23.9.: sama HTTP-asiakas molemmille, ja `-lgc` asetettu molemmille (acvram asettaa omansa käynnistyksessä, `vllm serve` ei: ilman tätä varotoimea vLLM pyöri ~2930 MHz:llä ~2650:n sijaan). Tulos huomautuksessa ²: vLLM edellä 9,1 %:lla b=12:lla.
+
+Aamulla 14.9. acvram oli 630 t/s:ssä ja 0,619 J/tokenissa samalla solulla: hyödyt tulevat Blackwellin natiivista FP4 MMA:sta (`mma.sync … kind::mxf4nvf4`, ×7,9 bf16:een verrattuna), erän ämpäreittäin ryhmitellystä GEMM-MoE:sta, yhteen ytimeen tiivistetystä reitityksestä (3677 → 1517 käynnistystä per askel) ja kapeasta tensoriydin-GEMM:stä projektioille. Jokaisella luvulla on oma muistiinpanonsa `acvram-memoire/revue/`-hakemistossa, mittausta edeltävällä sinetöidyllä ennusteella, instrumentilla ja sen tilalla — lukua ilman tilaa ei julkaista.
+
+Missä acvram on edellä: MLA-mallit (GLM-4.7-Flash) natiivissa sm_120 NVFP4:ssä, joita vLLM tarjoilee vain FP8:ssa (b=1: 165,35 t/s käytössä); mallit, jotka eivät mahdu VRAM:iin. Yhden sekvenssin dekoodaus ei kuulu näihin: ilman spekulaatiota acvram on siinä edellä vLLM:ää 9,7 %:lla (huomautus ³), jäljessä llama.cpp:stä 5,8 %:lla läpäisyssä mutta edellä sitä 13,4 %:lla energiassa (huomautus ⁴). Suurella erällä, VRAM:iin mahtuvalla MoE:lla, vLLM on läpäisyn pariteetissa b=12:lla (1 995,1 vs. 2 027,0 t/s, alle 2σ, huomautus ²) mutta säilyttää 7,0 %:n J/token-edun; acvram on edennyt siinä 1 540 t/s:stä (0.6.34) 1 995:een (0.6.38).
+
+---
+
+<a id="etat"></a>
 
 ## Tila
 
-Versio 0.6.35. Kaikki pyörii 5090:llä: CUDA-ytimet käännetty `sm_120a`:lle
-(natiivi FP4) ja `sm_86`:lle, CUDA-graafit, NVFP4/INT8/INT4-kvantisointi,
-HTTP-palvelin. Suojakaiteet paikoillaan: kortti on näkymätön työistunnoille
-(`CUDA_VISIBLE_DEVICES` tyhjä) ja vain `outils/carte.sh` lainaa sen lukon
-alla yhdelle mittaukselle kerrallaan; vartija kirjaa jokaisen lukon
-ulkopuolisen käytön; energiamittaus, joka kattaa useamman kuin yhden kortin
-tai alle 10 s, mitätöidään; heikennetyssä tilassa ladattu malli sanoo sen
-eikä osallistu kaksintaisteluun.
+Versio 0.6.38. Kaikki toimii 5090:llä: CUDA-ytimet käännetty `sm_120a`:lle (natiivi FP4) ja `sm_86`:lle, CUDA-graafit, NVFP4/INT8/INT4-kvantisointi, HTTP-palvelin. Suojaukset paikoillaan: kortti on näkymätön työistunnoille (`CUDA_VISIBLE_DEVICES` tyhjä), ja vain `outils/carte.sh` lainaa sen, lukittuna, yhdelle mittaukselle kerrallaan; vahti kirjaa lokiin jokaisen lukituksen ulkopuolisen käytön; useamman kortin kattava tai alle 10 s kestävä energiamittaus mitätöidään; heikentyneessä tilassa ladattu malli sanoo niin eikä osallistu kaksintaisteluun.
 
-640 testiä (`pytest -q`, minuutti suorittimella; GPU-testit ajetaan vain
-`carte.sh`:n alla). Työn seuranta: `acvram-memoire/` (säännöt, hakemisto,
-vihot, 180 muistiinpanon katselmus).
+4 107 testiä (`pytest --collect-only -q`, minuutti suorittimella; GPU-testit ajetaan vain `carte.sh`:n alla). Työn seuranta: `acvram-memoire/` (säännöt, hakemisto, muistikirjat, satojen muistiinpanojen katsaus).
 
-## Tue
+---
 
-acvramia kehitetään henkilökohtaisella laitteistolla. Jos projekti on sinulle
-hyödyllinen: **Tue: [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)**.
+<a id="credits"></a>
+
+## Kiitokset
+
+- **vLLM** — [vllm-project/vllm](https://github.com/vllm-project/vllm) v0.29.0, Apache-2.0-lisenssillä: `acvram/kernels/marlin_port/` siirtää sen Marlin-ytimet (MoE ja tiheä), täydellä tiedosto­kohtaisella lähdemerkinnällä tiedostossa [`acvram/kernels/marlin_port/NOTICE`](../acvram/kernels/marlin_port/NOTICE).
+- **NVIDIA** — CUDA, Blackwellin FP4-tensoriytimet (`sm_120`) ja kirjastot, joista tämä projekti riippuu.
+- **PyTorch** — tensorimoottori ja C++/CUDA-laajennukset.
+
+Riippumaton projekti, ei sidoksissa ASUS:iin, NVIDIAan eikä vLLM-projektiin.
+
+---
+
+<a id="licence"></a>
 
 ## Lisenssi
 
-GPL-3.0 tai uudempi.
+[GPL-3.0 tai uudempi](../LICENSE) tämän arkiston koodille. `acvram/kernels/marlin_port/` sisältää koodia, joka on siirretty [vLLM](https://github.com/vllm-project/vllm) v0.29.0:sta (`marlin_moe_wna16`-, `gptq_marlin_repack`- ja `moe_align_block_size`-ytimet), Apache-2.0-lisenssillä: jokainen tiedosto säilyttää alkuperäisen otsikkonsa, lisenssiteksti on tiedostossa `LICENSE-vllm`, ja tiedostolista, alkuperäinen commit ja muutokset ovat tiedostossa [`acvram/kernels/marlin_port/NOTICE`](../acvram/kernels/marlin_port/NOTICE).
+
+---
+
+<a id="soutien"></a>
+
+## Tue projektia
+
+acvram-moottorin kehitys tapahtuu henkilökohtaisella laitteistolla. Jos projektista on sinulle hyötyä:
+
+[![Buy Me a Coffee](https://img.buymeacoffee.com/button-api/?text=Tarjoa%20kahvi&emoji=☕&slug=anticitoyen&button_colour=FFDD00&font_colour=000000&font_family=Lato&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/anticitoyen)
+
+**https://buymeacoffee.com/anticitoyen**
+
+Käännökset: [TRADUIRE.md](TRADUIRE.md) (ranskaksi; osallistumisopasta ei ole vielä käännetty).
