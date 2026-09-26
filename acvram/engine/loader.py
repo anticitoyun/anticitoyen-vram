@@ -113,7 +113,8 @@ def _build_quant(entry: dict, name: str, reader: _ShardReader,
     if fmt == "int8":
         t = INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
                        entry.get("group_size", group_size), shape)
-        if entry.get("origine") == "fp8":
+        from .. import kernels as _kernels
+        if entry.get("origine") == "fp8" and _kernels._I8C_FP8_PREFILL == "bf16":   # 260 : cublas = opt-in W8A8
             # Pièce 139 : préfill en déquant bf16 (W8A16), jamais la copie signée du chemin cublas
             # (kernels._i8c_poids) — nommé sur la ligne de régime (regime.prefill_i8c_texte)
             t.__dict__["prefill_bf16"] = True

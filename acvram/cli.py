@@ -254,6 +254,8 @@ VARIABLES_LUES = {
     "ACVRAM_DOUBLE_DISPOSITION_DIAG",
     "ACVRAM_DUMP_MOE",
     "ACVRAM_PREFILL_INT8",
+    "ACVRAM_I8C_FP8_PREFILL",   # pièce 260 : int8 d'origine fp8 au préfill (bf16 défaut | cublas)
+    "ACVRAM_I8C_COPIE",         # pièce 260 : copie signée xor (défaut, au bit) | int16 (témoin)
     "ACVRAM_PREFILL_DEQUANT",
     "ACVRAM_SANS_FUSION_BF16",
     "ACVRAM_SANS_PRECHARGE",

@@ -53,6 +53,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL", "bf16", None, "bf16", "bf16 | w4a16 (B1 Triton, NVFP4 dans la tuile) | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes"),
     Variable("PREFILL_INT8", "cublas", ("acvram.kernels", "_PREFILL_INT8"), "bf16",
              "linéaires INT8 au préfill : cublas (DÉFAUT depuis poste7-p2-au-defaut-19-09 : poids symétriques par canal des convertis -qkvo-i8c, A8 par jeton puis torch._int_mm cuBLASLt, M > 16 ; un poids affine par groupes — les classés — garde la déquant bf16, sortie inchangée) | bf16 (témoin : déquant entière + cutlass partout) | a8 (P0 : activation int8 par jeton, W8A8 Triton sur tout poids int8 ; poste7-profil-verdict-18-09)"),
+    Variable("I8C_FP8_PREFILL", "bf16", ("acvram.kernels", "_I8C_FP8_PREFILL"), None,
+             "pièce 260 (opt-in, hors bit) : int8 ré-encodés du fp8 au préfill : bf16 (défaut, déquant de la 139) | cublas (W8A8 int8, A8 par jeton fusionnée, copie signée transitoire de la 201)"),
+    Variable("I8C_COPIE", "xor", ("acvram.kernels", "_I8C_COPIE"), None,
+             "pièce 260 (au bit) : copie signée q − 128 du chemin cublas : xor (un noyau, 2 o/poids) | int16 (témoin : l'aller-retour int16 d'avant)"),
     Variable("COLLE_MOE", "torch", ("acvram.engine.moe", "_COLLE_MOE"), "torch",
              "colle du préfill MoE : torch (argsort + bincount + _tuiles) | triton (P0 : tri + histogramme et grille en deux lancements, mêmes tenseurs)"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),
@@ -591,7 +595,11 @@ def mrope_texte() -> Optional[str]:
 def prefill_i8c_texte() -> Optional[str]:
     """Pièce 139 : ``prefill_int8=bf16(origine fp8 ×N)`` quand le modèle chargé a des poids int8 ré-encodés du fp8 —
     servis W8A16 au préfill (déquant bf16), pas W8A8 cublas ; None sinon (la ligne du défaut ne bouge pas)."""
-    return f"prefill_int8=bf16(origine fp8 ×{_I8C_PREFILL_BF16})" if _I8C_PREFILL_BF16 else None
+    if not _I8C_PREFILL_BF16:
+        return None
+    from . import kernels                                   # 260 : l'opt-in cublas les sert en W8A8, nommé
+    mode = "cublas" if kernels._I8C_FP8_PREFILL == "cublas" else "bf16"
+    return f"prefill_int8={mode}(origine fp8 ×{_I8C_PREFILL_BF16})"
 
 
 def vision_texte() -> Optional[str]:
