@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# vllm-serveur — sert un modèle HF (BF16/FP8/AWQ/GPTQ) sur http://127.0.0.1:8000/v1.
+# Usage : vllm-serveur [chemin-modele] [max-model-len]
+# Défaut : Devstral-Small-2507 AWQ 4bit, 131072 tokens (contexte max du modèle), RTX 5090 seule.
+# (l'ancien défaut, Qwen3-Coder-30B AWQ 4bit, n'existe plus sur aucun disque — 19/09)
+set -uo pipefail
+
+DIR=/mnt/AI_GENERATOR/vLLM
+VLLM="$DIR/venv/bin/vllm"
+PORT=8000
+mkdir -p "$DIR"
+# clés d'API : fichier unique en 0600, hors sauvegardes (voir ~/.config/ia-secrets.env)
+[ -r "$HOME/.config/ia-secrets.env" ] && . "$HOME/.config/ia-secrets.env"
+CLE="${CLE_VLLM:-vllm-local}"
+MODELE="${1:-/mnt/4TO_SATACMR_2022/Modeles/models_awq/Devstral-Small-2507-AWQ}"
+LMAX="${2:-131072}"
+
+c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_d=''; c_v=''; c_r=''; c_0=''; }
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+
+# Option --afficher : affiche le backend d'attention choisi et quitte
+if [ "$1" = "--afficher" ]; then
+  MODELE="${2:-/mnt/4TO_SATACMR_2022/Modeles/models_awq/Devstral-Small-2507-AWQ}"
+  [ -e "$MODELE" ] || { err "Modèle introuvable : $MODELE"; exit 1; }
+  # Calcul du backend (copie de la logique principale)
+  ATTENTION="${VLLM_ATTENTION_BACKEND:-}"
+  exotique=$("${VLLM%/bin/vllm}/bin/python" - "$MODELE" <<'PYEOF3' 2>/dev/null
+import json, pathlib, sys
+try:
+    c = json.loads((pathlib.Path(sys.argv[1]) / "config.json").read_text())
+except Exception:
+    raise SystemExit(1)
+for cle in ("vision_config", "text_config", None):
+    d = c.get(cle) if cle else c
+    if not isinstance(d, dict): continue
+    h = d.get("head_dim")
+    if not h:
+        hs, nh = d.get("hidden_size"), d.get("num_heads") or d.get("num_attention_heads")
+        h = hs // nh if hs and nh else None
+    if h and h % 32:
+        print("oui"); break
+PYEOF3
+)
+  [ "$exotique" = oui ] && ATTENTION=""
+  printf '%sattention_backend=%s (default laisser vLLM choisir)%s\n' "$c_d" "${ATTENTION:-auto}" "$c_0"
+  exit 0
+fi
+
+[ -e "$MODELE" ] || { err "Modèle introuvable : $MODELE"; exit 1; }
+
+# ─── modèles au format Mistral natif ──────────────────────────────────────────
+# Devstral et consorts n embarquent pas de tokenizer HuggingFace mais un tekken.json :
+# sans ces trois options vLLM meurt sur « Either model_file or model_proto must be
+# specified », une erreur qui ne dit pas du tout ce qui manque.
+MISTRAL=()
+if [ -f "$MODELE/tekken.json" ] && [ ! -f "$MODELE/tokenizer_config.json" ]; then
+  MISTRAL=(--tokenizer-mode mistral)
+  printf '%sformat Mistral natif detecte (tekken.json)%s\n' "$c_d" "$c_0"
+  tp_force=mistral
+  # limite non lisible dans params.json : 65536 tient sur 32 Go pour un dense 24B
+  [ "$LMAX" -gt 65536 ] && LMAX=65536
+fi
+
+# ─── plafond de contexte réel ─────────────────────────────────────────────────
+# vLLM refuse de démarrer si max-model-len dépasse le contexte natif du modèle
+# (erreur DURE, pas d'ajustement). On lit la limite dans config.json et on plafonne :
+# un Devstral (40960) ou un ERNIE (32768) ne se sert pas comme un Qwen à 262144.
+natif=$("${VLLM%/bin/vllm}/bin/python" - "$MODELE" <<'PYEOF' 2>/dev/null
+import json, sys, pathlib
+d = pathlib.Path(sys.argv[1])
+# au format Mistral natif, vLLM lit params.json (max_seq_len) et IGNORE le
+# config.json HuggingFace, qui annonce parfois une valeur plus grande.
+pj = d / "params.json"
+if pj.exists() and not (d / "tokenizer_config.json").exists():
+    try:
+        v = json.loads(pj.read_text()).get("max_seq_len")
+        if v:
+            print(v); raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+try:
+    c = json.loads((d / "config.json").read_text())
+except Exception:
+    raise SystemExit(1)
+v = c.get("max_position_embeddings") or (c.get("text_config") or {}).get("max_position_embeddings")
+print(v or "")
+PYEOF
+)
+if [ -n "$natif" ] && [ "$natif" -gt 0 ] 2>/dev/null && [ "$LMAX" -gt "$natif" ]; then
+  printf '%scontexte ramené de %s à %s : c est le maximum de ce modèle%s\n' "$c_d" "$LMAX" "$natif" "$c_0"
+  LMAX="$natif"
+fi
+
+# ─── format des appels d'outils et du raisonnement, par modèle ────────────────
+# Servi avec le mauvais parseur, un modèle « fonctionne » mais ses appels d'outils
+# arrivent en texte brut : kimi ne voit aucun outil et le modèle paraît stupide.
+# Le raisonnement mal parsé fuit dans la réponse à chaque tour.
+# Surcharge possible : VLLM_TOOL_PARSER=... VLLM_REASONING_PARSER=... vllm-serveur ...
+nom_min=$(printf '%s' "$(basename "$MODELE")" | tr 'A-Z' 'a-z')
+case "$nom_min" in
+  *qwen3-coder*|*qwen3_coder*)      tp=qwen3_coder; rp="" ;;
+  *qwen3*thinking*|*qwen3.5*|*qwen35*|*qwen3.6*|*qwen36*)
+                                    tp=hermes;      rp=deepseek_r1 ;;
+  *devstral*|*mistral*|*magistral*|*dolphin*)
+                                    tp=mistral;     rp="" ;;
+  *ernie*)                          tp=hermes;      rp=deepseek_r1 ;;
+  *glm*)                            tp=glm45;       rp=glm45 ;;
+  *deepseek*v3.1*|*deepseek*v31*)   tp=deepseek_v31; rp=deepseek_r1 ;;
+  *deepseek*)                       tp=deepseek_v3; rp=deepseek_r1 ;;
+  *kimi*k2*|*kimi-linear*)          tp=kimi_k2;     rp="" ;;
+  *seed*oss*)                       tp=seed_oss;    rp=seed_oss ;;
+  *gpt*oss*)                        tp=openai;      rp=openai_gptoss ;;
+  *llama*)                          tp=llama3_json; rp="" ;;
+  *)                                tp=hermes;      rp="" ;;   # défaut le plus courant
+esac
+# le raisonnement est facultatif : un modèle Instruct servi avec un parseur de
+# raisonnement renvoie un reasoning_content vide, sans dommage — l'inverse est faux.
+case "$nom_min" in *thinking*|*reasoning*|*-r1*) : ;; *) [ -n "${VLLM_REASONING_PARSER-}" ] || rp="" ;; esac
+# Le nom de dossier ment souvent (un « -Thinking » sans balises, un « Qwen » au
+# format mistral). Le gabarit de chat, lui, dit la vérité : on le lit.
+lu=$("${VLLM%/bin/vllm}/bin/python" - "$MODELE" <<'PYEOF' 2>/dev/null
+import json, sys, pathlib
+d = pathlib.Path(sys.argv[1]); t = ""
+for n in ("tokenizer_config.json", "chat_template.jinja", "chat_template.json"):
+    f = d / n
+    if not f.exists(): continue
+    try:
+        if n.endswith(".jinja"): t = f.read_text(); break
+        j = json.loads(f.read_text())
+        t = j.get("chat_template") or ""
+        if isinstance(t, list): t = " ".join(x.get("template", "") for x in t)
+        if t: break
+    except Exception: pass
+if not t: sys.exit(1)
+# outils
+if   "[TOOL_CALLS]" in t:                          tp = "mistral"
+elif "<tool_call>" in t and "<function=" in t:     tp = "qwen3_coder"
+elif "<tool_call>" in t:                           tp = "hermes"
+elif "<|tool▁call" in t or "tool▁calls▁begin" in t: tp = "deepseek_v3"
+elif "<|tool_calls_section_begin|>" in t:          tp = "kimi_k2"
+elif "get_ipython" in t or "<|python_tag|>" in t:  tp = "llama3_json"
+else:                                              tp = ""
+print(tp)
+print("oui" if "<think>" in t or "</think>" in t or "reasoning_content" in t else "non")
+PYEOF
+)
+if [ -n "$lu" ]; then
+  tp_lu=$(printf '%s' "$lu" | sed -n 1p); pense=$(printf '%s' "$lu" | sed -n 2p)
+  [ -n "$tp_lu" ] && tp="$tp_lu"
+  # GLM et DeepSeek ont leur propre grammaire de raisonnement, sinon deepseek_r1
+  # couvre toutes les balises <think>…</think>.
+  if [ -z "$tp_lu" ]; then
+    printf '%sgabarit sans appel d outils : ce modele est un modele de conversation%s\n' "$c_d" "$c_0"
+    SANS_OUTILS=1
+  fi
+  if [ "$pense" = oui ]; then
+    case "$tp" in glm45) rp=glm45 ;; seed_oss) rp=seed_oss ;; openai) rp=openai_gptoss ;;
+                  *) [ -n "$rp" ] || rp=deepseek_r1 ;; esac
+  else
+    rp=""   # aucune balise dans le gabarit : un parseur de raisonnement viderait content
+  fi
+fi
+[ -n "${tp_force:-}" ] && { tp="$tp_force"; SANS_OUTILS=0; }
+tp="${VLLM_TOOL_PARSER:-$tp}"; rp="${VLLM_REASONING_PARSER:-$rp}"
+if [ "${SANS_OUTILS:-0}" = 1 ] && [ -z "${VLLM_TOOL_PARSER-}" ]; then
+  PARSEURS=()
+else
+  PARSEURS=(--enable-auto-tool-choice --tool-call-parser "$tp")
+fi
+[ -n "$rp" ] && PARSEURS+=(--reasoning-parser "$rp")
+
+# décharger l'exl3 TabbyAPI s'il occupe la VRAM
+admin_tabby=$(awk '/^admin_key:/{print $2}' /opt/ia/TabbyAPI/api_tokens.yml 2>/dev/null)
+[ -n "$admin_tabby" ] && curl -s -m 30 -X POST -H "Authorization: Bearer $admin_tabby" \
+  http://127.0.0.1:5000/v1/model/unload >/dev/null 2>&1
+
+# un seul gros moteur à la fois : stopper llama.cpp s'il tourne
+if [ -f /mnt/AI_GENERATOR/llamacpp/serveur.pid ]; then
+  kill "$(cat /mnt/AI_GENERATOR/llamacpp/serveur.pid)" 2>/dev/null && sleep 3
+fi
+# filet de sécurité : tuer le vrai propriétaire du port 8080 (pid-file parfois faux)
+p8080=$(ss -tlnp 2>/dev/null | grep '127.0.0.1:8080' | grep -oP 'pid=\K[0-9]+' | head -1)
+[ -n "$p8080" ] && { kill "$p8080" 2>/dev/null; sleep 4; kill -9 "$p8080" 2>/dev/null; }
+
+if [ -f "$DIR/serveur.pid" ]; then
+  ancien=$(cat "$DIR/serveur.pid")
+  kill "$ancien" 2>/dev/null && sleep 6
+  kill -9 "$ancien" 2>/dev/null
+fi
+
+# libère la VRAM des serveurs orphelins : un lanceur interrompu laisse son modèle
+# en mémoire et fait échouer le démarrage suivant en « cudaMalloc failed »
+[ -x "$HOME/.local/bin/liberer-vram" ] && "$HOME/.local/bin/liberer-vram" >/dev/null 2>&1
+
+# Tuer un moteur ne rend pas la VRAM instantanément : le pilote met plusieurs
+# secondes à récupérer 20 Go. Démarrer trop tôt échoue en « CUDA out of memory,
+# 291 MiB free » — une erreur qui accuse la taille du modèle alors que la carte
+# est simplement encore occupée par le précédent.
+for _ in $(seq 1 60); do
+  libre=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i 0 2>/dev/null | head -1)
+  [ -n "$libre" ] || break
+  [ "$libre" -gt 24000 ] 2>/dev/null && break
+  sleep 2
+done
+[ -n "${libre:-}" ] && printf '%s%s Mio libres sur la 5090%s\n' "$c_d" "$libre" "$c_0"
+
+LONGUEUR=(--max-model-len "$LMAX")
+
+# ─── cache KV en FP8 ──────────────────────────────────────────────────────────
+# Divise par deux l empreinte du cache KV : les contextes servis peuvent doubler
+# a VRAM egale (le VL passe de 73728 a 131072). Le prefix caching (actif par
+# defaut en V1) garde son effet : le prompt de base kimi (~54k tokens) n est
+# reencode qu au premier tour. KVDT=auto pour revenir au KV pleine precision.
+KVDT="${KVDT:-fp8}"
+KV_ARGS=()
+[ "$KVDT" != auto ] && KV_ARGS=(--kv-cache-dtype "$KVDT")
+# ─── moteur d attention ───────────────────────────────────────────────────────
+# FlashAttention refuse les tetes dont la dimension n est pas un multiple de 32.
+# L encodeur visuel de Qwen3-VL a des tetes de 72 : forcer FLASH_ATTN le fait mourir
+# sur « does not support headdim not being a multiple of 32 ». On laisse alors vLLM
+# choisir son moteur module par module.
+# un VLLM_ATTENTION_BACKEND pose par l appelant est respecte tel quel.
+# TRITON_ATTN par defaut (19/09) : FLASH_ATTN choisi avant n a pas de paquet
+# vllm_flash_attn installe, et FlashInfer (choix automatique du serveur si la
+# variable est vide) plante au demarrage sur ce venv (RTX 5090 sm_120) —
+# flashinfer_xqa_batch_decode_with_kv_cache indisponible, voir serveur.log.
+# Triton s importe sans dependance externe (verifie a sec).
+# 21/09 : laisser vLLM choisir par defaut (vide) pour bénéficier de FlashInfer si disponible.
+ATTENTION="${VLLM_ATTENTION_BACKEND:-}"
+FORCE_ATTENTION="${VLLM_ATTENTION_BACKEND:-}"
+exotique=$("${VLLM%/bin/vllm}/bin/python" - "$MODELE" <<'PYEOF3' 2>/dev/null
+import json, pathlib, sys
+try:
+    c = json.loads((pathlib.Path(sys.argv[1]) / "config.json").read_text())
+except Exception:
+    raise SystemExit(1)
+for cle in ("vision_config", "text_config", None):
+    d = c.get(cle) if cle else c
+    if not isinstance(d, dict): continue
+    h = d.get("head_dim")
+    if not h:
+        hs, nh = d.get("hidden_size"), d.get("num_heads") or d.get("num_attention_heads")
+        h = hs // nh if hs and nh else None
+    if h and h % 32:
+        print("oui"); break
+PYEOF3
+)
+[ "$exotique" = oui ] && { ATTENTION=""; printf '%stetes non multiples de 32 : moteur d attention laisse au serveur%s\n' "$c_d" "$c_0"; }
+# FlashAttention (FA2) ne lit pas un cache KV fp8 sur cette carte (sm_120) :
+# avec le KV fp8, laisser vLLM choisir son moteur d attention — mais seulement
+# pour FA2 : le laisser choisir retombe sur FlashInfer, indisponible sur cette
+# carte (19/09, flashinfer_xqa_batch_decode_with_kv_cache) ; TRITON_ATTN n a
+# pas cette limite FA2, on le garde tel quel avec le KV fp8.
+[ "$KVDT" != auto ] && [ "$ATTENTION" = FLASH_ATTN ] && [ -z "$FORCE_ATTENTION" ] && { ATTENTION=""; printf '%sKV fp8 : moteur d attention laisse au serveur%s\n' "$c_d" "$c_0"; }
+
+# VLLM_ATTENTION_BACKEND n existe plus en 0.29 (« Unknown vLLM environment
+# variable », vLLM retombe alors sur FlashInfer quoi qu on exporte) : le
+# choix passe desormais par --attention-backend en argument CLI (19/09).
+ATTN_ARGS=(); [ -n "$ATTENTION" ] && ATTN_ARGS=(--attention-backend "$ATTENTION")
+nom=$(basename "$MODELE")
+printf '%sDémarrage vLLM : %s (max %s tokens, outils=%s%s, RTX 5090)…%s\n' \
+  "$c_d" "$nom" "$LMAX" "$tp" "${rp:+, raisonnement=$rp}" "$c_0"
+# flashinfer (JIT) ne connaît pas sm_120 (Blackwell) : sampler natif + arche explicite
+export CUDA_DEVICE_ORDER=PCI_BUS_ID VLLM_USE_FLASHINFER_SAMPLER=0 TORCH_CUDA_ARCH_LIST="12.0+PTX"
+CMD=("$VLLM" serve "$MODELE" --served-model-name "$nom"
+  --host 127.0.0.1 --port "$PORT" --api-key "$CLE"
+  "${LONGUEUR[@]}" "${KV_ARGS[@]}" --gpu-memory-utilization 0.90 --max-num-seqs 16
+  "${ATTN_ARGS[@]}" "${PARSEURS[@]}" "${MISTRAL[@]}")
+# Le serveur PREND LE VERROU carte.sh (mode service) : sinon une mesure le croit
+# libre (trou du 21/09, REGLES § 2). Repli sans verrou, avec avertissement, si
+# carte.sh est introuvable.
+_ici=$(dirname "$(readlink -f "$0")")
+CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
+if [ -x "$CARTE_SH" ]; then
+  srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$nom" ACVRAM_SERVICE_LOG="$DIR/serveur.log" \
+            ACVRAM_CARTE="${ACVRAM_CARTE:-0}" "$CARTE_SH" "${CMD[@]}") \
+      || { err "carte.sh a refuse le verrou de la carte (voir ci-dessus)"; exit 1; }
+  echo "$srv_pid" > "$DIR/serveur.pid"
+else
+  err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
+  CUDA_VISIBLE_DEVICES=0 setsid nohup "${CMD[@]}" >> "$DIR/serveur.log" 2>&1 < /dev/null &
+  echo $! > "$DIR/serveur.pid"
+fi
+
+for _ in $(seq 1 240); do
+  if curl -s -m 2 -H "Authorization: Bearer $CLE" "http://127.0.0.1:$PORT/v1/models" 2>/dev/null | grep -q '"id"'; then
+    printf '%svLLM prêt sur 127.0.0.1:%s (%s)%s\n' "$c_v" "$PORT" "$nom" "$c_0"
+    exit 0
+  fi
+  kill -0 "$(cat "$DIR/serveur.pid")" 2>/dev/null || { err "vLLM mort au démarrage (voir $DIR/serveur.log)"; exit 1; }
+  sleep 3
+done
+err "vLLM n'a pas répondu en 720 s (voir $DIR/serveur.log)"
+exit 1

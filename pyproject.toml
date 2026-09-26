@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acvram"
+version = "0.7.5"
+description = "anticitoyen VRAM/RAM — passerelle d'inference compatible OpenAI, quantification par GPU et etagement VRAM->VRAM->RAM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "anticitoyen" }]
+dependencies = [
+    "torch>=2.7",
+    "numpy>=1.26",
+    "safetensors>=0.4.3",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "tokenizers>=0.20",
+    "huggingface-hub>=0.25",
+    "jinja2>=3.1",
+    "psutil>=5.9",
+]
+
+[project.urls]
+Homepage = "https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram"
+Funding = "https://buymeacoffee.com/anticitoyen"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "httpx>=0.27", "rich>=13"]
+nvml = ["nvidia-ml-py>=12.560"]
+# Gated DeltaNet (hybrides Qwen3-Next/kimi, `engine/gdn.py`) : noyaux Triton
+# de flash-linear-attention (chunk_gated_delta_rule au prefill, decodage du
+# lot en un lancement) ; transformers>=4.57 pour le repli torch_chunk quand
+# fla est absent — dependance optionnelle, aucune raison de l'imposer aux
+# deploiements qui ne servent pas ces familles.
+gdn = ["transformers>=4.57", "flash-linear-attention>=0.5"]
+# Tour de vision (`engine/vision.py` : AutoModelForImageTextToText ; `server/chat.py`
+# : PIL pour décoder les images). transformers y est INDISPENSABLE, pas optionnel
+# comme pour gdn : un modèle multimodal servi sans transformers échoue au chargement.
+# install.sh et le .deb incluent cet extra par défaut (le .deb épingle 5.17.0, la
+# version testée qui charge gemma4). Sans lui, `import transformers` manque au .venv
+# reconstruit et P3 échoue (trou du 21/09).
+vision = ["transformers>=4.57", "pillow>=10"]
+
+[project.scripts]
+acvram = "acvram.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["acvram*"]
+
+[tool.setuptools.package-data]
+acvram = ["kernels/**/*.cu", "kernels/**/*.cuh", "kernels/**/*.cpp", "kernels/**/*.h", "config/*.yaml", "data/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# T4 (poste7 20/09) : un test qui bloque devient un failed daté, jamais un poste bloqué (test_colle_moe[16] : 9 min
+# dans make_llir) — pytest-timeout, 300 s par test, méthode thread (les tests CUDA ne survivent pas à SIGALRM)
+addopts = "--timeout=300 --timeout-method=thread"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "gpu_requis: exige une carte CUDA avec au moins 4 Gio libres (sinon ignore)",
+    "debit_requis: mesure un debit — exige une carte au repos (sinon ignore)",
+    "a_sec: noyaux Triton interpretes (TRITON_INTERPRET) — carte visible, ignore ; passe CUDA_VISIBLE_DEVICES=",
+    "sans_extension: repli torch force (get_extension() -> None), tenseurs CPU, carte ou pas",
+    "pile_naturelle: disposition naturelle des experts (_stacks), pas Marlin (defaut servi depuis le 18/09)",
+]

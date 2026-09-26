@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=acvram
+GenericName=Serveur d'inférence LLM
+GenericName[en]=LLM inference server
+Comment=Console native du serveur d'inférence acvram — modèles, cartes, capteurs et températures
+Comment[en]=acvram inference server console
+Exec=acvram-gui
+Icon=acvram
+Terminal=false
+Categories=Science;
+Keywords=llm;inference;gpu;nvfp4;int4;quantification;
+StartupNotify=true
+Actions=web;
+
+[Desktop Action web]
+Name=Ouvrir dans le navigateur
+Exec=acvram-console

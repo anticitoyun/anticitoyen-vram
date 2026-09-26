@@ -1,0 +1,13 @@
+Package: acvram-parc
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: python3 (>= 3.11), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, curl
+Recommends: acvram (>= 0.6.31)
+Maintainer: Anticitoyen <anticitoyen@users.noreply.gitlab.com>
+Description: menus claude-modele(s) et kimi-modele(s), modeles-a-jour et parc-installer
+ Paquet séparé d'acvram : les menus de modèles (GTK4/libadwaita) ne touchent pas la carte.
+ Aucun chemin de machine dans /usr : l'installateur par utilisateur (parc-installer)
+ détecte GPU, moteurs et racines de modèles et écrit ~/.config/acvram-parc/parc.toml,
+ fusionne ~/.kimi-code/config.toml sans jamais l'écraser et active le minuteur modeles-a-jour.

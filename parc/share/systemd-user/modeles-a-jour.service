@@ -1,0 +1,8 @@
+[Unit]
+Description=Chemins des menus claude-modele / kimi-modele à jour
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/bin/sh -c 'date "+%%F %%T" >> %h/.local/share/modeles-a-jour.log; %h/.local/bin/modeles-a-jour --appliquer >> %h/.local/share/modeles-a-jour.log 2>&1 || true'

@@ -1,0 +1,15 @@
+# poste7 — M4 (pièce 3, routeur un nœud) FAUX : ma prédiction est réfutée, niveau 3 se ferme sur 2a-bis seul (20/09, 12 h 22, horloge machine)
+
+Verdict poste2 0c824f34 (`verdict-n3-piece3-20-09`, a925c40e) : (0) juste (0/4 096 top-k différents, ratio des termes 0,046 < témoin 0,073), (1) −138 nœuds exacts, (2) capture 4/4, **(3) FAUX** : pas b=1 B = A + 0,271 ms (6,89 → 7,15, résolution 0,040), J_B 1,491 > J_A 1,466.
+
+## Ce qui est réfuté, mot pour mot
+Ma prédiction (`poste7-tests-rapides-cloture-20-09` M4, réécrite 09 h 31) : « −138 ± 14 nœuds, −0,15 ± 0,05 ms ». Les nœuds sont tenus, le pas est faux de +0,42 ms sur la prédiction. Cause lue dans le verdict : `_route_x_kernel` 14,8 µs par lancement contre 6,0 µs pour la chaîne qu'il remplace (cuBLAS gemv + reduce + `_route_fusee`) → +0,41 ms de noyaux sur 46 couches, contre −0,14 ms rendus par les 138 lancements retirés (1,0 µs/nœud, dans la fourchette 0,5-1,0). **Ma faute de prédiction** : j'ai compté les nœuds et pas le noyau — « un programme par jeton, produits fp32 exacts + `tl.sum`, sélection sérielle » (poste1 09 h 30) est une sélection top-k **sérielle** sur un seul programme : 14,8 µs, c'est le prix d'un tri séquentiel de 64 experts par un programme, et il se lisait dans la fiche avant la prise. REGLES § 3 (occupation prédite → ptxas avant la carte) a un jumeau : **un noyau « un programme par jeton » se chronomètre à sec au banc de son seul lancement avant la carte** — 14,8 contre 6,0 aurait coûté 0 min de carte. À écrire dans REGLES § 3 (chef).
+
+## Décisions
+* **Pièce 3 close, `ROUTEUR_FUSE` opt-in nommé** (chef l'a fait, ae669a17) ; **0.6.32 = `MLA_GLUE=2` seul** (3a9afe77), bras + GLM b=1 servi prédit 163 ± 3 inchangés.
+* **Niveau 3 GLM : PARTIEL, clos pour « terminé »** — 2a-bis tenu (−611 nœuds, −0,819 ms, 165,2 t/s certifie) ; scellé global « ≤ 1 200 nœuds » **non atteint** (1 553) et il ne se rouvre pas. La cellule GLM b=1 du comparatif (≈ 163 contre vLLM 183,5) est **T2 « hors périmètre, cause chiffrée »** : pas 6,05 ms = noyaux ≈ 3,9 + 1 553 nœuds × ≈ 1,0 µs (≈ 1,5 ms) + hôte ≈ 0,6 ; les 20,5 t/s manquants valent −0,75 ms, soit ≈ 750 nœuds ou un routeur à ≤ 5 µs **et** −400 nœuds — aucune pièce ≤ 15 min ne le rend.
+* **Reprise (après terminé, si l'utilisateur la veut)** : route_x en top-k **coopératif** (un warp par jeton, sélection par `tl.max` itératif ou bitonique sur 64 experts), scellé écrit maintenant : ≤ 5,0 µs/lancement **au banc à sec du seul noyau** avant toute prise ; > 6,0 → clos définitivement. Coût poste1 0,5 j ; gain si tenu : −0,05 ms de noyaux et −0,14 ms de nœuds = −0,19 ± 0,05 ms (163 → 168 t/s), pas de quoi rejoindre 183,5.
+
+## Ordre
+* **chef** — REGLES § 3 : la ligne « noyau un programme par jeton : banc à sec de son lancement avant la carte (M4, 14,8 contre 6,0 µs) » ; ETAT : niveau 3 PARTIEL clos, GLM b=1 = T2 hors périmètre chiffré ; suite inchangée : T4 (12:16:37) → .deb 0.6.32 → bras + GLM b=1 servi → installation → terminé.
+* **poste1, poste2** — rien de neuf ; la reprise route_x coopérative n'est pas ouverte.

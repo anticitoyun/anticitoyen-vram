@@ -1,0 +1,19 @@
+# Pièce 53 — six couches en bf16 au chargement (alias hybride par manifeste, 0 conversion) : kl_max 4,04, 3/5 — le remède « par couche » TOMBE, l'erreur est portée par les activations, pas par ces poids — 22/09 (poste5)
+
+* instrument : `scratchpad/poste5-p53-22-09/construire-hybride.py` (manifeste de `nvfp4-vision` avec les 84 tenseurs des couches 0, 39, 51, 52, 56, 57 repris de `bf16-vision`, shards liés symboliquement, contrôle des en-têtes safetensors : 0 clé manquante) → alias `gemma-4-31B-it-nvfp4-vision-6bf16-p53` ; `outils/gpu/mesure/kl-gabarit.py acvram|hidden|divergence`, mêmes 5 invites et mêmes dumps HF que la pièce 52
+* commit : arbre 66830f9d (+ correctif manifeste 1er chargement, spec `model` écrasée : résultat nommé, 2 s de carte perdues)
+* régime : **DÉGRADÉ, déclaré par le moteur** — +5,7 Gio de bf16 → `couches_exilées=7/60`, `graphes=off`, `prefill=bf16(coupé@256)` : arithmétique inchangée (prefill seul, logits aux positions de réponse), vitesse sans objet ici ; eco 2700 ; compute-apps début = fin ; carte cédée à personne (poste3 n'a pas demandé)
+* scellé (poste5.md 66830f9d, avant) : chef — kl_max ≤ 1,5 ET 3-4/5 ; moi — erreur résiduelle finale ≤ 0,20 et sauts des six couches < 0,02 ; **faux si** kl_max ≥ 2,5 sur l'invite 0 ou 4, ou si les sauts se déplacent (erreur ≥ 0,35 à la couche 57)
+* mesuré :
+
+| alias | kl_max (invites 0-4) | kl_moy | tenu | err. résiduelle c57 / après c59 |
+|---|---|---|---|---|
+| nvfp4-vision (pièce 52) | 3,17 · 0,67 · 1,01 · 0,02 · 2,84 | 0,19 · 0,08 · 0,09 · 0,00 · 0,26 | 2/5 | 0,41 / 0,25 |
+| **hybride 6 couches bf16** | **3,18 · 0,62 · 0,63 · 0,05 · 4,04** | 0,23 · 0,07 · 0,06 · 0,00 · 0,24 | **3/5** | **0,32 / 0,22** |
+
+  Divergence par couche de l'hybride (contre bf16-vision) : couche 0 → 0,000 mais **couche 1 : +0,058** (l'erreur réapparaît à la couche suivante, même amplitude qu'avant) ; **couche 52, désormais bf16 : saut +0,078** (0,103 avant), 51 : +0,038 (0,048), 56 : +0,016, 57 : +0,006 ; le plateau 21-50 est inchangé (0,027 → 0,187). Les six couches remplacées portaient ≈ 0,09 d'erreur propre sur 0,41 : le reste des « sauts » est l'AMPLIFICATION par ces couches d'une erreur venue d'amont.
+* verdict : **remède RÉFUTÉ** (kl_max 4,04 > 1,5 ; invite 0 inchangée à 3,18 ; invite 4 pire) — pas de reconversion, pas de `--couches-int8`. Le 3/5 tenu vient de l'invite 2 (1,01 → 0,63), un gain réel mais marginal. Lecture : la sensibilité de la pièce 52 était bien concentrée sur ces couches, mais comme AMPLIFICATEURS (couches 51-52 et 56-57 multiplient l'erreur résiduelle qui les traverse, couche 52 toujours +0,078 en bf16), pas comme sources ; la source est répartie sur les 54 autres couches (erreur relative 2-3 % dès la couche 10, croissance régulière 21 → 50). C'est l'issue que j'avais nommée « réfuté si les sauts se déplacent → remède global ». Borne supérieure : int8 sur ces six couches ferait au mieux ce que bf16 fait ici.
+* durée : 34 + 12 + 2 + 1 s de carte (4 prises), 0 conversion, ≈ 10 min de travail à sec ; verrou rendu 23 h 07, carte LIBRE
+
+## Suite proposée (à chef), toujours par manifeste hybride, 0 conversion
+1. **Attention bf16 partout, MLP nvfp4** (60 × 4 projections ; +11 Gio → exil, ≈ 2 min de carte) : borne supérieure de `--attn-qkvo-int8-canal` sur ce modèle (o_proj est le pire tenseur partout, 21,4-21,6 dB) ; prédit : erreur c57 0,41 → ≤ 0,25 et 4/5 si l'attention porte l'erreur répartie, sinon ≤ 3/5 et c'est le MLP. 2. **MLP bf16 partout, attention nvfp4** : le bras symétrique. Les deux ensemble départagent la source en 5 min de carte, et disent quelle conversion (int8 attention, ou plus de bits sur les MLP) vaut ses heures. 3. Calibration AWQ sous gabarit (le 31B a été calibré sur texte brut, que ce modèle -it ne « lit » pas — pièce 37) : hypothèse, à chiffrer à sec sur les statistiques d'activation avant toute conversion.

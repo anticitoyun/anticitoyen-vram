@@ -1,0 +1,17 @@
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+0	seule	64	4096	922.4	1	0	0.00	268.3	0.0	266	44	puissance	bridage pendant la fenêtre : puissance
+2048	seule	64	4096	1199.9	2	0	0.00	352.3	0.0	288	43	aucun	aucune
+2048	seule	64	4096	1311.2	2	0	0.00	382.8	0.0	267	44	aucun	carte 0 : les processus ont changé ([2109365, 2110123, 2110756] -> [2109365, 2110123, 2110674, 2110756])
+0	seule	64	4096	857.7	1	0	0.00	278.1	0.0	275	45	puissance	carte 0 : les processus ont changé ([2109365, 2110674, 2110993] -> [2109365, 2110993]) ; bridage pendant la fenêtre : puissance
+0	seule	64	4096	878.4	1	0	0.00	272.5	0.0	267	44	puissance	bridage pendant la fenêtre : puissance
+2048	seule	64	4096	1207.5	2	0	0.00	402.6	0.0	286	45	puissance	bridage pendant la fenêtre : puissance
+2048	seule	64	4096	1247.6	2	0	0.00	392.8	0.0	278	45	puissance	carte 0 : les processus ont changé ([2109365, 2112876, 2113216] -> [2109365, 2112876, 2113216, 2113421]) ; bridage pendant la fenêtre : puissance
+0	seule	64	4096	551.7	1	0	0.00	143.5	0.0	231	42	puissance	carte 0 : les processus ont changé ([2113421, 2113609] -> [2113609]) ; bridage pendant la fenêtre : puissance
+0	seule	64	8192	823.6	1	0	0.00	257.2	0.0	252	48	puissance	bridage pendant la fenêtre : puissance
+1024	seule	64	8192	1750.6	8	0	0.00	479.1	0.0	263	45	puissance	bridage pendant la fenêtre : puissance
+1024	seule	64	8192	1745.7	8	0	0.00	486.0	0.0	267	46	puissance	bridage pendant la fenêtre : puissance
+0	seule	64	8192	823.1	1	0	0.00	266.0	0.0	260	49	puissance	bridage pendant la fenêtre : puissance
+0	lot	64	32768	2531.9	8	0	0.00	925.8	0.0	354	50	puissance	bridage pendant la fenêtre : puissance
+0	lot	64	32768	2527.8	8	0	0.00	924.8	0.0	354	51	puissance	bridage pendant la fenêtre : puissance
+2048	lot	64	32768	4717.5	14	0	0.00	1511.4	0.0	313	48	puissance	bridage pendant la fenêtre : puissance
+2048	lot	64	32768	4717.7	14	0	0.00	1518.4	0.0	315	48	puissance	bridage pendant la fenêtre : puissance

@@ -1,0 +1,64 @@
+# Manifeste Flathub d'acvram (console native acvram-gui + lanceur acvram-console) — pièce 236, 26/09/2026.
+# Construit SANS réseau : toutes les roues Python sont des sources `file` (python3-modules.json généré par
+# sources-pypi.py, roues binaires seulement — 266 d ; torch-cu130.json = roues PyTorch cu130 et bibliothèques NVIDIA, voir README.md).
+# CUDA : le pilote vient de l'extension org.freedesktop.Platform.GL.nvidia-<version> (posée par flatpak d'après le pilote
+# de l'hôte) ; les bibliothèques CUDA côté application (cudart, cublas, cusparse, cufft, curand, nvrtc, nvjitlink) sont
+# celles des roues nvidia-* de PyTorch, sous /app/lib/python3.14/site-packages/nvidia (Python du runtime : PYTHON_RUNTIME, 266 e). Les noyaux d'acvram ne se
+# compilent PAS dans le bac à sable (pas de nvcc) : ils arrivent PRÉCOMPILÉS (module acvram-noyaux, cache par empreinte).
+id: io.github.anticitoyen.acvram
+runtime: org.gnome.Platform
+runtime-version: "51"
+sdk: org.gnome.Sdk
+command: acvram-gui
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --share=network                     # serveur HTTP local (/v1), console web, téléchargement de modèles (huggingface)
+  - --device=all                        # CUDA : /dev/nvidia0, /dev/nvidiactl, /dev/nvidia-uvm (--device=dri ne suffit pas)
+  - --filesystem=home:ro                # répertoires de modèles de l'utilisateur (lecture seule : acvram n'écrit jamais dans un modèle)
+  - --filesystem=/mnt:ro                # parcs de modèles sur disques montés
+  - --filesystem=/media:ro
+  - --filesystem=xdg-config/acvram:create   # ~/.config/acvram/modeles (liste des modèles connus de la console)
+  - --filesystem=xdg-cache/acvram:create    # cache des noyaux Triton et des poids déquantifiés
+  - --talk-name=org.freedesktop.Notifications
+  - --env=PYTHONPATH=/app/extra/site-packages   # 266 i : torch + fermeture CUDA en extra-data (dépaquetées à l'installation) ; torch y trouve nvidia/*
+  - --env=ACVRAM_KERNELS_PRECOMPILES=/app/lib/acvram/noyaux   # noyaux CUDA précompilés (240 : chargés sans nvcc ni ninja)
+  - --env=TRITON_CACHE_DIR=/var/cache/acvram/triton    # → xdg-cache/acvram
+cleanup:
+  # 266 h : cudnn, nccl, nvshmem, cusparselt ne se retirent PLUS — libtorch_cuda.so (2.14 cu130) les lie, import torch impossible sans
+  - /include
+  - "*.a"
+modules:
+  - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py ; 273 : extra vision — transformers, pillow)
+  - torch-cu130.json                    # torch 2.14 cu130 + fermeture CUDA en EXTRA-DATA (sources-torch.sh, 266 i : ≈ 2,9 Go tirés à l'installation)
+  - name: acvram-noyaux
+    # Noyaux CUDA d'acvram (acvram_kernels.so) compilés HORS bac à sable pour sm_120 (RTX 5090) — et sm_89/sm_86 si publiés — par la
+    # CI : `python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0` (241, job-noyaux-precompiles.yml) ; un sous-dossier
+    # par empreinte de source, relu par kernels._precompile_utilisable (240). Le port Marlin se compile à sec par empreinte (161) : à suivre.
+    buildsystem: simple
+    build-commands:
+      - install -d /app/lib/acvram/noyaux
+      - cp -r noyaux/. /app/lib/acvram/noyaux/
+    sources:
+      - type: dir
+        path: ../../build/noyaux         # produit par la CI ; absent = construction refusée (mieux qu'un repli lent silencieux)
+        dest: noyaux
+  - name: acvram
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --no-index --no-deps --no-build-isolation --prefix=/app .
+      - install -Dm755 packaging/acvram-gui /app/bin/acvram-gui
+      - install -Dm755 packaging/acvram-console /app/bin/acvram-console
+      - install -d /app/share/acvram/galerie /app/share/acvram/langues
+      - cp packaging/galerie/* /app/share/acvram/galerie/
+      - cp packaging/langues/* /app/share/acvram/langues/
+      - install -Dm644 pyproject.toml /app/share/acvram/pyproject.toml
+      - install -Dm644 packaging/acvram.desktop /app/share/applications/io.github.anticitoyen.acvram.desktop
+      - sed -i 's/^Icon=acvram$/Icon=io.github.anticitoyen.acvram/' /app/share/applications/io.github.anticitoyen.acvram.desktop
+      - install -Dm644 packaging/acvram.svg /app/share/icons/hicolor/scalable/apps/io.github.anticitoyen.acvram.svg
+      - install -Dm644 packaging/flathub/io.github.anticitoyen.acvram.metainfo.xml /app/share/metainfo/io.github.anticitoyen.acvram.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+        skip: [construction-flatpak, repo, .flatpak-builder]   # 266 c : ce que flatpak-builder écrit lui-même, en CI, à la racine du dépôt
