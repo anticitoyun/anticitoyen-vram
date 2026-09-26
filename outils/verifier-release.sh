@@ -7,7 +7,9 @@
 #     outils/verifier-release.sh v0.7.0                       # télécharge (gh) dans ~/.cache/acvram/releases/v0.7.0
 #     outils/verifier-release.sh v0.7.0 --dossier /chemin      # ailleurs (jamais /tmp : un rejeu doit retrouver les fichiers)
 #     outils/verifier-release.sh v0.7.0 --simule /dossier      # release simulée : pas de gh, les fichiers sont déjà là
-#     ... --sans-flatpak                                       # saute l'installation Flatpak (longue : runtime GNOME)
+#     ... --sans-flatpak                                       # saute le bras Flatpak (installation ET doctor)
+#     ... --flatpak-installer                                   # bras Flatpak : installation seule (≈ 3 Go tirés par extra-data), SANS carte
+#     ... --flatpak-doctor                                      # bras Flatpak : doctor seul, installation déjà faite — sous carte.sh
 #
 # Sortie : une ligne par contrôle, `OK` / `MANQUE` / `FAUX` / `SAUTÉ`, puis `VERDICT: TENU` (code 0) ou `FAUX` (1).
 # Ce que ce script NE prouve PAS : que le .deb s'installe (dpkg-deb --info/--contents seulement, pas d'installation),
@@ -22,6 +24,8 @@ while [ $# -gt 0 ]; do
     --dossier) DOSSIER=$2; shift 2 ;;
     --simule) SIMULE=$2; shift 2 ;;
     --sans-flatpak) FLATPAK=0; shift ;;
+    --flatpak-installer) FLATPAK=installer; shift ;;
+    --flatpak-doctor) FLATPAK=doctor; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     v*) TAG=$1; shift ;;
     *) echo "argument inconnu : $1" >&2; exit 64 ;;
@@ -70,7 +74,7 @@ echo "dossier : $DOSSIER"
 
 # ---- 2. présence et nom de chaque fichier annoncé par release.yml (un seul de chaque) ---------------------------
 # job deb → acvram_<V>_amd64.deb ; rpm → acvram-<V>-*.noarch.rpm + acvram-<V>-*.src.rpm ; aur → aur-<V>.tar.gz ;
-# flatpak → acvram-<V>.flatpak ; translations → translations-<V>.zip
+# flatpak → acvram-<V>.flatpakref (266 i : dépôt OSTree gh-pages, plus de bundle) ; translations → translations-<V>.zip
 TROUVE=""
 un_seul() {   # un_seul <libellé> <motif glob> → TROUVE = le chemin (vide si absent ou ambigu), une ligne OK/MANQUE/FAUX
   local lib=$1 motif=$2; local -a f=( $DOSSIER/$motif ); TROUVE=""
@@ -82,7 +86,8 @@ un_seul "deb" "acvram_${V}_amd64.deb";          DEB=$TROUVE
 un_seul "rpm" "acvram-${V}-*.noarch.rpm";       RPM=$TROUVE
 un_seul "src.rpm" "acvram-${V}-*.src.rpm";      SRPM=$TROUVE
 un_seul "aur" "aur-${V}.tar.gz";                AUR=$TROUVE
-un_seul "flatpak" "acvram-${V}.flatpak";        FLAT=$TROUVE
+un_seul "flatpak" "acvram-${V}.flatpakref";     FLAT=$TROUVE
+[ -e "$DOSSIER/acvram-${V}.flatpak" ] && faux "flatpak : l'ancien bundle acvram-${V}.flatpak est encore joint (266 i : à retirer, > 2 Gio et sans extra-data)"
 un_seul "translations" "translations-${V}.zip"; TRAD=$TROUVE
 
 # ---- 3. sommes publiées (si release.yml en produit) ; sinon les sommes calculées, pour le registre ---------------
@@ -141,24 +146,30 @@ if [ -n "$TRAD" ]; then
   [ "${N:-0}" -gt 0 ] && ok "translations : $N fichiers" || faux "translations : archive vide ou illisible"
 fi
 
-# ---- 8. Flatpak : installation utilisateur SÉPARÉE, puis acvram doctor dans le bac à sable ------------------------
+# ---- 8. Flatpak : installation par le .flatpakref (dépôt OSTree + extra-data) dans une installation utilisateur SÉPARÉE,
+#         puis acvram doctor dans le bac à sable — séparables (--flatpak-installer sans carte, --flatpak-doctor sous carte.sh)
 if [ -n "$FLAT" ]; then
-  if [ "$FLATPAK" = 0 ]; then saute "flatpak : installation non demandée (--sans-flatpak)"
+  if [ "$FLATPAK" = 0 ]; then saute "flatpak : bras non demandé (--sans-flatpak)"
   elif ! command -v flatpak >/dev/null; then saute "flatpak : commande absente"
   else
     export FLATPAK_USER_DIR="$DOSSIER/flatpak-user"      # jamais ~/.local/share/flatpak : rien sur l'installation de l'utilisateur
     mkdir -p "$FLATPAK_USER_DIR"
-    flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
-    # --reinstall : un rejeu sur la même installation dédiée ne doit pas rendre FAUX pour « already installed »
-    if flatpak install --user --noninteractive -y --reinstall --bundle "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
-      ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1))"
-      # verif-070 : `flatpak run` garde le cwd de l'appelant ; lancé depuis le dépôt, acvram (_garde_arbre) refuse d'être
-      # importé depuis /app quand le cwd est dans un arbre acvram — le bac à sable se lance depuis le dossier de la release
+    grep -q '^GPGKey=' "$FLAT" && ok "flatpak : dépôt signé (GPGKey dans le .flatpakref)" || saute "flatpak : dépôt NON signé (pas de GPGKey) — --no-gpg-verify"
+    if [ "$FLATPAK" != doctor ]; then
+      flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
+      # --reinstall : un rejeu sur la même installation dédiée ne doit pas rendre FAUX pour « already installed »
+      if flatpak install --user --noninteractive -y --reinstall --from "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
+        ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)) — extra-data : $(flatpak run --user --command=sh "$APP" -c 'wc -l < /app/extra/apply_extra.ok' 2>/dev/null || echo '?') paquets dépaquetés"
+      else faux "flatpak : installation échouée (flatpak-install.log)"; tail -n5 "$DOSSIER/flatpak-install.log" | sed 's/^/        /'; fi
+    fi
+    if [ "$FLATPAK" != installer ]; then
+      # `flatpak run` garde le cwd de l'appelant ; lancé depuis le dépôt, acvram (_garde_arbre) refuse d'être importé depuis
+      # /app quand le cwd est dans un arbre acvram — le bac à sable se lance depuis le dossier de la release
       if (cd "$DOSSIER" && flatpak run --user --command=acvram "$APP" doctor) >"$DOSSIER/flatpak-doctor.txt" 2>&1; then
         ok "flatpak : acvram doctor dans le bac à sable (flatpak-doctor.txt)"
-        grep -i -E 'noyau|kernel|précompil|precompil' "$DOSSIER/flatpak-doctor.txt" | head -n5 | sed 's/^/        /'
+        grep -i -E 'noyau|kernel|précompil|precompil|cuda' "$DOSSIER/flatpak-doctor.txt" | head -n6 | sed 's/^/        /'
       else faux "flatpak : acvram doctor a échoué (flatpak-doctor.txt)"; tail -n5 "$DOSSIER/flatpak-doctor.txt" | sed 's/^/        /'; fi
-    else faux "flatpak : installation échouée (flatpak-install.log)"; tail -n5 "$DOSSIER/flatpak-install.log" | sed 's/^/        /'; fi
+    fi
   fi
 fi
 

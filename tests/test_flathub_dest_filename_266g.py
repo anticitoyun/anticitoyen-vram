@@ -45,7 +45,8 @@ def test_les_modules_generes_portent_dest_filename(tmp_path):
 
 def test_sources_torch_utilise_source_de_roue():
     t = (FLATHUB / "sources-torch.sh").read_text(encoding="utf-8")
-    assert "_m.source_de_roue(" in t and '"type": "file", "url": url' not in t
+    # 266 g : source `file` par source_de_roue ; 266 i : source `extra-data` par source_extra_data — les deux décodent le nom
+    assert ("_m.source_de_roue(" in t or "_t.source_extra_data(" in t) and '"type": "file", "url": url' not in t and '"type": "extra-data", "url"' not in t
 
 
 @pytest.mark.parametrize("fichier", ["python3-modules.json", "torch-cu130.json"])

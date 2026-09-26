@@ -38,24 +38,28 @@ subprocess.check_call([sys.executable, "-m", "pip", "download", "--only-binary=:
 deja = set()
 if os.path.exists("python3-modules.json"):
     deja = {m["name"] for m in json.load(open("python3-modules.json", encoding="utf-8"))["modules"]}
-mods = []
+# 266 i : livraison par DÉPÔT OSTree (gh-pages) — torch et sa fermeture (≈ 2,9 Go) sont des sources `extra-data`, téléchargées
+# à l'INSTALLATION depuis download.pytorch.org et PyPI (sha256 + taille vérifiés par flatpak), puis dépaquetées par `apply_extra`
+# dans /app/extra/site-packages avec le python3 du runtime (zip, pas de pip). Un bundle unique ne porte pas les extra-data
+# (« Extra data missing in detached metadata », prouvé) : d'où le dépôt + .flatpakref. Un fichier de release GitHub ≤ 2 Gio.
+sources, roues = [], []
 for w in sorted(glob.glob(os.path.join(d, "*.whl"))):
-    nom = os.path.basename(w).split("-")[0]
+    fichier = os.path.basename(w); nom = fichier.split("-")[0]
     if "python3-" + nom.replace("_", "-").lower() in deja or nom.replace("_", "-").lower() in exclues:
         continue
-    if not _m.roue_compatible(os.path.basename(w), pyv):     # 266 e : cpXY / abi3 / none, jamais cpXYt
-        raise SystemExit(f"{os.path.basename(w)} : roue incompatible avec le Python {pyv} du runtime")
+    if not _m.roue_compatible(fichier, pyv):     # 266 e : cpXY / abi3 / none, jamais cpXYt
+        raise SystemExit(f"{fichier} : roue incompatible avec le Python {pyv} du runtime")
     sha = hashlib.sha256(open(w, "rb").read()).hexdigest()
-    # 266 b : l'URL vient de l'index (PEP 503, roue_url.py) — l'ancien appel passait à `pip download` une option
-    # qu'il n'a pas (elle n'existe que pour `pip install`) : job flatpak de la v0.7.0 rouge, étape « sources Python »
-    url = url_de_la_roue(os.path.basename(w), index, sha)
-    mods.append({"name": "python3-" + nom.replace("_", "-").lower(), "buildsystem": "simple",
-                 "build-commands": [f"pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${{PWD}}\" --prefix=${{FLATPAK_DEST}} --no-deps \"{nom}\" --no-build-isolation"],
-                 "sources": [_m.source_de_roue(os.path.basename(w), url, sha)]})   # 266 g : dest-filename décodé (« + », pas « %2B »)
-manquantes = _t.elagage_couvert(metadata, pyv, {m["name"][len("python3-"):] for m in mods} | {n[len("python3-"):] for n in deja})
+    url = url_de_la_roue(fichier, index, sha)   # 266 b : PEP 503
+    sources.append(_t.source_extra_data(fichier, url, sha, os.path.getsize(w)))
+    roues.append(fichier)
+mods = [{"name": "torch-cu130", "buildsystem": "simple",
+         "build-commands": ["install -Dm755 apply_extra /app/bin/apply_extra"],
+         "sources": [{"type": "script", "dest-filename": "apply_extra", "commands": _t.APPLY_EXTRA}] + sources}]
+manquantes = _t.elagage_couvert(metadata, pyv, {r.split("-")[0].replace("_", "-").lower() for r in roues} | {n[len("python3-"):] for n in deja})
 if manquantes:
     raise SystemExit(f"266 h : dépendances CUDA de torch ni émises ni élaguées : {manquantes}")
 json.dump({"name": "torch-cu130", "buildsystem": "simple", "build-commands": [], "modules": mods},
           open("torch-cu130.json", "w"), indent=2)
-print(len(mods), "modules →", "torch-cu130.json", "; taille roues", sum(os.path.getsize(w) for w in glob.glob(os.path.join(d, "*.whl"))) // 2**20, "Mio")
+print(len(roues), "roues en extra-data →", "torch-cu130.json", "; taille à l'installation", sum(s["size"] for s in sources) // 2**20, "Mio")
 PY

@@ -4,8 +4,20 @@ les lignes « nvidia-* ». Depuis cu130, torch déclare ses bibliothèques CUDA 
 les seules lignes `nvidia-*` restantes sont cudnn, cusparselt, nccl, nvshmem — exactement l'élagage de la 236 b. Le filtre
 « Requires-Dist: nvidia » de la 236 ne voyait donc plus rien : le bundle v0.7.0 n'avait aucune bibliothèque CUDA
 (« libcublasLt.so not found », verif-070). Pur, testé à sec sur la métadonnée réelle (tests/test_flathub_torch_deps_266h.py)."""
+import urllib.parse
+
 from packaging.markers import Marker
 from packaging.requirements import Requirement
+
+# 266 i : `apply_extra`, joué par flatpak à l'installation dans /app/extra (cwd) — dépaquette chaque roue (zip) dans
+# site-packages avec le python3 du runtime (pas de pip dans org.gnome.Platform), puis retire la roue ; `apply_extra.ok`
+# liste ce qui a été posé (lu par verifier-release.sh). Aucun réseau ici : flatpak a déjà téléchargé et vérifié les fichiers.
+APPLY_EXTRA = [
+    "set -e",
+    "mkdir -p site-packages",
+    "for w in *.whl; do python3 -m zipfile -e \"$w\" site-packages && rm -f \"$w\"; done",
+    "ls site-packages > apply_extra.ok",
+]
 
 # Élagage : VIDE depuis la 266 h. La 236 b retirait cudnn, cusparselt, nccl et nvshmem (« inutilisés par acvram ») — mais
 # libtorch_cuda.so de torch 2.14.0+cu130 les LIE (ldd : libcudnn.so.9, libnccl.so.2, libcusparseLt.so.0, libnvshmem_host.so.3)
@@ -14,6 +26,14 @@ from packaging.requirements import Requirement
 ELAGAGE: dict[str, str] = {}
 ENV_RUNTIME = {"platform_system": "Linux", "sys_platform": "linux", "os_name": "posix", "platform_machine": "x86_64",
                "implementation_name": "cpython", "platform_python_implementation": "CPython"}
+
+
+def source_extra_data(fichier: str, url: str, sha256: str, taille: int) -> dict:
+    """Source `extra-data` d'une roue : nom décodé (266 g), URL, sha256 et taille — flatpak refuse le fichier si l'un diffère."""
+    fichier = urllib.parse.unquote(fichier)
+    if "%" in fichier or not fichier.endswith(".whl") or len(fichier[:-4].split("-")) < 5 or taille <= 0:
+        raise ValueError(f"{fichier} : nom de roue ou taille invalide pour une extra-data")
+    return {"type": "extra-data", "filename": fichier, "url": url, "sha256": sha256, "size": int(taille), "only-arches": ["x86_64"]}
 
 
 def requires_dist(metadata: str) -> list[str]:
