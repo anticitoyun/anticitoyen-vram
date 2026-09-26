@@ -129,6 +129,8 @@ Veya paket olarak, her [GitHub sürümüne](https://github.com/anticitoyun/antic
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (`rpmbuild` tarafından üretilen adlar, sabit değil) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (veya `.src.rpm`'den `rpmbuild --rebuild *.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+Bir `.flatpakref` her zaman deponun en son yayımlanan sürümünü kurar.
+
 Kurulumdan önce, indirilen dosyayı sürüme eklenen sağlama toplamlarına göre doğrulayın (`SHA256SUMS`, diğer tüm dosyalar mevcut olduktan sonra yayımlanır):
 
 ```bash

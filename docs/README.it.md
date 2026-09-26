@@ -129,6 +129,8 @@ Oppure tramite pacchetto, un file allegato a ogni [release GitHub](https://githu
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nomi generati da `rpmbuild`, non fissi) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (oppure `rpmbuild --rebuild *.src.rpm` a partire dal `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+Un `.flatpakref` installa sempre l'ultima versione pubblicata del repository.
+
 Prima di installare, verifica il file scaricato rispetto alle somme allegate alla release (`SHA256SUMS`, pubblicata una volta presenti tutti gli altri file):
 
 ```bash

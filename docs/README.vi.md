@@ -129,6 +129,8 @@ Hoặc qua gói cài đặt, mỗi gói là một tệp đính kèm trong từng
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (tên do `rpmbuild` tạo ra, không cố định) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (hoặc `rpmbuild --rebuild *.src.rpm` từ tệp `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+Một `.flatpakref` luôn cài đặt phiên bản mới nhất được công bố của kho lưu trữ.
+
 Trước khi cài đặt, hãy xác minh tệp đã tải xuống với các tổng kiểm tra đính kèm bản phát hành (`SHA256SUMS`, được phát hành sau khi tất cả các tệp khác đã có mặt):
 
 ```bash

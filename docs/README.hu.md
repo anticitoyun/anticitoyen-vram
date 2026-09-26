@@ -129,6 +129,8 @@ Vagy csomagból: minden [GitHub-kiadáshoz](https://github.com/anticitoyun/antic
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (a neveket az `rpmbuild` állítja elő, nem rögzítettek) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (vagy `rpmbuild --rebuild *.src.rpm` a `.src.rpm` fájlból) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+A `.flatpakref` mindig a tároló legutóbb közzétett verzióját telepíti.
+
 Telepítés előtt ellenőrizze a letöltött fájlt a kiadáshoz csatolt összegek alapján (`SHA256SUMS`, az összes többi fájl megléte után kerül közzétételre):
 
 ```bash

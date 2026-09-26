@@ -129,6 +129,8 @@ git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (파일 이름은 `rpmbuild`가 생성하며 고정되어 있지 않음) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (또는 `rpmbuild --rebuild *.src.rpm`으로 `.src.rpm`에서 빌드) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+`.flatpakref`는 항상 저장소의 최신 게시된 버전을 설치합니다.
+
 설치하기 전에, 릴리스에 첨부된 체크섬(`SHA256SUMS`, 다른 모든 파일이 존재한 후에 게시됨)으로 다운로드한 파일을 검증하십시오:
 
 ```bash
