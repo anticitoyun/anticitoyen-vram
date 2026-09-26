@@ -1,0 +1,4 @@
+post_install() {
+    echo "acvram installed. Run 'acvram doctor' to check this machine, then 'acvram plan <model>'."
+}
+post_upgrade() { post_install; }
