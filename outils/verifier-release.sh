@@ -11,7 +11,12 @@
 #     ... --flatpak-installer                                   # bras Flatpak : installation seule (≈ 3 Go tirés par extra-data), SANS carte
 #     ... --flatpak-doctor                                      # bras Flatpak : doctor seul, installation déjà faite — sous carte.sh
 #
-# Sortie : une ligne par contrôle, `OK` / `MANQUE` / `FAUX` / `SAUTÉ`, puis `VERDICT: TENU` (code 0) ou `FAUX` (1).
+# Sortie : une ligne par contrôle, `OK` / `MANQUE` / `FAUX` / `SAUTÉ`, puis `VERDICT: TENU` (code 0) ou `FAUX` (1) —
+# sauf un asset cité dans le corps de la release mais absent des assets joints (pièce 285), qui refuse à part,
+# code 65 : un lien mort dans les notes publiées (v0.7.3/acvram-0.7.3.flatpakref, job flatpak échoué, jamais vu)
+# ne doit jamais se confondre avec un MANQUE générique dans un script qui surveille CE script. Code 66 : le
+# Flatpak installé n'est pas la version $V après attente bornée (v0.7.4, Pages n'avait pas encore servi le
+# nouveau dépôt OSTree — l'ancienne 0.7.2 s'installait sans erreur et le contrôle disait OK).
 # Ce que ce script NE prouve PAS : que le .deb s'installe (dpkg-deb --info/--contents seulement, pas d'installation),
 # ni que les RPM se construisent (rpm absent sur ce poste : nom et taille seulement).
 set -uo pipefail
@@ -26,7 +31,7 @@ while [ $# -gt 0 ]; do
     --sans-flatpak) FLATPAK=0; shift ;;
     --flatpak-installer) FLATPAK=installer; shift ;;
     --flatpak-doctor) FLATPAK=doctor; shift ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     v*) TAG=$1; shift ;;
     *) echo "argument inconnu : $1" >&2; exit 64 ;;
   esac
@@ -51,6 +56,7 @@ if [ -z "$SIMULE" ]; then
        || { faux "release $TAG introuvable sur $DEPOT"; echo "VERDICT: FAUX"; exit 1; }
     gh release download "$TAG" --repo "$DEPOT" --dir "$DOSSIER" --clobber || faux "gh release download"
     gh release view "$TAG" --repo "$DEPOT" --json assets --jq '.assets[].name' > "$DOSSIER/liste-release.txt"
+    gh release view "$TAG" --repo "$DEPOT" --json body --jq '.body' > "$DOSSIER/corps-release.txt"
   else
     # sans jeton : api.github.com (60 requêtes/h) et browser_download_url — un jeton ne transite jamais par ici
     python3 - "$DEPOT" "$TAG" "$DOSSIER" <<'PY' || { faux "release $TAG introuvable sur $DEPOT (API publique)"; echo "VERDICT: FAUX"; exit 1; }
@@ -60,6 +66,7 @@ with urllib.request.urlopen(f"https://api.github.com/repos/{depot}/releases/tags
     d = json.load(r)
 print(f"release {d['tag_name']}{' (BROUILLON)' if d.get('draft') else ''} : {len(d['assets'])} fichiers (API publique)")
 (pathlib.Path(dossier) / "liste-release.txt").write_text("".join(a["name"] + "\n" for a in d["assets"]), encoding="utf-8")
+(pathlib.Path(dossier) / "corps-release.txt").write_text(d.get("body") or "", encoding="utf-8")
 for a in d["assets"]:
     cible = pathlib.Path(dossier) / a["name"]
     with urllib.request.urlopen(a["browser_download_url"], timeout=600) as r, open(cible, "wb") as f:
@@ -73,6 +80,40 @@ PY
   fi
 fi
 echo "dossier : $DOSSIER"
+
+# ---- 1 bis. chaque asset CITÉ dans le corps de la release existe parmi les assets JOINTS ---------------------------
+# Pièce 285 (chef, 26/09) : les notes v0.7.3 citaient .../v0.7.3/acvram-0.7.3.flatpakref alors que ce fichier
+# n'a jamais existé (le job flatpak avait échoué, 266 m) — rien ne l'a signalé, la release est restée TENU aux
+# yeux de ce script. `corps-release.txt` (téléchargé ci-dessus ; ou fourni tel quel sous --simule, « le dossier
+# fait foi ») porte le texte publié ; `liste-release.txt` (ou, en --simule sans elle, les fichiers du dossier)
+# porte ce qui est réellement joint. Code de sortie DISTINCT (65) : ce défaut précis ne doit jamais se confondre
+# avec un simple MANQUE générique (1) dans un script qui surveille CE script.
+if [ -s "$DOSSIER/corps-release.txt" ]; then
+  if [ -s "$DOSSIER/liste-release.txt" ]; then
+    ASSETS_JOINTS="$DOSSIER/liste-release.txt"
+  else
+    ASSETS_JOINTS="$DOSSIER/.assets-disque.txt"
+    (cd "$DOSSIER" && for f in *; do
+       [ -f "$f" ] || continue
+       case "$f" in corps-release.txt|liste-release.txt|.assets-disque.txt) continue ;; esac
+       printf '%s\n' "$f"
+     done) > "$ASSETS_JOINTS"
+  fi
+  CITES=$(grep -oE "releases/download/$TAG/[^)\"'[:space:]]+" "$DOSSIER/corps-release.txt" | sed 's#.*/##' | sort -u)
+  MANQUANTS=""
+  while IFS= read -r nom; do
+    [ -n "$nom" ] || continue
+    grep -qxF "$nom" "$ASSETS_JOINTS" || MANQUANTS="$MANQUANTS $nom"
+  done <<< "$CITES"
+  if [ -n "$MANQUANTS" ]; then
+    faux "corps de release : cité mais absent des assets joints :$MANQUANTS"
+    echo "VERDICT: FAUX ($TAG, $DOSSIER)"
+    exit 65
+  fi
+  ok "corps de release : tous les assets cités sont joints"
+else
+  saute "corps de release : corps-release.txt absent, rien à comparer"
+fi
 # 259 d : le dossier est un cache — un fichier d'un téléchargement PRÉCÉDENT (l'ancien bundle de la v0.7.0, un .deb
 # refait) y reste et se ferait juger comme joint. Ce qui est joint, c'est liste-release.txt ; le reste va dans
 # hors-release/ (déplacé, jamais effacé). En --simule, le dossier fait foi.
@@ -176,7 +217,27 @@ if [ -n "$FLAT" ]; then
       # .flatpakref propose acvram) → on retire d'abord ce qui est installé (installation dédiée : rien de l'utilisateur)
       flatpak info --user "$APP" >/dev/null 2>&1 && flatpak uninstall --user --noninteractive -y "$APP" >/dev/null 2>&1
       if flatpak install --user --noninteractive -y --reinstall --from "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
-        ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)) — extra-data : $(flatpak run --user --command=sh "$APP" -c 'wc -l < /app/extra/apply_extra.ok' 2>/dev/null || echo '?') paquets dépaquetés"
+        VER_FLAT=$(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)
+        # Pièce 285 (chef, 26/09) : sur la v0.7.4, ce contrôle a dit OK en ayant installé la 0.7.2 — GitHub
+        # Pages n'avait pas encore servi le nouveau dépôt OSTree au moment de l'install. Un `flatpak update`
+        # attend que Pages rattrape, borné (jamais indéfiniment) ; si la version installée ne devient jamais
+        # $V, c'est un REFUS net (66), jamais confondu avec un simple OK trompeur.
+        if [ "$VER_FLAT" != "$V" ]; then
+          echo "        flatpak : $VER_FLAT installée, $V attendue — Pages en retard, attente bornée (flatpak update)"
+          i=0
+          while [ "$VER_FLAT" != "$V" ] && [ "$i" -lt 10 ]; do
+            i=$((i + 1))
+            flatpak update --user --noninteractive -y "$APP" >>"$DOSSIER/flatpak-install.log" 2>&1 || true
+            VER_FLAT=$(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)
+            [ "$VER_FLAT" = "$V" ] || sleep "${ACVRAM_ATTENTE_FLATPAK_S:-30}"
+          done
+        fi
+        if [ "$VER_FLAT" != "$V" ]; then
+          faux "flatpak : $VER_FLAT installée après attente, $V attendue (Pages n'a jamais servi le bon dépôt)"
+          echo "VERDICT: FAUX ($TAG, $DOSSIER)"
+          exit 66
+        fi
+        ok "flatpak : installé dans $FLATPAK_USER_DIR ($VER_FLAT) — extra-data : $(flatpak run --user --command=sh "$APP" -c 'wc -l < /app/extra/apply_extra.ok' 2>/dev/null || echo '?') paquets dépaquetés"
       else faux "flatpak : installation échouée (flatpak-install.log)"; tail -n5 "$DOSSIER/flatpak-install.log" | sed 's/^/        /'; fi
     fi
     if [ "$FLATPAK" != installer ]; then
