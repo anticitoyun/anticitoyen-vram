@@ -14,7 +14,9 @@
 # Sortie : une ligne par contrôle, `OK` / `MANQUE` / `FAUX` / `SAUTÉ`, puis `VERDICT: TENU` (code 0) ou `FAUX` (1) —
 # sauf un asset cité dans le corps de la release mais absent des assets joints (pièce 285), qui refuse à part,
 # code 65 : un lien mort dans les notes publiées (v0.7.3/acvram-0.7.3.flatpakref, job flatpak échoué, jamais vu)
-# ne doit jamais se confondre avec un MANQUE générique dans un script qui surveille CE script.
+# ne doit jamais se confondre avec un MANQUE générique dans un script qui surveille CE script. Code 66 : le
+# Flatpak installé n'est pas la version $V après attente bornée (v0.7.4, Pages n'avait pas encore servi le
+# nouveau dépôt OSTree — l'ancienne 0.7.2 s'installait sans erreur et le contrôle disait OK).
 # Ce que ce script NE prouve PAS : que le .deb s'installe (dpkg-deb --info/--contents seulement, pas d'installation),
 # ni que les RPM se construisent (rpm absent sur ce poste : nom et taille seulement).
 set -uo pipefail
@@ -215,7 +217,27 @@ if [ -n "$FLAT" ]; then
       # .flatpakref propose acvram) → on retire d'abord ce qui est installé (installation dédiée : rien de l'utilisateur)
       flatpak info --user "$APP" >/dev/null 2>&1 && flatpak uninstall --user --noninteractive -y "$APP" >/dev/null 2>&1
       if flatpak install --user --noninteractive -y --reinstall --from "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
-        ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)) — extra-data : $(flatpak run --user --command=sh "$APP" -c 'wc -l < /app/extra/apply_extra.ok' 2>/dev/null || echo '?') paquets dépaquetés"
+        VER_FLAT=$(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)
+        # Pièce 285 (chef, 26/09) : sur la v0.7.4, ce contrôle a dit OK en ayant installé la 0.7.2 — GitHub
+        # Pages n'avait pas encore servi le nouveau dépôt OSTree au moment de l'install. Un `flatpak update`
+        # attend que Pages rattrape, borné (jamais indéfiniment) ; si la version installée ne devient jamais
+        # $V, c'est un REFUS net (66), jamais confondu avec un simple OK trompeur.
+        if [ "$VER_FLAT" != "$V" ]; then
+          echo "        flatpak : $VER_FLAT installée, $V attendue — Pages en retard, attente bornée (flatpak update)"
+          i=0
+          while [ "$VER_FLAT" != "$V" ] && [ "$i" -lt 10 ]; do
+            i=$((i + 1))
+            flatpak update --user --noninteractive -y "$APP" >>"$DOSSIER/flatpak-install.log" 2>&1 || true
+            VER_FLAT=$(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)
+            [ "$VER_FLAT" = "$V" ] || sleep "${ACVRAM_ATTENTE_FLATPAK_S:-30}"
+          done
+        fi
+        if [ "$VER_FLAT" != "$V" ]; then
+          faux "flatpak : $VER_FLAT installée après attente, $V attendue (Pages n'a jamais servi le bon dépôt)"
+          echo "VERDICT: FAUX ($TAG, $DOSSIER)"
+          exit 66
+        fi
+        ok "flatpak : installé dans $FLATPAK_USER_DIR ($VER_FLAT) — extra-data : $(flatpak run --user --command=sh "$APP" -c 'wc -l < /app/extra/apply_extra.ok' 2>/dev/null || echo '?') paquets dépaquetés"
       else faux "flatpak : installation échouée (flatpak-install.log)"; tail -n5 "$DOSSIER/flatpak-install.log" | sed 's/^/        /'; fi
     fi
     if [ "$FLATPAK" != installer ]; then
