@@ -733,18 +733,26 @@ _DEPAQ_PARTAGE = os.environ.get("ACVRAM_DEPAQ_PARTAGE", "1") == "1"
 _W_PARTAGES: Optional[dict] = None
 
 
+_SEUIL_PARTAGE = True     # 284 b : faux dans une portée de préfill par tranches — le seuil GEMV reste celui d'avant (au bit)
+
+
 @contextlib.contextmanager
-def depaquetage_partage():
-    """Portée d'un partage des poids déquantifiés (une boucle par séquence d'une couche) ; imbriqué : sans effet."""
-    global _W_PARTAGES
+def depaquetage_partage(seuil_partage: bool = True):
+    """Portée d'un partage des poids déquantifiés (une boucle par séquence d'une couche) ; imbriqué : sans effet.
+    ``seuil_partage=False`` (284 b, préfill couche par couche) : poids partagés, MAIS le seuil GEMV int8 reste
+    `INT8_GEMV_MAX` — le passage à `INT8_GEMV_MAX_PARTAGE` (243) change le chemin, donc la sortie, d'une tranche de
+    17 à 80 lignes ; ici chaque tranche doit prendre exactement le chemin qu'elle prenait seule."""
+    global _W_PARTAGES, _SEUIL_PARTAGE
     if not _DEPAQ_PARTAGE or _W_PARTAGES is not None:
         yield
         return
     _W_PARTAGES = {}
+    _SEUIL_PARTAGE = seuil_partage
     try:
         yield
     finally:
         _W_PARTAGES = None
+        _SEUIL_PARTAGE = True
 
 
 def _w_partage(cle, fabrique):
@@ -985,7 +993,7 @@ _INT8_GEMV_MAX_PARTAGE = int(os.environ.get("ACVRAM_INT8_GEMV_MAX_PARTAGE", "") 
 
 def seuil_gemv_int8() -> int:
     """Seuil GEMV int8 en vigueur : `INT8_GEMV_MAX`, ou `INT8_GEMV_MAX_PARTAGE` dans une portée de partage (243)."""
-    return _INT8_GEMV_MAX_PARTAGE if _W_PARTAGES is not None else _INT8_GEMV_MAX
+    return _INT8_GEMV_MAX_PARTAGE if (_W_PARTAGES is not None and _SEUIL_PARTAGE) else _INT8_GEMV_MAX
 # Linéaires INT8 au préfill (n > INT8_GEMV_MAX) : bf16 (défaut jusqu'au scellé
 # P0 : déquant entière + cutlass) | a8 (kernels/gemm_w8a8.py : activation int8
 # par jeton, tensor cores int8, sans déquant). Scellé : Coder préfill 2 048
