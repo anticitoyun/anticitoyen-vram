@@ -9,7 +9,11 @@
 * mesuré : registres 128 (≤ 128 tenu) ; tests 12/12 verts ; cassants décalage et garde ROUGES ; banc : fusion +19 à +25 % à
   n = 78-80, +10 à +29 % à n = 8-16, 0 à +2 % à n ≤ 6
 * verdict : **au bit prouvé, levier FAUX** (prédit −60 à −85 % à n = 78 ; seuil −30 %) — l'issue gênante, en pire
-* durée : prise 1 02:29-02:57 (tenue sous 30 min), prise 2 03:15:15-03:18:18 (183 s, arrêtée)
+* durée : prise 1 02:51:41-02:57:53 (journal du verrou, tenue 372 s ; l'essai de 02:28:51 s'était arrêté sur cuobjdump),
+  prise 2 03:15:15-03:18:18 (183 s, arrêtée)
+* contamination (chef, 26/09) : le pytest orphelin d'poste6 (03:13-03:23, hors verrou) ne touche PAS les chiffres du
+  verdict — tous viennent de la prise 1 (banc en fin de prise, avant 02:57:53) ; load1 de la prise 1 : médiane 2,0, max 3,5
+  (compilation et tests de la même prise). Seule la passe A1 de la prise 2, non retenue, tombe dans la fenêtre.
 
 ## Banc isolé (µs par appel, moyenne de A1/A2 et de B1/B2, écarts intra-bras ≤ 0,5 %)
 | n | qkv boucle → fusion | porte | sortie |
