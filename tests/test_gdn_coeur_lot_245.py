@@ -30,6 +30,7 @@ def _couche(dtype, seed=245) -> GatedDeltaNet:
         m.weight.data.uniform_(-0.4, 0.4)
         return m.to(dtype)
     conv_dim = 2 * NK * DK + NV * DV
+    # conv_weight, dt_bias, a_log, norm_weight en fp32 quel que soit dtype, comme le chargeur (loader.py:670, `petit`)
     return GatedDeltaNet(
         qkv=lin(conv_dim, H), gate=lin(NV * DV, H), alpha=lin(NV, H), beta=lin(NV, H), out=lin(H, NV * DV),
         conv_weight=torch.randn(conv_dim, KER) * 0.3, dt_bias=torch.rand(NV) - 0.5,
