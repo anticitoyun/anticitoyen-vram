@@ -23,7 +23,8 @@ def _fabrique(tmp_path, src=SRC, src_hash=0x1234ABCD5678EF01, torch_v=None, cuda
     (d / "acvram_kernels.so").write_bytes(b"ELF\x00" + (src_hash.to_bytes(8, "little") if porte else b"\x00" * 8) + b"fin")
     (d / "empreinte.json").write_text(json.dumps({
         "src_sha": hashlib.sha256(src).hexdigest(), "src_hash": f"{src_hash:016x}", "archs": list(archs),
-        "torch": torch_v or torch.__version__, "cuda": cuda or str(torch.version.cuda)}), encoding="utf-8")
+        "torch": torch_v or torch.__version__, "cuda": cuda or str(torch.version.cuda),
+        "python": kernels._abi_python()}), encoding="utf-8")
     return str(tmp_path)
 
 

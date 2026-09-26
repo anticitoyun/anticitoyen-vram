@@ -112,8 +112,15 @@ jobs:
       - name: Python et torch cu130 (la roue que le Flatpak embarque)
         run: |
           # 266 : python3-dev (Python.h, exigé par la compilation de l'extension) ; numpy (torch l'importe, sinon avertissement)
-          apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python3-venv ninja-build git
-          python3 -m venv /opt/venv && . /opt/venv/bin/activate
+          # 266 e : le .so est une extension CPython — il ne se charge que sous l'ABI qui l'a compilé : le Python du RUNTIME
+          # (PYTHON_RUNTIME = 3.14, GNOME 51), pas le 3.12 d'Ubuntu 24.04 → deadsnakes. L'empreinte.json porte l'ABI (SOABI)
+          # et le chargeur (kernels._precompile_utilisable) refuse toute autre ABI, à voix haute.
+          PYV=$(cat packaging/flathub/PYTHON_RUNTIME)
+          apt-get update && apt-get install -y --no-install-recommends software-properties-common gpg-agent ninja-build git
+          add-apt-repository -y ppa:deadsnakes/ppa && apt-get update
+          apt-get install -y --no-install-recommends "python$PYV" "python$PYV-dev" "python$PYV-venv"
+          "python$PYV" -m venv /opt/venv && . /opt/venv/bin/activate
+          python -c 'import sys, sysconfig; print("Python", sys.version.split()[0], sysconfig.get_config_var("SOABI"))'
           pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.14.0" && pip install ninja numpy
           pip install --no-deps .
       - name: Noyaux précompilés (sm_120f, sm_89, sm_86)
@@ -158,9 +165,14 @@ jobs:
       # à sable : « Cannot import 'mesonpy' », v0.7.0) — sources-pypi.py ne prend que des ROUES (--only-binary=:all:), comme torch.
       - name: Sources Python hors ligne (roues PyPI par sources-pypi.py, torch cu130 par sources-torch.sh)
         run: |
-          [ -f packaging/flathub/python3-modules.json ] || (cd packaging/flathub && ./sources-pypi.py \
+          # 266 e : les roues sont celles du Python du RUNTIME (PYTHON_RUNTIME), vérifié ici contre le SDK réel — la v0.7.0
+          # prenait des roues cp312 et le pip 3.14 du bac à sable ne les trouvait pas (« No matching distribution found »)
+          PYV=$(cat packaging/flathub/PYTHON_RUNTIME)
+          SDK=$(flatpak run --command=python3 org.gnome.Sdk//51 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          [ "$PYV" = "$SDK" ] || { echo "PYTHON_RUNTIME=$PYV mais le SDK GNOME 51 porte Python $SDK : mettre PYTHON_RUNTIME à jour"; exit 65; }
+          [ -f packaging/flathub/python3-modules.json ] || (cd packaging/flathub && ./sources-pypi.py --python "$PYV" \
               numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py)
-          [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0)
+          [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0 "$PYV")
       - name: Construction hors ligne et lint
         run: |
           sed -e 's#path: \.\./\.\.$#path: .#' -e 's#path: \.\./\.\./build/noyaux#path: build/noyaux#' \

@@ -319,7 +319,8 @@ def _ecrire_empreinte(cand: str, so_source: str, src_sha: str, src_hash: str, ar
     shutil.copy2(so_source, os.path.join(cand, "acvram_kernels.so"))
     with open(os.path.join(cand, "empreinte.json"), "w", encoding="utf-8") as fh:
         json.dump({"src_sha": src_sha, "src_hash": src_hash, "archs": sorted(archs),
-                   "torch": torch.__version__, "cuda": str(torch.version.cuda)}, fh, indent=1)
+                   "torch": torch.__version__, "cuda": str(torch.version.cuda),
+                   "python": _abi_python()}, fh, indent=1)          # 266 e : l'ABI CPython qui a compilé le .so
     return cand
 
 
@@ -355,9 +356,18 @@ def compiler_precompile(dossier: str, archs, nvcc_ver=None) -> str:
     return _ecrire_empreinte(os.path.join(dossier, src_sha[:16]), so, src_sha, src_hash, _archs_des_drapeaux(flags_cuda))
 
 
-def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version: str, torch_cuda: str):
-    """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_noyaux_precompiles_240.py)."""
+def _abi_python() -> str:
+    """« cpython-314-x86_64-linux-gnu » : l'ABI CPython courante (SOABI) — un .so compilé sous une autre ne se charge pas."""
+    import sysconfig
+    return str(sysconfig.get_config_var("SOABI") or "")
+
+
+def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version: str, torch_cuda: str, python_abi: str | None = None):
+    """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_noyaux_precompiles_240.py).
+    266 e : l'empreinte porte l'ABI CPython (`python`) ; un .so d'une autre ABI (Flatpak Python 3.14 contre un .so cp312 de la
+    CI) est refusé ici, avec sa raison, au lieu d'échouer à l'import puis de tomber en silence sur la compilation JIT."""
     import json
+    python_abi = python_abi or _abi_python()
     src_sha = hashlib.sha256(src_octets).hexdigest()
     cand = os.path.join(dossier, src_sha[:16])
     man, so = os.path.join(cand, "empreinte.json"), os.path.join(cand, "acvram_kernels.so")
@@ -372,6 +382,8 @@ def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version:
         return None, "empreinte.json : src_sha différent de la source courante (autre version du .cu)"
     if e.get("torch") != torch_version or e.get("cuda") != str(torch_cuda):
         return None, f"précompilé pour torch {e.get('torch')} / CUDA {e.get('cuda')}, ici {torch_version} / {torch_cuda}"
+    if e.get("python") != python_abi:
+        return None, f"précompilé pour l'ABI Python {e.get('python') or 'non renseignée'}, ici {python_abi} (266 e)"
     archs = set(e.get("archs") or [])
     for a, b in caps:
         if not ({f"sm_{a}{b}", f"sm_{a}{b}f", f"sm_{a}{b}a"} & archs):
