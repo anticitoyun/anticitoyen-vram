@@ -488,16 +488,25 @@ def pytest_configure(config):
     # fenêtre HTTP mesurée sous `carte.sh` (TYPE=mesure) se fait fausser par
     # le PROCESSEUR qu'une suite pytest lui prend, même une suite qui ne
     # touche jamais le GPU (18/09, load 70,8, REGLES §2).
-    if os.environ.get("ACVRAM_TESTS_PENDANT_MESURE") != "1":
-        tenue = _verrou_tenu_en_mesure()
-        if tenue:
-            verrou, pid, nom = tenue
-            raise pytest.UsageError(
-                f"carte tenue en TYPE=mesure par PID {pid} ({nom}, {verrou}) : "
-                f"la suite ne demarre pas — une suite pytest, meme sans GPU, "
-                f"prend du processeur a une fenetre HTTP mesuree (18/09, load "
-                f"70,8). ACVRAM_TESTS_PENDANT_MESURE=1 pour passer outre en "
-                f"connaissance de cause.")
+    # Pièce 246 (chef, 26/09, 3e contournement d'ACVRAM_TESTS_PENDANT_MESURE
+    # en trois jours) : la variable seule ne suffit plus. `_verrou_tenu_en_mesure`
+    # exempte DEJA, sans avoir besoin de cette variable, le cas legitime — ce
+    # pytest tourne SOUS la prise carte.sh en question (`ACVRAM_CARTE_TENUE`
+    # herite, verifie contre le pid du `.qui`) — et ne rend une prise "tenue"
+    # que pour une prise ETRANGERE, dont ce processus n'est PAS descendant.
+    # Toujours appeler la garde, jamais la sauter sur la seule foi de la
+    # variable : deroger a une prise etrangere ne s'accepte plus.
+    tenue = _verrou_tenu_en_mesure()
+    if tenue:
+        verrou, pid, nom = tenue
+        raise pytest.UsageError(
+            f"carte tenue en TYPE=mesure par PID {pid} ({nom}, {verrou}) : "
+            f"la suite ne demarre pas — une suite pytest, meme sans GPU, "
+            f"prend du processeur a une fenetre HTTP mesuree (18/09, load "
+            f"70,8). ACVRAM_TESTS_PENDANT_MESURE=1 n'aide QUE si ce pytest "
+            f"tourne sous CETTE prise carte.sh (pièce 246, ACVRAM_CARTE_TENUE "
+            f"doit valoir {pid}) — sinon, ce n'est pas votre prise : arretez-la "
+            f"ou attendez sa fin.")
 
     if not _gpu_demande(config):
         return
