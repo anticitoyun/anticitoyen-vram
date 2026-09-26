@@ -56,7 +56,7 @@ jobs:
           mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS
           # git is missing when checkout runs in this container: the tree has no .git
           tar --exclude=.git --transform "s,^\.,anticitoyen-vram-$V," \
-            -czf ~/rpmbuild/SOURCES/anticitoyen-vram-$V.tar.gz .
+            -czf ~/rpmbuild/SOURCES/"anticitoyen-vram-$V.tar.gz" .
           sed "s/@VERSION@/$V/" packaging/rpm/acvram.spec > ~/rpmbuild/SPECS/acvram.spec
           rpmbuild -bb ~/rpmbuild/SPECS/acvram.spec
           rpmbuild -bs ~/rpmbuild/SPECS/acvram.spec
