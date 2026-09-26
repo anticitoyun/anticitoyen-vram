@@ -30,7 +30,7 @@ cleanup:
   - /include
   - "*.a"
 modules:
-  - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py)
+  - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py ; 273 : extra vision — transformers, pillow)
   - torch-cu130.json                    # torch 2.14 cu130 + fermeture CUDA en EXTRA-DATA (sources-torch.sh, 266 i : ≈ 2,9 Go tirés à l'installation)
   - name: acvram-noyaux
     # Noyaux CUDA d'acvram (acvram_kernels.so) compilés HORS bac à sable pour sm_120 (RTX 5090) — et sm_89/sm_86 si publiés — par la

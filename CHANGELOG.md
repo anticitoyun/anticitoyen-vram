@@ -1,5 +1,21 @@
 # Journal des changements
 
+## 0.7.2 (26/09/2026)
+
+* **26/09/2026 — pièce 070 b (poste6) : `acvram doctor` sortait 1 partout, hôte et Flatpak.** `_doctor_eco` (poste7-eco
+  19/09) appelait `subprocess.run` sans que `cli.py` importe `subprocess` : `NameError` en toute dernière ligne, après le
+  rapport complet — invisible à qui ne lit que les « ok / ECHEC ». Vu par verif-070 (doctor du bac à sable Flatpak, code
+  1 avec 0 ECHEC sur l'hôte). `import subprocess` ; `tests/test_doctor_eco_070b.py` (sudo factice, rouge sur l'ancien).
+* **26/09/2026 — pièce 273 (poste6, décision chef) : l'extra `vision` (transformers, pillow) est une ALERTE du doctor,
+  pas un ÉCHEC, et le Flatpak l'embarque.** Le doctor de la v0.7.0 en Flatpak rendait `ECHEC transformers est absent`,
+  `ECHEC PIL est absent` : la liste de `sources-pypi.py` dans `release.yml` ne prenait pas l'extra, et le doctor exigeait
+  ce que `pyproject` déclare optionnel (décision du 21/09, trou P3, renversée : l'utilisateur de .deb ou de pip sans
+  multimodal ne voit plus un doctor rouge ; un modèle multimodal sans `vision` échoue toujours au chargement, en clair).
+  `_doctor_modules()` : requis (safetensors, fastapi, uvicorn, tokenizers, jinja2) en ÉCHEC ; extras (`vision`) en
+  `alerte vision indisponible (… absent) : pip install 'acvram[vision]'`, code 0. Flatpak : transformers et pillow dans
+  la liste de `sources-pypi.py` (44 roues cp314/abi3/py3 résolues à sec en 18 s, aucune sdist). Gardes :
+  `tests/test_doctor_modules_273.py` (imports factices : sans vision → 0 + alerte, avec → ok), `tests/test_flathub_vision_273.py`.
+
 ## 0.7.1 (26/09/2026)
 
 * **26/09/2026 — pièce 268 (poste1) : `/metrics` hors de la boucle HTTP, AU DÉFAUT, sortie identique champ par champ.** Il

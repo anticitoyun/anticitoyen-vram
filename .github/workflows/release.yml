@@ -184,7 +184,7 @@ jobs:
           SDK=$(flatpak run --command=python3 org.gnome.Sdk//51 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
           [ "$PYV" = "$SDK" ] || { echo "PYTHON_RUNTIME=$PYV mais le SDK GNOME 51 porte Python $SDK : mettre PYTHON_RUNTIME à jour"; exit 65; }
           [ -f packaging/flathub/python3-modules.json ] || (cd packaging/flathub && ./sources-pypi.py --python "$PYV" \
-              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py)
+              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py transformers pillow)   # 273 : extra vision embarqué
           [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0 "$PYV")
       - name: Construction hors ligne, dépôt gh-pages, .flatpakref, lint
         env:

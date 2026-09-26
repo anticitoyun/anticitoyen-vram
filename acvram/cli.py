@@ -485,20 +485,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"           {row['device']:<8} {row['format']:<9} -> "
               f"{' > '.join(row['backends'])}")
 
-    # (module importe, paquet pip) : PIL s'importe ainsi mais s'installe « pillow ».
-    # transformers + pillow sont l'extra vision, inclus par defaut par install.sh
-    # et le .deb : leur absence est un ECHEC, pas une alerte (la tour de vision
-    # echoue au chargement sans eux — trou P3 du 21/09).
-    for mod, paquet in (("safetensors", "safetensors"), ("fastapi", "fastapi"),
-                        ("uvicorn", "uvicorn"), ("tokenizers", "tokenizers"),
-                        ("jinja2", "jinja2"), ("transformers", "transformers"),
-                        ("PIL", "pillow")):
-        try:
-            __import__(mod)
-            print(f"  {green('ok')}    {mod}")
-        except ImportError:
-            ok = False
-            print(f"  {red('ECHEC')} {mod} est absent (pip install {paquet})")
+    ok = _doctor_modules() and ok
 
     from .engine.gdn import gdn_available
     if gdn_available():
@@ -513,6 +500,40 @@ def cmd_doctor(args: argparse.Namespace) -> int:
               f"l'etage hote")
     _doctor_eco(cuda_ok=torch.cuda.is_available())
     return 0 if ok else 1
+
+
+# (module importe, paquet pip) : PIL s'importe ainsi mais s'installe « pillow ».
+_MODULES_REQUIS = (("safetensors", "safetensors"), ("fastapi", "fastapi"), ("uvicorn", "uvicorn"),
+                   ("tokenizers", "tokenizers"), ("jinja2", "jinja2"))
+# Extras de pyproject : optionnels, donc une ALERTE et non un ECHEC (273, decision chef du 26/09 — renverse le
+# 21/09 « trou P3 » qui les mettait en ECHEC : l'utilisateur de .deb ou de pip sans multimodal ne doit pas voir un
+# doctor rouge ; un modele multimodal sans vision echoue toujours au chargement, en clair). Le Flatpak embarque vision.
+_EXTRAS = {"vision": (("transformers", "transformers"), ("PIL", "pillow"))}
+
+
+def _doctor_modules() -> bool:
+    """Lignes ok/ECHEC des modules requis, ok/alerte par extra ; False si un REQUIS manque."""
+    ok = True
+    for mod, paquet in _MODULES_REQUIS:
+        try:
+            __import__(mod)
+            print(f"  {green('ok')}    {mod}")
+        except ImportError:
+            ok = False
+            print(f"  {red('ECHEC')} {mod} est absent (pip install {paquet})")
+    for extra, mods in _EXTRAS.items():
+        absents = []
+        for mod, paquet in mods:
+            try:
+                __import__(mod)
+            except ImportError:
+                absents.append(paquet)
+        if absents:
+            print(f"  {yellow('alerte')} {extra} indisponible ({', '.join(absents)} absent) : "
+                  f"pip install 'acvram[{extra}]'")
+        else:
+            print(f"  {green('ok')}    {extra} ({', '.join(m for m, _ in mods)})")
+    return ok
 
 
 def _doctor_eco(cuda_ok: bool) -> None:
