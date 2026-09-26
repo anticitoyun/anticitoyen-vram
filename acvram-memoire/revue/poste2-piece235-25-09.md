@@ -44,42 +44,41 @@ garanties au bit entre les deux runs**, sur les couches qui appliquent RoPE (att
 conversions **identiques sur la MÊME machine dans le MÊME état** (probable pour deux runs successifs en CI) sont
 attendues au bit — non vérifié empiriquement ici (à sec, hors périmètre du test unitaire écrit).
 
-## (3) Correctif et test cassant
+## (3) Correctif et test cassant — ARBITRAGE DU CHEF : un seul correctif, porté par 213b
 
-**Racine commune avec la 213 (service)** : `_ensure` doit revérifier le dtype, pas seulement `seq_len`/`device`.
-Patch (`engine/layers.py:721-724`, écrit dans ce worktree) :
+Mon premier patch (`_ensure` revérifie aussi le dtype) est **retiré** : chef/poste5 ont montré qu'il
+reconstruirait le cache à chaque couche si `tables32` (fp32) et `forward` (bf16) alternent, et lèverait sous
+capture de graphe (`layers.py:725`). Le correctif retenu est **213b** (poste5, `origin/poste5-213b`
+`b4fcf07df`) : `self._dtype` fixé pour de bon, `forward()` convertit à la demande, tables dérivées indexées par
+génération, et **`loader.py:313` + `collect.py:257` passent le dtype explicitement** — exactement ce que fait ma
+235 côté calibration.
+
+Périmètre final de la 235 (`quant/collect.py:257-262`) : `dtype` et `device=dev` passés explicitement à la
+construction des deux `RotaryEmbedding` (attention pleine et MLA), au lieu du défaut fp32 accidentel de la
+classe.
 
 ```diff
-     def _ensure(self, seq_len: int, device, dtype) -> None:
-+        # 235 (calibration) / 213 (service) : le dtype n'entrait pas dans la garde de
-+        # rebuild -- le premier appelant gelait la précision pour tous les suivants,
-+        # silencieusement (un upcast bf16→fp32 ne lève jamais d'erreur).
-         if self._cos is not None and seq_len <= self._cache_len \
--                and self._cos.device == device:
-+                and self._cos.device == device and self._cos.dtype == dtype:
-             return
+-    rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
+-                           spec.rope_theta, spec.rope_scaling)
+-    rope_mla = (RotaryEmbedding(spec.qk_rope_head_dim, spec.max_position_embeddings,
+-                                spec.rope_theta, spec.rope_scaling)
++    rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
++                           spec.rope_theta, spec.rope_scaling, dev, dtype)
++    rope_mla = (RotaryEmbedding(spec.qk_rope_head_dim, spec.max_position_embeddings,
++                                spec.rope_theta, spec.rope_scaling, dev, dtype)
 ```
 
-Complément côté calibration (`quant/collect.py:257-262`) : `dtype` (et `device=dev`) passés explicitement à la
-construction, pour que `self._dtype` (donc `tables32`) corresponde au dtype de calibration choisi au lieu du
-défaut fp32 accidentel de la classe — cohérence documentée, plus nécessaire à la correction (le patch `_ensure`
-suffit seul) mais rend l'intention explicite plutôt qu'un défaut de classe non lu.
+**Test** : `tests/test_rope_dtype_premier_appelant_235.py` — statique (AST), vérifie que chaque appel
+`RotaryEmbedding(...)` de `collect.py` porte ≥ 6 arguments positionnels (jusqu'à `dtype` inclus), pas seulement
+les 4 premiers. Rouge avant la 235, vert après (exécuté en direct, hors pytest/hors carte — script pur, aucun
+torch, aucun coût GPU/CPU mesurable ; VU vert : `python3 -c "...test_collect_construit_rope_avec_dtype_explicite_235()..."` → `OK`).
+Repris par poste5 pour couvrir aussi le côté service dans 213b.
 
-**Test cassant** : `tests/test_rope_dtype_premier_appelant_235.py`, deux cas — `forward(bf16)` puis `tables32()`
-(doit rendre un calcul fp32 frais, pas un requantage du cache bf16 déjà arrondi) et l'inverse (`tables32()` puis
-`forward(bf16)`, doit rendre le dtype demandé, pas du fp32 déguisé). CPU seul (`RotaryEmbedding` ne dépend pas de
-CUDA hors les gardes de capture de graphe), mais soumis à la garde pytest générale (aucune suite pendant une
-mesure) — **en file derrière `poste3-p229-3bras-coder-b8` et ma propre 234**, résultat RED/GREEN à ajouter à cette
-note dès que la carte se libère.
+## Coordination avec poste5 (213/213b) — clos
 
-## Coordination avec poste5 (213)
-
-`_ensure` (`layers.py:721`) est **la fonction que poste5 bisecte en direct** (`bissect3`, addendum 26/09 02 h,
-carnet poste5 : « caches RoPE (layers.py:721 `_ensure`, figés au 1er appel : dtype du 1er appelant, longueur） »).
-**Même diagnostic, indépendamment retrouvé** — je n'ai pas lu son carnet avant d'écrire ce qui précède (à sec,
-depuis le code seul). Mon patch ci-dessus est écrit sur ma branche `poste2-p235`, PAS poussé sur la sienne ni
-fusionné : à elle/au chef d'arbitrer si son T2 (RoPE seul remis à neuf) confirme la même cause côté service, et
-si oui, un seul correctif pour les deux (213 et 235), pas deux patches concurrents sur la même fonction.
+Diagnostic partagé confirmé par poste5 (son bissect3 T2 = T1, trace tables32 fp32 puis reserver bf16). Un seul
+correctif retenu par le chef : 213b, qui couvre aussi loader.py:313 et collect.py:257. La 235 reste limitée à
+son périmètre d'origine (collect.py, dtype explicite) — pas de patch concurrent sur `_ensure`.
 
 **Autre construction sans dtype trouvée en passant** (hors périmètre de la question posée, signalé pour
 mémoire) : `engine/loader.py:313`, le `RotaryEmbedding` PRINCIPAL du service (attention dense/GQA), a le MÊME
