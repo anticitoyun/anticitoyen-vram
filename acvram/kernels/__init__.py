@@ -826,6 +826,15 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
+# Pièce 243 (179 b, opt-in, HORS BIT) : seuil GEMV → GEMM int8 SOUS une portée `depaquetage_partage` (boucle par
+# séquence d'une couche GDN au préfill). La déquant y est payée une fois pour toutes les séquences et le GEMV à n = 78
+# est borné par le calcul (221) : le croisement tombe bien sous 80. Vide = INT8_GEMV_MAX (sortie inchangée).
+_INT8_GEMV_MAX_PARTAGE = int(os.environ.get("ACVRAM_INT8_GEMV_MAX_PARTAGE", "") or _INT8_GEMV_MAX)
+
+
+def seuil_gemv_int8() -> int:
+    """Seuil GEMV int8 en vigueur : `INT8_GEMV_MAX`, ou `INT8_GEMV_MAX_PARTAGE` dans une portée de partage (243)."""
+    return _INT8_GEMV_MAX_PARTAGE if _W_PARTAGES is not None else _INT8_GEMV_MAX
 # Linéaires INT8 au préfill (n > INT8_GEMV_MAX) : bf16 (défaut jusqu'au scellé
 # P0 : déquant entière + cutlass) | a8 (kernels/gemm_w8a8.py : activation int8
 # par jeton, tensor cores int8, sans déquant). Scellé : Coder préfill 2 048
@@ -970,7 +979,7 @@ def int8_matmul_partage(x: torch.Tensor, ts: list) -> Optional[list]:
     if _PREFILL_INT8 != "cublas" or x.dtype not in (torch.bfloat16, torch.float16) or n <= 16:
         return None
     ext = get_extension()
-    if ext is not None and ts[0].qweight.is_cuda and n <= _INT8_GEMV_MAX:
+    if ext is not None and ts[0].qweight.is_cuda and n <= seuil_gemv_int8():
         return None                                  # le dispatcher prendrait le GEMV
     if x.is_cuda and (not ts[0].qweight.is_cuda or _bk.resolve("int8", ts[0].qweight.device)[0].name != "cuda-fusionne"):
         return None                                  # backend masqué : la référence torch
@@ -1421,7 +1430,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     27B, soit une centaine de millisecondes pour vingt jetons.
     """
     if gemv_threshold <= 0:
-        gemv_threshold = _INT8_GEMV_MAX
+        gemv_threshold = seuil_gemv_int8()
     t_servi = t               # pièce 179 : le poids servi, avant `vue_g128` (objet neuf à chaque appel)
     ext = get_extension()
     orig_shape = x.shape
