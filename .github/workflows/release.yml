@@ -109,13 +109,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-          fetch-depth: 0                          # 266 f : historique entier, pour packaging/flathub depuis une autre ref
       # 266 f (même piège que la 266 b) : PYTHON_RUNTIME est de l'outillage de construction (packaging/flathub/), absent au tag
       # v0.7.0 → « cat: packaging/flathub/PYTHON_RUNTIME: No such file » (run 36227010415). La source d'acvram reste au tag.
+      # Dans CE conteneur (nvidia/cuda) git n'existe pas au moment du checkout : actions/checkout dépose une archive sans .git
+      # (comme dans le job rpm), donc pas de `git checkout github.sha -- …` possible (run 36227505957) — second checkout de la
+      # ref du workflow dans un sous-dossier, puis copie du seul dossier d'outillage.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: outillage-ref
       - name: packaging/flathub depuis la ref du workflow (outillage), la source reste au tag
         run: |
-          git checkout ${{ github.sha }} -- packaging/flathub
-          git status --short packaging/flathub | sed 's/^/  /'
+          rm -rf packaging/flathub && cp -a outillage-ref/packaging/flathub packaging/flathub && rm -rf outillage-ref
+          find packaging/flathub -maxdepth 1 -type f | sed 's/^/  /'
       - name: Python et torch cu130 (la roue que le Flatpak embarque)
         run: |
           # 266 : python3-dev (Python.h, exigé par la compilation de l'extension) ; numpy (torch l'importe, sinon avertissement)
