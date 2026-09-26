@@ -664,7 +664,7 @@ FP8 blockwise SM120), nvidia.com (SGLang Release 26.02 notes).
 **PRÉMISSE INVALIDÉE (poste1, 245, 26/09)** : les 0/7 bf16 venaient d'une ERREUR du test (poids de
 convolution bf16 comparés à une convolution de référence en fp32, boucle de référence qui plantait), pas
 d'une dérive numérique réelle. Test corrigé : 35 passed, dont le bf16 au bit ; diagnostic séparé confirme
-fla bf16 isolé = varlen = groupé, à 0 ulp (`scratchpad/poste1-p245-26-09/diag.txt`). La réponse ci-dessous
+fla bf16 isolé = varlen = groupé, à 0 ulp (poste1-245 58cc9dd23, `scratchpad/poste1-p245-26-09/diag.txt`). La réponse ci-dessous
 reste une synthèse duck.ai VALIDE sur ce que garantissent FLA/vLLM/SGLang en général, mais **ne pas la
 citer comme une mesure sur notre cas** : notre 0/7 n'était pas une mesure de dérive bf16, c'était un bogue
 de banc.
