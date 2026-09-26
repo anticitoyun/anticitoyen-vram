@@ -3,8 +3,9 @@
 par poste5 : le pipeline n'était pas vidé au passage du décodage simple au spéculatif, jetons
 répétés. Le bogue touche TOUT modèle servi avec ngram, dense compris (pas seulement les
 hybrides, où 277a-bis avait d'abord vu 13 à 24 logits sous le premier choix, 4/5 invites).
-Défaut désormais `none` pour TOUS les alias ; `ngram` reste servable sur demande explicite
-(correctif 277fix inclus, qualification en cours), avec un avertissement au démarrage.
+Défaut désormais `none` pour TOUS les alias ; `ngram` reste servable sur demande explicite, avec un
+avertissement VRAI après la 277fix : bogue corrigé, écarts restants = quasi-égalités (marge < 0,02 sur le
+Coder), le ngram peut faire plus de pas que none (jusqu'à 55 pour 32 jetons), il n'est pas le défaut.
 À sec : `load_model`, `Engine`, `create_app`, `uvicorn.run` neutralisés (aucune carte)."""
 import contextlib
 import io
@@ -74,17 +75,19 @@ def test_defaut_none_sur_non_hybride_aussi(monkeypatch):
 def test_ngram_explicite_sur_hybride_sert_quand_meme_avec_avertissement(monkeypatch):
     parsed, sortie = _lancer(monkeypatch, True, "--speculative", "ngram")
     assert parsed.speculative == "ngram"
-    assert "AVERTISSEMENT" in sortie and "bogue 277" in sortie and "qualification en cours" in sortie
+    assert "AVERTISSEMENT" in sortie and "bogue 277 corrigé" in sortie and "quasi-égalités" in sortie
+    assert "jusqu'à 55 pour 32 jetons" in sortie and "pas le défaut" in sortie
+    assert "qualification en cours" not in sortie          # texte d'avant la 277fix, faux désormais
 
 
 def test_ngram_explicite_sur_non_hybride_avertit_aussi(monkeypatch):
     """283 élargie : l'avertissement ne dépend plus de l'hybride, le bogue touchait le dense aussi."""
     parsed, sortie = _lancer(monkeypatch, False, "--speculative", "ngram")
     assert parsed.speculative == "ngram"
-    assert "AVERTISSEMENT" in sortie and "bogue 277" in sortie
-    # chef (relecture 283) : le message ne doit jamais affirmer que le correctif est livré —
-    # la 0.7.4 peut sortir sans la 277fix (test Coder non tranché).
-    assert "277fix inclus" not in sortie
+    assert "AVERTISSEMENT" in sortie and "bogue 277 corrigé" in sortie
+    # chef (relecture 283, puis 277cm) : ce message n'existe qu'AVEC la 277fix dans l'arbre (même commit) —
+    # le correctif y est, le texte le dit ; il ne dit jamais que le ngram est redevenu le défaut.
+    assert "pas le défaut" in sortie
 
 
 def test_none_explicite_pas_d_avertissement(monkeypatch):

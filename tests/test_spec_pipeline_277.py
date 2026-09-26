@@ -1,29 +1,37 @@
-"""Pièce 277 (correctif) : spéculer avec un pas simple ENCORE EN VOL (pipeline, `_pipeline_pendiente`) faisait relire le
-dernier jeton à la vérification puis livrer le résultat périmé — jetons répétés, sortie gloutonne ≠ décodage simple,
-jetons que la cible rejette de 13 à 24 logits (277a-bis, mixte-i8c, ngram k = 4, défaut de `serve`). `step()` vide
-désormais le pipeline avant de spéculer (`_pipeline_vider`).
-(1) ngram k = 4 et k = 1 : sortie gloutonne = sans spéculation, vidages > 0 (le chemin corrigé a été pris) ;
-(2) témoin cassant : l'ancien comportement (spéculer sans vider) DOIT rendre une sortie différente.
-Carte et modèle requis (sous carte.sh) ; ignoré sinon. ACVRAM_TEST_SPEC_ALIAS choisit l'alias."""
+"""Pièce 277 (correctif 277fix) : `step()` passait au pas spéculatif alors qu'un pas simple, lancé en recouvrement
+(`_pipeline_pendiente`), était encore en vol — la vérification relisait le dernier jeton, puis le pas simple suivant
+livrait le résultat périmé : jetons répétés. SANS correctif, sur le mixte-i8c (ngram k = 4, défaut de `serve`
+jusqu'à la 283), 4 invites sur 5 divergeaient du décodage simple dès le 5e-17e jeton, et le jeton émis était
+5,4 à 13,5 logits de marge sous le premier choix de la cible (13 à 24 logits sous le jeton de référence)
+(revue/poste5-piece277abis-verdict-26-09.md). `step()` vide désormais le pipeline avant de spéculer
+(`_pipeline_vider`).
+
+Deux volets (décision chef, 277cm) :
+* **mixte (hybride GDN)** : égalité EXACTE, ngram k = 4 et k = 1 contre none (vraie au bit après correctif) ;
+* **Coder (dense MoE)** : la vérification MoE à q_len 5 change l'ordre des sommes — égalité impossible par
+  construction ; à CHAQUE divergence, le jeton de référence doit être le premier choix de la cible, le jeton
+  spéculatif le second, marge ≤ 0,5 (seuil du scellé 277a-bis, jamais relevé après coup). Mesuré après
+  correctif : 2 divergences, marges 0,0152 et 0,0154.
+Condition d'entrée : les deux volets rendent FAUX sur la base sans correctif (prise poste5-p277fin, même fichier
+lancé dans l'arbre 8d5c5580c). Carte et modèles requis (sous carte.sh) ; ignoré sinon."""
 import os
 
 import pytest
 import torch
 
 pytestmark = pytest.mark.gpu_requis
-ALIAS = os.environ.get("ACVRAM_TEST_SPEC_ALIAS", "Qwen3.8-27B-unsloth-mixte-i8c")
-N = 32
+MIXTE, CODER = "Qwen3.8-27B-unsloth-mixte-i8c", "Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c"
+N, SEUIL = 32, 0.5
 
 
-@pytest.fixture(scope="module")
-def modele():
+def _charger(alias):
     import sys
     racine = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, os.path.join(racine, "outils"))
     from racine_modeles import racine_modeles
-    chemin = os.path.join(racine_modeles(), ALIAS)
+    chemin = os.path.join(racine_modeles(), alias)
     if not torch.cuda.is_available() or not os.path.isdir(chemin):
-        pytest.skip(f"carte ou modèle absent ({ALIAS})")
+        pytest.skip(f"carte ou modèle absent ({alias})")
     if torch.cuda.mem_get_info()[0] < 26 << 30:
         pytest.skip("moins de 26 Gio libres")
     from acvram.engine.loader import load_model
@@ -31,28 +39,50 @@ def modele():
     tok = load_tokenizer(chemin)
     loaded = load_model(chemin, dtype=torch.bfloat16, max_model_len=1024, max_concurrent_seqs=2)
     ids = tok.encode(open(os.path.join(racine, "README.md"), encoding="utf-8").read())
-    yield loaded, tok, [ids[400 * i: 400 * i + 200] for i in range(5)]
-    del loaded
-    torch.cuda.empty_cache()
+    return loaded, tok, [ids[400 * i: 400 * i + 200] for i in range(5)]
 
 
-def _generer(loaded, tok, invites, k):
+_UN = {}                                                 # un seul modèle chargé à la fois (deux 27-30B ne tiennent pas)
+
+
+def _modele(alias):
+    if alias not in _UN:
+        _UN.clear()
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        _UN[alias] = _charger(alias)
+    return _UN[alias]
+
+
+@pytest.fixture
+def mixte():
+    return _modele(MIXTE)
+
+
+@pytest.fixture
+def coder():
+    return _modele(CODER)
+
+
+def _generer(loaded, tok, invites, k, graphes=True, n=N):
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
     from acvram.engine.speculative import NGramProposer
-    eng = Engine(loaded, tok, max_batch_size=2, max_model_len=1024, enable_cuda_graphs=True,
+    eng = Engine(loaded, tok, max_batch_size=2, max_model_len=1024, enable_cuda_graphs=graphes,
                  speculator=NGramProposer() if k else None, spec_k=max(k, 1))
     eng._eos = set()
     vidages = [0]
-    vrai = eng._pipeline_vider
+    if hasattr(eng, "_pipeline_vider"):                   # arbre corrigé ; absent sur la base (condition d'entrée)
+        vrai = eng._pipeline_vider
 
-    def compte():
-        vidages[0] += eng._pipeline_pendiente is not None
-        return vrai()
-    eng._pipeline_vider = compte
+        def compte():
+            vidages[0] += eng._pipeline_pendiente is not None
+            return vrai()
+        eng._pipeline_vider = compte
     sorties = []
     for p in invites:
-        seq = eng.add_request(list(p), SamplingParams(max_tokens=N, temperature=0.0))
+        seq = eng.add_request(list(p), SamplingParams(max_tokens=n, temperature=0.0))
         while eng.running or eng.waiting:
             eng.step()
         sorties.append(list(seq.output_ids))
@@ -60,22 +90,38 @@ def _generer(loaded, tok, invites, k):
 
 
 @pytest.mark.parametrize("k", [4, 1])
-def test_ngram_glouton_egal_au_decodage_simple(modele, k):
-    loaded, tok, invites = modele
+def test_mixte_ngram_egal_au_decodage_simple_au_bit(mixte, k):
+    loaded, tok, invites = mixte
     ref, _, _ = _generer(loaded, tok, invites, 0)
-    spec, proposes, vidages = _generer(loaded, tok, invites, k)
-    assert proposes > 0 and vidages > 0, (proposes, vidages)
+    spec, proposes, _ = _generer(loaded, tok, invites, k)
+    assert proposes > 0
     assert spec == ref
 
 
-def test_temoin_speculer_sans_vider_change_la_sortie(modele, monkeypatch):
-    from acvram.engine.runner import Engine
-
-    def ancien(self):                     # l'avant-277 : spéculer avec le pas simple toujours en vol
-        pend = self._pipeline_pendiente
-        return self._speculative_decode([s for s in pend["seqs"] if not s.finished])
-    loaded, tok, invites = modele
+def test_coder_ngram_ne_diverge_que_par_quasi_egalite(coder):
+    loaded, tok, invites = coder
     ref, _, _ = _generer(loaded, tok, invites, 0)
-    monkeypatch.setattr(Engine, "_pipeline_vider", ancien)
-    faux, _, _ = _generer(loaded, tok, invites, 4)
-    assert faux != ref
+    spec, proposes, _ = _generer(loaded, tok, invites, 4)
+    assert proposes > 0
+    vus = []
+    vrai = loaded.model._logits_finaux
+
+    def espion(x):
+        y = vrai(x)
+        vus.append(y[-1].detach().float().clone())
+        return y
+    loaded.model._logits_finaux = espion
+    try:
+        for i, (a, b) in enumerate(zip(ref, spec)):
+            if a == b:
+                continue
+            j = next(t for t, (x, y) in enumerate(zip(a, b)) if x != y)
+            vus.clear()
+            rejeu, _, _ = _generer(loaded, tok, [invites[i]], 0, graphes=False, n=j + 1)
+            assert rejeu[0] == a[:j + 1], f"invite {i} : le rejeu eager du témoin n'est pas fidèle jusqu'à j = {j}"
+            v, ix = vus[j].topk(2)
+            marge = float(v[0] - v[1])
+            assert (int(ix[0]), int(ix[1])) == (a[j], b[j]) and marge <= SEUIL, \
+                f"invite {i}, j = {j} : top1/top2 {int(ix[0])}/{int(ix[1])} pour réf/spéc {a[j]}/{b[j]}, marge {marge:.4f}"
+    finally:
+        loaded.model._logits_finaux = vrai
