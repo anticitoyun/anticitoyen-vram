@@ -16,7 +16,7 @@ CONSTRUIRE_DEB = (RACINE / "tools" / "construire-deb.sh").read_text(encoding="ut
 MOTIFS_RELEASE_YML = [
     "aur-$V.tar.gz",           # AUR : job aur
     "*.src.rpm",               # RPM/COPR : job rpm
-    "acvram-${TAG#v}.flatpak", # Flatpak : job flatpak
+    "acvram-$V.flatpakref",    # Flatpak : job flatpak — 266 i : .flatpakref (dépôt OSTree gh-pages), plus de bundle
     "SHA256SUMS",              # pièce 259b/271 : sommes de tout ce que la release joint, job sommes
 ]
 
@@ -47,7 +47,7 @@ def test_les_noms_cites_dans_le_readme_correspondent_aux_motifs_release_yml():
     correspondances = {
         "aur-<version>.tar.gz": "aur-$V.tar.gz",
         ".src.rpm": ".src.rpm",
-        "acvram-<version>.flatpak": "acvram-${TAG#v}.flatpak",
+        "acvram-<version>.flatpakref": "acvram-$V.flatpakref",
     }
     for texte, nom in ((README, "README.md"), (README_EN, "docs/README.en.md")):
         for cite, attendu_release_yml in correspondances.items():

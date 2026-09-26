@@ -206,6 +206,8 @@ jobs:
           if [ -n "${FLATPAK_GPG_KEY:-}" ]; then
             printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
             CLE=$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')
+            # le COMMIT doit être signé (pas seulement le résumé) : sans build-sign, « GPG verification enabled, but no signatures found »
+            flatpak build-sign --gpg-sign="$CLE" repo io.github.anticitoyen.acvram
             flatpak build-update-repo --generate-static-deltas --gpg-sign="$CLE" repo
             gpg --batch --export "$CLE" | base64 -w0 > cle.b64; SIGNE=1
           else

@@ -62,6 +62,7 @@ def test_release_yml_publie_un_depot_et_un_flatpakref_pas_un_bundle():
 def test_release_yml_gpg_optionnelle_avec_avertissement():
     run = _flatpak_run()
     assert 'if [ -n "${FLATPAK_GPG_KEY:-}" ]' in run and "--gpg-sign=" in run and "GPGKey=" in run
+    assert 'flatpak build-sign --gpg-sign="$CLE" repo io.github.anticitoyen.acvram' in run, "le commit doit être signé, pas seulement le résumé"
     assert "::warning::FLATPAK_GPG_KEY absent" in run and "--no-gpg-verify" in run
     jobs = yaml.safe_load((RACINE / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"))["jobs"]
     assert any("FLATPAK_GPG_KEY" in str(s.get("env", {})) for s in jobs["flatpak"]["steps"])
