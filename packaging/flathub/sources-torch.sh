@@ -38,7 +38,7 @@ for w in sorted(glob.glob(os.path.join(d, "*.whl"))):
     url = url_de_la_roue(os.path.basename(w), index, sha)
     mods.append({"name": "python3-" + nom, "buildsystem": "simple",
                  "build-commands": [f"pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${{PWD}}\" --prefix=${{FLATPAK_DEST}} --no-deps \"{nom}\" --no-build-isolation"],
-                 "sources": [{"type": "file", "url": url, "sha256": sha}]})
+                 "sources": [_m.source_de_roue(os.path.basename(w), url, sha)]})   # 266 g : dest-filename décodé (« + », pas « %2B »)
 json.dump({"name": "torch-cu130", "buildsystem": "simple", "build-commands": [], "modules": mods},
           open("torch-cu130.json", "w"), indent=2)
 print(len(mods), "modules →", "torch-cu130.json", "; taille roues", sum(os.path.getsize(w) for w in glob.glob(os.path.join(d, "*.whl"))) // 2**20, "Mio")

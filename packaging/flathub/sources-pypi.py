@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from roue_url import url_de_la_roue  # noqa: E402
@@ -66,6 +67,16 @@ def telecharger(exigences: list[str], dossier: str, version: str) -> None:
     subprocess.check_call(cmd + exigences)
 
 
+def source_de_roue(fichier: str, url: str, sha256: str) -> dict:
+    """La source `file` d'une roue : URL, somme, et `dest-filename` = le NOM DE ROUE décodé (266 g). Sans lui, flatpak-builder
+    garde le dernier segment de l'URL tel quel — `torch-2.14.0%2Bcu130-…whl` — et pip, qui lit la version dans le nom,
+    n'y voit pas une roue (« No matching distribution found for torch », run 36227976586)."""
+    fichier = urllib.parse.unquote(fichier)
+    if "%" in fichier or not fichier.endswith(".whl") or len(fichier[:-4].split("-")) < 5:
+        raise ValueError(f"{fichier} : pas un nom de roue valide pour dest-filename")
+    return {"type": "file", "url": url, "sha256": sha256, "dest-filename": fichier}
+
+
 def modules_depuis_roues(dossier: str, resoudre=url_de_la_roue, index: str = PYPI, version: str | None = None) -> list[dict]:
     """Un module flatpak par roue du dossier (hors torch/triton/nvidia-*), trié par nom — `resoudre(fichier, index, sha)` rend l'URL.
     `version` : chaque roue doit s'installer sous ce CPython (266 e), sinon ValueError."""
@@ -83,7 +94,7 @@ def modules_depuis_roues(dossier: str, resoudre=url_de_la_roue, index: str = PYP
         mods.append({"name": "python3-" + nom.replace("_", "-").lower(), "buildsystem": "simple",
                      "build-commands": [f"pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${{PWD}}\" "
                                         f"--prefix=${{FLATPAK_DEST}} --no-deps --no-build-isolation \"{nom}\""],
-                     "sources": [{"type": "file", "url": resoudre(fichier, index, sha), "sha256": sha}]})
+                     "sources": [source_de_roue(fichier, resoudre(fichier, index, sha), sha)]})
     return mods
 
 
