@@ -149,7 +149,8 @@ if [ -n "$FLAT" ]; then
     export FLATPAK_USER_DIR="$DOSSIER/flatpak-user"      # jamais ~/.local/share/flatpak : rien sur l'installation de l'utilisateur
     mkdir -p "$FLATPAK_USER_DIR"
     flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
-    if flatpak install --user --noninteractive -y --bundle "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
+    # --reinstall : un rejeu sur la même installation dédiée ne doit pas rendre FAUX pour « already installed »
+    if flatpak install --user --noninteractive -y --reinstall --bundle "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
       ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1))"
       # verif-070 : `flatpak run` garde le cwd de l'appelant ; lancé depuis le dépôt, acvram (_garde_arbre) refuse d'être
       # importé depuis /app quand le cwd est dans un arbre acvram — le bac à sable se lance depuis le dossier de la release
