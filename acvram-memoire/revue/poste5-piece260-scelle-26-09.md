@@ -42,8 +42,10 @@ Bras, tous par `kernels.int8_matmul` (chemin relevé par CHEMINS_INT8) : **T** s
 * **S1 (celui de la 255, par forme)** : I_part ≤ 0,50 × T_part à n = 78 sur qkv ET out. **Prédit NON tenu sur out (0,55-0,66).**
 * **S2 (pondéré, ce que paie le moteur)** : Σ I_part / Σ T_part sur les trois formes GDN à n = 78 (48 couches chacune)
   ≤ 0,50 — prédit 0,44-0,55 ; ET I_seul ≤ 0,50 × T_seul à n = 624 sur les quatre formes — prédit tenu.
-* Règle : S1 et S2 tenus → étape moteur. **S1 faux et S2 tenu → arrêt, décision de chef** (je ne change pas seule le critère
-  qu'il a donné). S2 faux → fermé.
+* ~~Règle : S1 et S2 tenus → étape moteur. S1 faux et S2 tenu → arrêt, décision de chef. S2 faux → fermé.~~
+* **DÉCISION DE chef (26/09, avant la mesure, remplace la règle ci-dessus)** : **le critère principal est S2** (pondéré
+  GDN, parce que c'est le préfill moteur qui compte) ; S1 par forme est relevé à titre d'information seulement. **S2 tenu →
+  j'enchaîne sans m'arrêter** : étape moteur (préfill par lot, § 3), puis PPL appariée et mini lm-eval. S2 faux → fermé.
 
 ## 3. Scellé — étape moteur (jouée seulement si la règle ci-dessus l'ouvre)
 * **Préfill par lot** (eng243 : 8 × 78, invite réelle, ACVRAM_CHRONO_SYNC=1, bascule du drapeau à chaud A/B/A/B dans un
@@ -54,6 +56,9 @@ Bras, tous par `kernels.int8_matmul` (chemin relevé par CHEMINS_INT8) : **T** s
   T_admis = bascule 243 à n = 96 (243 : max 0,00396). **Tenue si KL(A‖B) max ≤ 2 × KL T_admis max, argmax ≥ admis − 0,005,
   rejeux 0.** **Prédiction : NON tenue (≈ 70 %)** : l'activation quantifiée ajoute ≈ 0,8 % d'erreur par couche sur 233
   tenseurs, là où la bascule 243 ne changeait que l'ordre des sommes. Rapporté aussi : PPL des pas forcés A et B.
+* **Décision de chef (même message)** : la KL est RELEVÉE mais ne juge pas ; **le critère d'acceptation est celui de la
+  Q19 : récupération moyenne ≥ 99 % sur le mini panel lm-eval ET pire tâche publiée** (seuil de pire tâche à sceller avant
+  le panel, dans l'addendum qui fixera tâches, n et réglages), PPL appariée en filtre.
 * **Si la KL n'est pas tenue** (Q19, poste4 → duck.ai, 26/09) : l'opt-in reste opt-in ; la KL seule n'est pas le critère
   d'acceptation d'un changement de format dans la pratique (vLLM/llm-compressor) — le précédent de la maison est la P2 du
   19/09 (W8A8 int8 au préfill du Coder accepté sur PPL 3 tranches ≤ 1,020 et cinq autres lignes). Pièce suivante proposée :
