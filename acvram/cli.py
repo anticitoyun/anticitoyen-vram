@@ -15,6 +15,7 @@ import argparse
 import gc
 import json
 import os
+import subprocess
 import sys
 import time
 from typing import Optional

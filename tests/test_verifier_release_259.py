@@ -116,3 +116,24 @@ def test_l_ancien_bundle_encore_joint_est_faux(hors_tmp):
     _release_simulee(hors_tmp / "bundle", ancien_bundle=True)
     r = _lancer(hors_tmp / "bundle")
     assert r.returncode == 1 and "FAUX    flatpak : l'ancien bundle" in r.stdout, r.stdout
+
+
+def test_259d_un_fichier_sur_disque_hors_release_n_est_pas_juge(hors_tmp):
+    """259 d : le dossier de téléchargement est un cache. Un fichier d'un téléchargement précédent (l'ancien bundle) n'est
+    pas « joint » : ce que la release joint, c'est liste-release.txt. Hors --simule, l'intrus va dans hors-release/."""
+    texte = SCRIPT.read_text(encoding="utf-8")
+    assert 'liste-release.txt' in texte and 'hors-release' in texte
+    assert 'grep -qxF "acvram-${V}.flatpak" "$DOSSIER/liste-release.txt"' in texte, "le bundle se juge sur la liste"
+    assert 'mv -f "$f" "$DOSSIER/hors-release/"' in texte and "rm " not in texte.split("hors-release/")[1][:200]
+    # en --simule le dossier fait foi : le témoin 266 i (bundle présent → FAUX) reste rouge
+    _release_simulee(hors_tmp / "b2", ancien_bundle=True)
+    assert _lancer(hors_tmp / "b2").returncode == 1
+
+
+def test_259d_l_app_deja_installee_est_retiree_avant_l_install():
+    """259 d : --reinstall ne traverse pas les remotes (« already installed » depuis acvram-origin quand le .flatpakref
+    propose acvram) — l'installation dédiée est vidée de l'app avant install --from."""
+    texte = SCRIPT.read_text(encoding="utf-8")
+    i = texte.index('flatpak uninstall --user --noninteractive -y "$APP"')
+    assert i < texte.index('flatpak install --user --noninteractive -y --reinstall --from')
+    assert 'flatpak info --user "$APP" >/dev/null 2>&1 &&' in texte[i - 80:i]

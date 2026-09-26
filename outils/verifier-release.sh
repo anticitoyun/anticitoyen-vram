@@ -50,6 +50,7 @@ if [ -z "$SIMULE" ]; then
        --jq '"release " + .tagName + (if .isDraft then " (BROUILLON)" else "" end) + " : " + (.assets | length | tostring) + " fichiers (gh)"' \
        || { faux "release $TAG introuvable sur $DEPOT"; echo "VERDICT: FAUX"; exit 1; }
     gh release download "$TAG" --repo "$DEPOT" --dir "$DOSSIER" --clobber || faux "gh release download"
+    gh release view "$TAG" --repo "$DEPOT" --json assets --jq '.assets[].name' > "$DOSSIER/liste-release.txt"
   else
     # sans jeton : api.github.com (60 requêtes/h) et browser_download_url — un jeton ne transite jamais par ici
     python3 - "$DEPOT" "$TAG" "$DOSSIER" <<'PY' || { faux "release $TAG introuvable sur $DEPOT (API publique)"; echo "VERDICT: FAUX"; exit 1; }
@@ -58,6 +59,7 @@ depot, tag, dossier = sys.argv[1:4]
 with urllib.request.urlopen(f"https://api.github.com/repos/{depot}/releases/tags/{tag}", timeout=30) as r:
     d = json.load(r)
 print(f"release {d['tag_name']}{' (BROUILLON)' if d.get('draft') else ''} : {len(d['assets'])} fichiers (API publique)")
+(pathlib.Path(dossier) / "liste-release.txt").write_text("".join(a["name"] + "\n" for a in d["assets"]), encoding="utf-8")
 for a in d["assets"]:
     cible = pathlib.Path(dossier) / a["name"]
     with urllib.request.urlopen(a["browser_download_url"], timeout=600) as r, open(cible, "wb") as f:
@@ -71,6 +73,18 @@ PY
   fi
 fi
 echo "dossier : $DOSSIER"
+# 259 d : le dossier est un cache — un fichier d'un téléchargement PRÉCÉDENT (l'ancien bundle de la v0.7.0, un .deb
+# refait) y reste et se ferait juger comme joint. Ce qui est joint, c'est liste-release.txt ; le reste va dans
+# hors-release/ (déplacé, jamais effacé). En --simule, le dossier fait foi.
+if [ -z "$SIMULE" ] && [ -s "$DOSSIER/liste-release.txt" ]; then
+  for f in "$DOSSIER"/*; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in liste-release.txt|*.log|*.txt) continue ;; esac
+    if ! grep -qxF "$(basename "$f")" "$DOSSIER/liste-release.txt"; then
+      mkdir -p "$DOSSIER/hors-release" && mv -f "$f" "$DOSSIER/hors-release/" && echo "HORS    $(basename "$f") : sur disque, pas dans la release — déplacé dans hors-release/"
+    fi
+  done
+fi
 
 # ---- 2. présence et nom de chaque fichier annoncé par release.yml (un seul de chaque) ---------------------------
 # job deb → acvram_<V>_amd64.deb ; rpm → acvram-<V>-*.noarch.rpm + acvram-<V>-*.src.rpm ; aur → aur-<V>.tar.gz ;
@@ -87,7 +101,7 @@ un_seul "rpm" "acvram-${V}-*.noarch.rpm";       RPM=$TROUVE
 un_seul "src.rpm" "acvram-${V}-*.src.rpm";      SRPM=$TROUVE
 un_seul "aur" "aur-${V}.tar.gz";                AUR=$TROUVE
 un_seul "flatpak" "acvram-${V}.flatpakref";     FLAT=$TROUVE
-[ -e "$DOSSIER/acvram-${V}.flatpak" ] && faux "flatpak : l'ancien bundle acvram-${V}.flatpak est encore joint (266 i : à retirer, > 2 Gio et sans extra-data)"
+{ [ -n "$SIMULE" ] && [ -e "$DOSSIER/acvram-${V}.flatpak" ] || { [ -s "$DOSSIER/liste-release.txt" ] && grep -qxF "acvram-${V}.flatpak" "$DOSSIER/liste-release.txt"; }; } && faux "flatpak : l'ancien bundle acvram-${V}.flatpak est encore joint (266 i : à retirer, > 2 Gio et sans extra-data)"
 un_seul "translations" "translations-${V}.zip"; TRAD=$TROUVE
 
 # ---- 3. sommes publiées (si release.yml en produit) ; sinon les sommes calculées, pour le registre ---------------
@@ -157,7 +171,10 @@ if [ -n "$FLAT" ]; then
     grep -q '^GPGKey=' "$FLAT" && ok "flatpak : dépôt signé (GPGKey dans le .flatpakref)" || saute "flatpak : dépôt NON signé (pas de GPGKey) — --no-gpg-verify"
     if [ "$FLATPAK" != doctor ]; then
       flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
-      # --reinstall : un rejeu sur la même installation dédiée ne doit pas rendre FAUX pour « already installed »
+      # --reinstall : un rejeu sur la même installation dédiée ne doit pas rendre FAUX pour « already installed » ;
+      # 259 d : --reinstall ne traverse pas les remotes (l'app posée par l'ancien bundle vient de acvram-origin, le
+      # .flatpakref propose acvram) → on retire d'abord ce qui est installé (installation dédiée : rien de l'utilisateur)
+      flatpak info --user "$APP" >/dev/null 2>&1 && flatpak uninstall --user --noninteractive -y "$APP" >/dev/null 2>&1
       if flatpak install --user --noninteractive -y --reinstall --from "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
         ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)) — extra-data : $(flatpak run --user --command=sh "$APP" -c 'wc -l < /app/extra/apply_extra.ok' 2>/dev/null || echo '?') paquets dépaquetés"
       else faux "flatpak : installation échouée (flatpak-install.log)"; tail -n5 "$DOSSIER/flatpak-install.log" | sed 's/^/        /'; fi
