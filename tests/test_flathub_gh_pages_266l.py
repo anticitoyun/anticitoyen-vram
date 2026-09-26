@@ -29,7 +29,8 @@ def test_266l_un_seul_job_flatpak_a_la_fois_sans_annulation():
 def test_266l_le_depot_servi_amorce_repo_avant_la_construction():
     run = _run()
     assert run.index("git worktree add pages gh-pages") < run.index("flatpak-builder --user"), "gh-pages se lit AVANT de construire"
-    assert "[ -d pages/flatpak/objects ] && cp -a pages/flatpak repo" in run
+    ligne = next(l for l in run.splitlines() if "cp -a pages/flatpak repo" in l)      # 266 m : dans un `if`, suivi du mkdir
+    assert "[ -d pages/flatpak/objects ]" in ligne and ligne.index("[ -d pages/flatpak/objects ]") < ligne.index("cp -a pages/flatpak repo")
     assert run.count("--prune --prune-depth=1") == 2, "les deux branches (signée ou non) élaguent"
 
 
