@@ -267,6 +267,7 @@ Two findings from these measurements changed the defaults:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **resuming the project on another machine** (French) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | how the pieces fit together |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | pure NVFP4 or attention+GDN in per-channel int8, on a Gated DeltaNet hybrid |
 | [`docs/MATERIEL.md`](MATERIEL.md) | tuning this specific machine |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **what isn't done yet**, read this first |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | working conventions for the code (language, style, checks before pushing) |

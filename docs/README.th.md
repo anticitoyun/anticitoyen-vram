@@ -267,6 +267,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **การรับช่วงโครงการต่อบนเครื่องอื่น** (ภาษาฝรั่งเศส) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | ส่วนประกอบต่าง ๆ ทำงานร่วมกันอย่างไร |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 ล้วน หรือ attention+GDN แบบ int8 ต่อช่อง บนไฮบริด Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | การปรับแต่งเครื่องเฉพาะเครื่องนี้ |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **สิ่งที่ยังไม่เสร็จ** ควรอ่านเป็นอันดับแรก |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | ข้อตกลงในการทำงานกับโค้ด (ภาษา สไตล์ การตรวจสอบก่อน push) |

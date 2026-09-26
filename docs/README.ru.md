@@ -267,6 +267,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **восстановление проекта на другой машине** (на французском) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | как собираются части |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | чистый NVFP4 или attention+GDN в int8 по каналам, на гибриде Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | настройка этой конкретной машины |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **что ещё не сделано**, читать в первую очередь |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | соглашения по работе с кодом (язык, стиль, проверки перед отправкой) |

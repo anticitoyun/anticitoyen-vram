@@ -267,6 +267,7 @@ Dva poznatky z těchto měření změnily výchozí hodnoty:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **obnovení projektu na jiném stroji** (francouzsky) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | jak do sebe zapadají jednotlivé díly |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | čisté NVFP4, nebo attention+GDN v int8 po kanálech, na hybridu Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ladění tohoto konkrétního stroje |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **co ještě není hotovo**, přečíst jako první |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | pracovní konvence pro kód (jazyk, styl, kontroly před pushnutím) |

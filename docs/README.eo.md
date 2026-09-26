@@ -267,6 +267,7 @@ Du konstatoj el ĉi tiuj mezuroj ŝanĝis la defaŭltajn valorojn:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **daŭrigi la projekton sur alia maŝino** (france) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | kiel la pecoj kuniĝas |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | pura NVFP4 aŭ atento+GDN en int8 po kanalo, sur Gated DeltaNet-hibrido |
 | [`docs/MATERIEL.md`](MATERIEL.md) | agordi ĉi tiun specifan maŝinon |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **kio ankoraŭ ne farita**, legu ĝin unue |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | laborkonvencioj pri la kodo (lingvo, stilo, kontroloj antaŭ puŝo) |
