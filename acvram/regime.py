@@ -57,6 +57,7 @@ VARIABLES: tuple[Variable, ...] = (
              "colle du préfill MoE : torch (argsort + bincount + _tuiles) | triton (P0 : tri + histogramme et grille en deux lancements, mêmes tenseurs)"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),
     Variable("INT8_GEMV_MAX", "80", ("acvram.kernels", "_INT8_GEMV_MAX")),
+    Variable("INT8_GEMV_MAX_PARTAGE", "16", ("acvram.kernels", "_INT8_GEMV_MAX_PARTAGE"), None, "pièce 243 (hors bit, KL tenue ; service mixte b=8 +9,70 % t/s) : seuil GEMV→GEMM int8 dans une portée depaquetage_partage (boucle par séquence GDN au préfill) ; 16 (défaut depuis 0.7.0) | 80 (témoin : sortie d'avant)"),
     Variable("DEPAQUETAGE", "auto", ("acvram.kernels.marlin_port", "_DEPAQUETAGE"), "torch",
              "pièce 147 (poste6, 24/09) : noyau du dépaquetage Marlin → bf16 au préfill de la disposition unique (PROJ_MARLIN=1 "
              "seulement) : auto (cuda si l'extension l'a, sinon triton) | cuda (lignes entières, au débit de nvfp4_dequant) | "
@@ -117,8 +118,8 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 63 : glue fusionnée, reproductible (défaut) | 0 témoin glue A4 (aligneur vLLM par atomiques, NON reproductible) — jamais servi"),
     Variable("MOE_W13", "1", ("acvram.engine.moe", "_MOE_W13"), "0",
              "pièces 82/82 ter (23/09) : 1 défaut = gate·up en une pile Marlin w13 (disposition unique, gate/up rendues, experts_layout=marlin-w13) — GEMM w13 au seul décodage tensor, sortie au 2⁻⁷ ; préfill (deux GEMM de largeur N lues dans w13) et GEMV au bit | 0 témoin gate et up séparées"),
-    Variable("MARLIN_PAR_LIGNE", "1", ("acvram.engine.moe", "_MARLIN_PAR_LIGNE"), "0",
-             "pièce 209 (25/09), AU DÉFAUT (rétabli par la 226 le 26/09 après le retour arrière de la 220 sur un artefact du banc 217) : 1 = piles d experts à sous-normales (Coder-30B couches 0, 1, 2, 4, 157) préparées en Marlin avec un facteur par ligne d expert (échelle globale par (expert, colonne), exact au bit des poids) et servies par le tensor / GEMV Marlin — qkvo-i8c +5,8 %, Coder nvfp4 pur +12,8 % / −18,4 % J à invites réelles (b=8) | 0 témoin : préparation d avant, ces piles refusées (naturel, decode_mma) — ligne marlin(N/M) refus=[…]"),
+    Variable("MARLIN_PAR_LIGNE", "0", ("acvram.engine.moe", "_MARLIN_PAR_LIGNE"), "1",
+             "pièce 209 (25/09), À LA DEMANDE depuis la 232 b (26/09, chef) : 1 = piles d experts à sous-normales (Coder-30B couches 0, 1, 2, 4, 157) préparées en Marlin avec un facteur par ligne d expert (échelle globale par (expert, colonne), exact au bit des poids) et servies par le tensor / GEMV Marlin — qkvo-i8c +5,8 % (209 c), Coder nvfp4 pur +12,8 % en salve unique (226) mais −15,3 % / +25,4 % J en débit soutenu (229) : écart entre protocoles non expliqué | 0 défaut : préparation d avant, ces piles refusées (naturel, decode_mma) — ligne marlin(N/M) refus=[…]"),
     Variable("MARLIN_DISTINCT", "0", ("acvram.engine.moe", "_MARLIN_DISTINCT"), "0",
              "C10 : 1 = la disposition unique Marlin sert aussi les MoE à gate/up distincts (tables AWQ séparées : GLM k48-calibA) — décodage par le GEMV Marlin à une projection, gate puis up ; 0 défaut = refus nommé, pile naturelle gardée, chemin d'avant (verdict-glm-b12-19-09) ; scellé GLM b=12 ≥ chemin d'avant × 1,05"),
     # --- capacités, plafonds, modes du moteur (19/09 : sortis de HORS_REGIME, poste7) ---
@@ -389,6 +390,7 @@ HORS_REGIME = frozenset({
     "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
     "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
     "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
+    "ACVRAM_KERNELS_PRECOMPILES",                                                # 240 : dossier d'un .so précompilé — un chemin ; le .so servi est nommé par son empreinte
     "ACVRAM_ARBRE_LIBRE",                                                         # garde d'import (a86fa1dd) : quel arbre est importé, aucun chemin de calcul
     "ACVRAM_TRACE_CRENEAUX", "ACVRAM_TRACE_ENTREES", "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_ROUTAGE_PT", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",

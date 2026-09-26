@@ -1,14 +1,48 @@
-<p align="center"><img src="logo-acvram.png" alt="acvram" width="420"></p>
+<p align="center">
+  <img src="../docs/logo-acvram.png" alt="acvram" width="200">
+</p>
 
 # anticitoyen VRAM/RAM (`acvram`)
 
-🌐 [Français](../README.md) · [العربية](README.ar.md) · [বাংলা](README.bn.md) · [Català](README.ca.md) · [Čeština](README.cs.md) · [Dansk](README.da.md) · [Deutsch](README.de.md) · [Ελληνικά](README.el.md) · [English](README.en.md) · [Esperanto](README.eo.md) · [Español](README.es.md) · [فارسی](README.fa.md) · [Suomi](README.fi.md) · [עברית](README.he.md) · [हिन्दी](README.hi.md) · [Magyar](README.hu.md) · [Bahasa Indonesia](README.id.md) · [Italiano](README.it.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Norsk bokmål](README.nb.md) · [Nederlands](README.nl.md) · [Polski](README.pl.md) · [Português](README.pt.md) · [Română](README.ro.md) · [Русский](README.ru.md) · [Svenska](README.sv.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [Tiếng Việt](README.vi.md) · [中文](README.zh.md)
+<p align="center">
+  <a href="https://github.com/anticitoyun/anticitoyen-vram/releases/latest"><img src="https://img.shields.io/github/v/release/anticitoyun/anticitoyen-vram" alt="Release"></a>
+  <a href="https://github.com/anticitoyun/anticitoyen-vram/actions/workflows/tests.yml"><img src="https://github.com/anticitoyun/anticitoyen-vram/actions/workflows/tests.yml/badge.svg" alt="CI"></a>
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg" alt="Licence GPL-3.0-or-later"></a>
+  <a href="https://buymeacoffee.com/anticitoyen"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-steunen-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
 
-> Steunen: [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)
+Een met de OpenAI-API compatibele inferentie-gateway die geheugen als een hiërarchie behandelt, elke GPU het numerieke formaat geeft dat zijn silicium het beste kan lezen, en elk token evenveel optimaliseert in joules als in seconden.
 
-Een inferentie-gateway die compatibel is met de OpenAI-API, het geheugen als
-een hiërarchie behandelt en elke GPU het numerieke formaat geeft dat zijn
-silicium het best leest.
+<div align="center">
+
+[🇫🇷 Français](../README.md) · [🇬🇧 English](README.en.md) · [🇸🇦 العربية](README.ar.md) · [🇧🇩 বাংলা](README.bn.md) · [🇪🇸 Català](README.ca.md) · [🇨🇿 Čeština](README.cs.md) · [🇩🇰 Dansk](README.da.md) · [🇩🇪 Deutsch](README.de.md) · [🇬🇷 Ελληνικά](README.el.md) · [🌐 Esperanto](README.eo.md) · [🇪🇸 Español](README.es.md) · [🇮🇷 فارسی](README.fa.md) · [🇫🇮 Suomi](README.fi.md) · [🇮🇱 עברית](README.he.md) · [🇮🇳 हिन्दी](README.hi.md) · [🇭🇺 Magyar](README.hu.md) · [🇮🇩 Bahasa Indonesia](README.id.md) · [🇮🇹 Italiano](README.it.md) · [🇯🇵 日本語](README.ja.md) · [🇰🇷 한국어](README.ko.md) · [🇳🇴 Norsk bokmål](README.nb.md) · **🇳🇱 Nederlands** · [🇵🇱 Polski](README.pl.md) · [🇵🇹 Português](README.pt.md) · [🇷🇴 Română](README.ro.md) · [🇷🇺 Русский](README.ru.md) · [🇸🇪 Svenska](README.sv.md) · [🇹🇭 ไทย](README.th.md) · [🇹🇷 Türkçe](README.tr.md) · [🇺🇦 Українська](README.uk.md) · [🇻🇳 Tiếng Việt](README.vi.md) · [🇨🇳 中文](README.zh.md)
+
+</div>
+
+<p align="center"><img src="captures/resultats-22-09.png" alt="Doorvoer- en energievergelijking met vLLM en llama.cpp" width="720"></p>
+
+---
+
+## Inhoud
+
+- [Twee ideeën](#idees)
+- [Snel starten](#demarrage)
+- [Wat `acvram plan` zegt](#plan)
+- [Sneller gaan](#optimisations)
+- [HTTP-eindpunten](#http)
+- [Waar de cijfers vandaan komen](#chiffres)
+- [Documentatie](#documentation)
+- [Gemeten resultaten](#resultats)
+- [Status](#etat)
+- [Credits](#credits)
+- [Licentie](#licence)
+- [Het project steunen](#soutien)
+
+---
+
+<a id="idees"></a>
+
+## Twee ideeën
 
 Ontworpen voor één specifieke machine:
 
@@ -19,29 +53,21 @@ Ontworpen voor één specifieke machine:
 | Geheugen | 96 GB DDR5 |
 | GPU 0 | ASUS RTX 5090 Astral LC OC, 32 GB — Blackwell, `sm_120` |
 | GPU 1 | ASUS RTX 3080 Ti, 12 GB — Ampere, `sm_86` |
-| Systeem | Ubuntu 26.04 LTS (CUDA 13); beide kaarten op PCIe x8/x8, begrensd op 400 W / 275 W |
+| Systeem | Ubuntu 26.04 LTS (CUDA 13) ; beide kaarten op PCIe x8/x8, begrensd op 400 W / 275 W |
 
-## De twee ideeën
-
-**Eén formaat per GPU.** De RTX 5090 heeft FP4-tensorcores; de RTX 3080 Ti
-heeft die niet, en ook geen FP8. Beide op een gemeenschappelijk formaat zetten
-zou de 5090 verspillen. De converter schrijft daarom *hetzelfde model twee
-keer*, in het formaat dat elke bestemming werkelijk kan benutten:
+**Één formaat per GPU.** De RTX 5090 heeft FP4-tensorkernen; de RTX 3080 Ti niet, en ook geen FP8. Beide op één gemeenschappelijk formaat afstemmen zou de 5090 verspillen. De converter schrijft dus *tweemaal hetzelfde model*, in het formaat dat elke bestemming werkelijk kan benutten:
 
 | | RTX 5090 | RTX 3080 Ti |
 |---|---|---|
-| gewichten | **NVFP4** — E2M1 + FP8 E4M3-schaal per 16 | **INT4** — uint4 + fp16-schaal en -nulpunt per 128 |
+| gewichten | **NVFP4** — E2M1 + FP8-E4M3-schaal per 16 | **INT4** — uint4 + fp16-schaal en -nulpunt per 128 |
 | bits per gewicht | 4,50 | 4,16 |
 | tegenover BF16 | ×3,56 kleiner | ×3,85 kleiner |
-| rekenmodus | FP4-tensorcores | in de kernel gedequantiseerd naar FP16, FP16-tensorcores |
+| rekenmodus | FP4-tensorkernen | gedekwantiseerd naar FP16 in de kernel, FP16-tensorkernen |
 | KV-cache | INT8 | INT8 |
 
-32 GB VRAM bij 4,5 bits per gewicht bevat ongeveer **56 miljard parameters**,
-tegen 16 miljard in BF16. Over beide kaarten is dat ruwweg **78 miljard
-residente parameters** nog voordat het werkgeheugen wordt aangesproken.
+32 GB VRAM bij 4,5 bits per gewicht bevat ongeveer **56 miljard parameters**, tegen 16 miljard in BF16. Op beide kaarten samen geeft dat ongeveer **78 miljard residente parameters** nog vóór het hoofdgeheugen wordt aangeraakt.
 
-**Geheugen is een hiërarchie, geen muur.** Drie lagen, en de planner meet wat
-elke laag kost in plaats van te hopen dat het model past:
+**Geheugen is een hiërarchie, geen muur.** Drie niveaus, en de planner meet wat elk niveau kost in plaats van te hopen dat het model erin past:
 
 ```
 RTX 5090     32 Go   ~1790 Go/s     NVFP4
@@ -49,7 +75,11 @@ RTX 3080 Ti  12 Go    ~912 Go/s     INT4
 DDR5 hôte    96 Go   limité par le PCIe ou la DDR
 ```
 
-## Snel van start
+---
+
+<a id="demarrage"></a>
+
+## Snel starten
 
 ```bash
 ./install.sh                       # environnement virtuel + torch cu128 + acvram
@@ -61,7 +91,7 @@ acvram convert ~/modeles/Qwen3-32B -o ~/acv/qwen3-32b
 acvram serve ~/acv/qwen3-32b --port 8000
 ```
 
-Elke OpenAI-client kan er vervolgens op aansluiten:
+Elke OpenAI-client sluit er vervolgens op aan:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -76,10 +106,13 @@ client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
 
+---
+
+<a id="plan"></a>
+
 ## Wat `acvram plan` zegt
 
-De planner is het waard om vóór elke download te draaien. Hij beantwoordt de
-vragen die bepalen of een model op deze machine bruikbaar is:
+De planner is de moeite waard om vóór elke download te starten. Hij beantwoordt de vragen die bepalen of een model op deze machine bruikbaar is:
 
 ```
 $ acvram plan ~/modeles/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
@@ -98,45 +131,31 @@ $ acvram plan ~/modeles/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
   prefill estime     847 jetons/s
 ```
 
-Hij verkent de configuratieruimte in plaats van de eerste passende oplossing
-te nemen, en twee van zijn beslissingen zijn contra-intuïtief genoeg om ze uit
-te spreken:
+Hij doorzoekt de ruimte van configuraties in plaats van de eerste die past te nemen, en twee van zijn beslissingen zijn contra-intuïtief genoeg om te vermelden:
 
-* **Hij laat de 3080 Ti ongebruikt** wanneer een model alleen op de 5090
-  past. De delen van een pijplijn draaien in serie: een trap van 912 GB/s
-  toevoegen aan een pijplijn van 1790 GB/s vertraagt het decoderen van één
-  stroom. Forceren kan met `--gpus all`.
-* **Hij verkleint de KV-cache om de gewichten in VRAM te houden.** Elke
-  gigabyte voor de cache is een gigabyte gewichten die naar de PCIe-bus wordt
-  verdrongen, en een gewicht via PCIe lezen kost ongeveer dertig keer zoveel
-  als vanuit VRAM. Bij de 70B hierboven brengt alleen deze afweging 2,3 → 17,8
-  tokens/s.
+* **Hij laat de 3080 Ti ongebruikt** wanneer een model op de 5090 alleen past. De etappes van een pijplijn draaien serieel: een stap van 912 GB/s toevoegen aan een pijplijn van 1790 GB/s vertraagt het decoderen met één stroom. Afdwingen met `--gpus all`.
+* **Hij verkleint de KV-cache om de gewichten in VRAM te houden.** Elke gigabyte die aan de cache wordt gegeven, is een gigabyte gewichten die naar de PCIe-bus wordt verdrongen, en een gewicht via PCIe lezen kost ongeveer dertig keer zoveel als vanuit VRAM. Op de 70B hierboven brengt alleen deze afweging het van 2,3 naar 17,8 tokens/s.
 
-## Snel gaan
+---
 
-Vier optimalisaties, elk geverifieerd met een equivalentiebewijs en niet
-alleen met een stopwatch: een optimalisatie die het antwoord verandert, is een
-bug.
+<a id="optimisations"></a>
+
+## Sneller gaan
+
+Vier optimalisaties, elk gecontroleerd met een equivalentiebewijs en niet alleen met een stopwatch: een optimalisatie die het antwoord verandert, is een bug.
+
+De NVFP4-lineairen van dichte modellen gaan standaard via de Marlin-layout (+57 tot +90% doorvoer bij b = 8, TTFT +2 tot +4 ms volgens revue/poste6-piece147-verdict-24-09.md; terugval `ACVRAM_PROJ_MARLIN=0`, zie [CHANGELOG.md](../CHANGELOG.md)).
 
 ### Speculatief decoderen (`--speculative`)
 
-Eén token decoderen met een batch van 1 is geheugengebonden: de machine leest
-alle actieve gewichten om één enkel token te produceren. K voorgestelde tokens
-verifiëren leest diezelfde gewichten **één keer**. Twee voorstellers:
+Een token decoderen met een lot van grootte 1 wordt door het geheugen beperkt: de machine leest alle actieve gewichten om één token te produceren. K voorgestelde tokens verifiëren leest diezelfde gewichten **maar één keer**. Twee voorstellers:
 
-* `ngram` (standaard) — zoekt het huidige suffix eerder in de context en
-  stelt voor wat erop volgde. Kost niets, heeft geen model nodig. Loont
-  wanneer de uitvoer de invoer overneemt: code bewerken, RAG, samenvatten.
-* `draft` — een klein model op een tweede apparaat. Op dit rig is dat de
-  RTX 3080 Ti, die de planner bewust inactief laat voor elk model dat op de
-  5090 past.
+* `ngram` (standaard) — zoekt het huidige suffix eerder in de context en stelt voor wat erop volgde. Kost niets, vraagt geen model. Rendabel wanneer de uitvoer de invoer overneemt: codebewerking, RAG, samenvatting.
+* `draft` — een klein model op een tweede apparaat. Op deze rig is dat apparaat de RTX 3080 Ti, die de planner voor elk model dat op de 5090 past bewust ongebruikt laat.
 
-De acceptatie is exact, niet benaderend: een voorstel wordt aanvaard met kans
-`min(1, p/q)` en een afwijzing herbemonstert uit het genormaliseerde positieve
-deel van `p - q`. Gemeten over 40 000 trekkingen tegen een opzettelijk slecht
-gekalibreerde ontwerpversie blijft de uitgezonden verdeling binnen 0,002
-totale variatie van het doel — speculatie koopt snelheid, nooit een ander
-antwoord.
+`mtp` (`nextn`-kop van het model) en `auto` bestaan ook; op dit moment niet rendabel en niet standaard geactiveerd — zie `docs/ARCHITECTURE.md`.
+
+De acceptatie is exact, niet benaderend: een voorstel wordt aanvaard met kans `min(1, p/q)` en een weigering herbemonstert in het genormaliseerde positieve deel van `p - q`. Gemeten over 40 000 trekkingen tegen een opzettelijk slecht gekalibreerd concept, blijft de uitgezonden verdeling op 0,002 totale variatie van het doel — speculatie koopt snelheid, nooit een ander antwoord.
 
 ```
 modele jouet, glouton, k=4    etapes   jetons/etape   sortie
@@ -145,57 +164,29 @@ modele jouet, glouton, k=4    etapes   jetons/etape   sortie
   brouillon (= cible)              5           4,60   identique
 ```
 
-### Prefixcache (standaard actief)
+### Prefix-cache (standaard actief)
 
-Blokken worden geadresseerd via de *geketende* hash van hun tokenreeks: twee
-verzoeken die een systeeminstructie delen, delen haar blokken, en het tweede
-hoeft ze niet meer voor te berekenen. Het ketenen is onmisbaar: dezelfde
-zestien tokens in een andere context bevatten niet dezelfde sleutels en
-waarden, en alleen de reeks hashen zou de cache van de ene sequentie aan een
-andere uitleveren.
+Blokken worden geadresseerd via de *geketende* hash van hun tokensegment: twee verzoeken die een systeeminstructie delen, delen ook diens blokken, en het tweede hoeft ze niet meer opnieuw te berekenen. De ketening is onmisbaar: dezelfde zestien tokens in een andere context bevatten niet dezelfde keys en values, en alleen het segment hashen zou de cache van de ene sequentie aan een andere bedienen.
 
-Een vrijgegeven blok waarvan de inhoud herkenbaar blijft, gaat naar een
-LRU-wachtrij in plaats van naar de vrije lijst: zo overleeft de cache tussen
-verzoeken zonder ooit een toewijzing te weigeren die hij had kunnen bedienen.
+Een vrijgegeven blok waarvan de inhoud herkenbaar blijft, komt in een LRU-wachtrij terecht in plaats van in de lijst met vrije blokken: zo overleeft de cache tussen verzoeken zonder ooit een toewijzing te weigeren die hij had kunnen bedienen.
 
-### Rekenen op de hostlaag (`--host-exec`)
+### Berekening op het host-niveau (`--host-exec`)
 
-Een laag waarvan de gewichten in RAM staan, kan naar de GPU worden gekopieerd
-of ter plaatse worden berekend. Beide paden zijn geheugengebonden en lezen
-dezelfde bytes: het snelste is dat met de breedste bus — PCIe 5.0 x16 geeft
-ongeveer 54 GB/s, DDR5 in dual channel ongeveer 70 GB/s — en ter plaatse
-rekenen laat bovendien de GPU vrij in plaats van hem op een kopie te laten
-wachten.
+Een laag waarvan de gewichten in RAM staan, kan naar de GPU worden gekopieerd of ter plekke worden berekend. Beide paden worden door het geheugen beperkt en lezen dezelfde bytes: het snelste is dat met de breedste bus — PCIe 5.0 x16 geeft ongeveer 54 GB/s, DDR5 in dual-channel ongeveer 70 GB/s — en ter plekke berekenen laat de GPU bovendien vrij in plaats van te wachten op een kopie.
 
-Dat loont alleen als de processor de 4-bits ingepakte gewichten rechtstreeks
-leest. Vandaar een kleine C++-kernel met een AVX2-pad (`acvram_cpu.cpp`,
-geladen via ctypes, zonder Python-headers of ninja). Zelfs op zijn **scalaire**
-terugvaltak verslaat hij `dequantize() @ x` met een factor 1,44 in INT4 en 3,21
-in NVFP4, omdat die laatste eerst een 32-bits kopie van de hele matrix
-schrijft.
+Dit loont alleen als de processor de op 4 bits verpakte gewichten rechtstreeks leest. Vandaar een kleine C++-kernel met een AVX2-pad (`acvram_cpu.cpp`, geladen via ctypes, zonder Python-headers of ninja). Zelfs op zijn **scalaire** terugvaltak verslaat hij `dequantize() @ x` met een factor 1,44 in INT4 en 3,21 in NVFP4, omdat laatstgenoemde eerst een 32-bits kopie van de volledige matrix schrijft.
 
-Bij Mistral-Large-123B gaat de schatting van de planner van 1,35 naar
-2,42 tokens/s.
+Op Mistral-Large-123B gaat de schatting van de planner van 1,35 naar 2,42 tokens/s.
 
 ### Gemengde precisie (`--snr-floor`, standaard uit)
 
-De converter meet de signaal-ruisverhouding aan de uitgang van elke laag voor
-elke tensor en kan de tensoren die onder `--snr-floor` vallen naar een breder
-formaat promoveren, binnen een grens van 15 % van de tensoren en een
-prijsplafond (`--promotion-cout-max`, in toegevoegde mebibytes).
+De converter meet de signaal-ruisverhouding aan de uitgang van elke laag voor elke tensor en kan degene die onder `--snr-floor` vallen promoveren naar een breder formaat, tot maximaal 15% van de tensoren en een kostenplafond (`--promotion-cout-max`, in extra mebibytes).
 
-De drempel is **standaard nul**: niets wordt gepromoveerd. Decoderen is
-begrensd door de geheugenbandbreedte, en de meting op `Huihui-Qwen3.8-27B`
-beslist — een drempel van 25 dB kost 13,4 % geheugen en 10,6 % doorvoer
-(18,50 GiB en 41,8 t/s tegenover 16,02 en 46,2) voor 2,0 % perplexiteit
-(42,591 tegenover 43,447, corpus van 16 383 tokens). `--snr-floor 25` herstelt
-het oude gedrag wanneer kwaliteit boven snelheid gaat.
+De drempel staat **standaard op nul**: er wordt niets gepromoveerd. Het decoderen wordt beperkt door de geheugenbandbreedte, en de meting op `Huihui-Qwen3.8-27B` beslecht het — een drempel van 25 dB kost 13,4% geheugen en 10,6% doorvoer (18,50 GiB en 41,8 t/s tegen 16,02 en 46,2) voor 2,0% perplexiteit (42,591 tegen 43,447, corpus van 16 383 tokens). `--snr-floor 25` herstelt het oude gedrag wanneer kwaliteit voorrang heeft op snelheid.
 
 ### En `acvram eval`
 
-De signaal-ruisverhouding en de logit-cosinus zijn benaderingen.
-`acvram eval MAP [MAP ...]` meet de perplexiteit met een schuivend venster,
-zodat een formaatkeuze op bewijs wordt beslist:
+De signaal-ruisverhouding en de cosinus van de logits zijn benaderingen. `acvram eval REP [REP ...]` meet de perplexiteit met een schuivend venster, zodat een formaatkeuze op bewijzen wordt beslist:
 
 ```
 $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
@@ -204,26 +195,31 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
   qwen3-32b-int4         6,583    4,17    16,1 Gio      8192  (+2,7 %)
 ```
 
+---
+
+<a id="http"></a>
+
 ## HTTP-eindpunten
 
 | eindpunt | opmerkingen |
 |---|---|
-| `POST /v1/chat/completions` | SSE-stroom of enkel antwoord; gebruikt het chatsjabloon van het model |
-| `POST /v1/completions` | prompt als tekst of als token-id's |
+| `POST /v1/chat/completions` | SSE-stream of enkel antwoord; gebruikt het conversatiesjabloon van het model |
+| `POST /v1/completions` | prompt als tekst of als token-ID's |
 | `POST /v1/embeddings` | gemiddelde laatste verborgen toestanden, L2-genormaliseerd, `dimensions` gerespecteerd |
-| `GET /v1/models` | plus een blok `acvram`: formaten, apparaten, capaciteit van de KV-cache |
-| `GET /health`, `GET /metrics` | decodeerdoorvoer, bezetting van de KV-blokken |
+| `GET /v1/models` | plus een `acvram`-blok: formaten, apparaten, KV-cachecapaciteit |
+| `GET /health`, `GET /metrics` | decodeer-doorvoer, KV-blokbezetting |
 
-De veldnamen van deze antwoorden blijven Engels: het is het OpenAI-protocol,
-en ze vertalen zou elke bestaande client breken.
+De veldnamen van deze antwoorden blijven in het Engels: dat is het OpenAI-protocol, en ze vertalen zou alle bestaande clients breken.
+
+---
+
+<a id="chiffres"></a>
 
 ## Waar de cijfers vandaan komen
 
-Elke hierboven genoemde waarde wordt geproduceerd door code uit deze
-repository en gecontroleerd met `pytest`. Metingen op de processor met de
-referentiekernels:
+Elke hierboven aangehaalde waarde wordt geproduceerd door code uit deze repository en gecontroleerd met `pytest`. Metingen op de processor met de referentiekernels:
 
-| formaat | bits/gewicht | SNR van de gewichten | logit-cosinus vs BF16 |
+| formaat | bits/gewicht | SNR van de gewichten | cosinus van de logits vs BF16 |
 |---|---|---|---|
 | BF16 | 16,00 | — | 1,0000 |
 | INT8 | 8,19 | 44,6 dB | 0,9998 |
@@ -231,88 +227,95 @@ referentiekernels:
 | INT4 | 4,16 | 20,0 dB | 0,9427 |
 | INT4 + Hadamard | 4,16 | 21,0 dB | 0,9582 |
 
-Twee bevindingen uit deze metingen hebben de standaardwaarden veranderd:
+Twee vaststellingen uit deze metingen hebben de standaardwaarden veranderd:
 
-* **Een Hadamard-rotatie helpt INT4 en niet NVFP4.** De groepen van 128 van
-  INT4 kunnen een geïsoleerd uitschieterkanaal niet opvangen, zodat het
-  spreiden van de extreme waarden een n log n-transformatie per activatie
-  waard is. De blokken van 16 van NVFP4 dragen al hun eigen schaal. Vandaar
-  `--hadamard auto`, dat het alleen op INT4 toepast.
-* **INT8 verslaat FP8 E4M3 voor de KV-cache**, 44 dB tegenover 32 dB bij
-  gelijke grootte, omdat een schaal per (token, kop) al het dynamisch bereik
-  levert waar FP8 exponentbits aan besteedt. Beide kaarten gebruiken daarom een
-  KV-cache in INT8, ook al zou de 5090 FP8 kunnen.
+* **Een Hadamard-rotatie helpt INT4 en niet NVFP4.** De groepen van 128 van INT4 kunnen geen geïsoleerd afwijkend kanaal absorberen, zodat het uitspreiden van extreme waarden een n log n-transformatie per activatie waard is. De blokken van 16 van NVFP4 dragen al hun eigen schaal. Vandaar `--hadamard auto`, dat het alleen op INT4 toepast.
+* **INT8 verslaat FP8 E4M3 voor de KV-cache**, 44 dB tegen 32 dB bij gelijke grootte, omdat een schaal per (token, kop) al het dynamisch bereik levert waarvoor FP8 exponentbits uitgeeft. Beide kaarten gebruiken dus een KV-cache in INT8, ook al zou de 5090 FP8 kunnen doen. Een formaat `k8v4` (waarden in INT4, −22% cachebytes) bestaat als optie, **niet gekwalificeerd** — zie `docs/ARCHITECTURE.md`.
+
+---
+
+<a id="documentation"></a>
 
 ## Documentatie
 
-* [`REPRISE.md`](../REPRISE.md) — **het project op een andere machine hervatten**
-* [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — hoe de onderdelen in elkaar passen
-* [`docs/MATERIEL.md`](MATERIEL.md) — deze specifieke machine afstellen
-* [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **wat niet gedaan is**, eerst lezen
-* [`CONVENTIONS.md`](../CONVENTIONS.md) — werkafspraken voor de code (taal, stijl, controles vóór het pushen)
+| Document | Inhoud |
+|---|---|
+| [`REPRISE.md`](../REPRISE.md) | **het project op een andere machine hervatten** (Frans) |
+| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | hoe de onderdelen samenkomen |
+| [`docs/MATERIEL.md`](MATERIEL.md) | deze specifieke machine afstellen |
+| [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **wat nog niet gedaan is**, lees dit eerst |
+| [`CONVENTIONS.md`](../CONVENTIONS.md) | werkconventies voor de code (taal, stijl, controles voor het pushen) |
 
-## Gemeten resultaten (22/09/2026, RTX 5090 op 400 W, regime ≥ 20 s op de energiemeter)
+---
 
-Qwen3-Coder-30B-A3B in NVFP4 (experts) + INT8 (attentie, kop), hetzelfde
-protocol voor alle engines (`outils/`, één kaart, `energie.py`):
+<a id="resultats"></a>
 
-| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+## Gemeten resultaten (22/09/2026, RTX 5090 bij 400 W, regime ≥ 20 s op de energiemeter)
+
+Qwen3-Coder-30B-A3B in NVFP4 (experts) + INT8 (attentie, kop), zelfde protocol voor alle motoren (`outils/`, één kaart, `energie.py`):
+
+| | acvram | vLLM 0.29 (`vllm serve`) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decoderen, 12 sequenties | **1 634 t/s** | 1 782 t/s | — |
-| decoderen, 1 sequentie | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
-| prefill pp2048 | **22 707 tokens/s** | 21 054 | 8 671 (TabbyAPI, ingetrokken) |
+| decodering 12 sequenties | 1 995,1 t/s ² | 2 027,0 t/s ² | — |
+| decodering 1 sequentie | 312,3 t/s ³ ⁴ | 284,8 t/s ³ | **329,9 t/s** ⁴ |
+| prefill pp2048 | **22 707 tokens/s** | 21 054 | 8 671 (TabbyAPI, verwijderd) |
 
-Doorvoer van de dag (werkstation 1030, eco-regime `-lgc 2700`, pipeline in
-bedrijf; greedy sampling vastgelegd in de CUDA-graaf, standaard sinds 0.6.35).
-b=12 is een verzegelde officiële cel (mediaan van 6 verweven vensters, klok per
-venster).
+¹ Erratum van 22/09: `serve` speculeert standaard (`--speculative ngram`, cli.py), de concurrenten niet; de eerder gepubliceerde 380,8 t/s was gemeten MET speculatie. Zonder speculatie (`--speculative none`, dezelfde keten, revue/poste2-piece44-speculation-none-22-09.md): 283,6 t/s — acvram is **derde** bij b=1, achter llama.cpp en vLLM. In energie blijft het voor op llama.cpp (0,601 tegen 0,700 J/token netto). Bij b=12 is speculatie nooit actief (grens `lot_max=2`): die cel stond dus al op gelijke voet.
 
-> **Erratum (22/09/2026).** De eerste publicatie van 0.6.35 haalde « +1,84 %
-> vóór vLLM » uit een vLLM-referentie van 1 596 t/s van 21/09 die afkomstig was
-> van een **offline generatie** (`LLM().generate()`), **niet vergelijkbaar met
-> een server**: geen doorlopende scheduling, niet het pad van `acvram serve`.
-> Op 22/09 gecorrigeerd met een afwisselende A/V-cel (A1 V1 A2 V2 A3 V3) tegen
-> **`vllm serve`** (HTTP), dezelfde kaart en hetzelfde pad als `acvram serve`:
-> vLLM-mediaan **1 782 t/s**. Bij vergelijkbare meting zit **acvram (1 634 t/s)
-> ACHTER vLLM met ongeveer 8 % bij b=12**, niet ervoor. De J/token bij gelijke
-> klok wordt nog opnieuw gemeten.
+² 23/09, dezelfde sessie, dezelfde HTTP-client (`banc-llamacpp-16-09.py` tegen `acvram serve` en `vllm serve`), `-lgc 2700` expliciet ingesteld rond elke arm, afgewisselde cellen A V V A, ≥ 5 loten per arm, verschil pas vermeld voorbij 2 σ (revue/poste2-piece96-vllm-b12-rejeu-89-23-09.md). acvram 0.6.38 (w13 bij decodering, uitgerolde attentiereductie): verschil −1,6%, **onder 2 σ: gelijke doorvoer**. In J/token blijft **vLLM 7,0% voor** (voorbij 2 σ). Met 0.6.37 gaf hetzelfde protocol −4,7%.
 
-Op de ochtend van 14/09 zat acvram op 630 t/s en 0,619 J/token in dezelfde
-cel: de winst komt van Blackwells native FP4-MMA (`mma.sync …
-kind::mxf4nvf4`, ×7,9 ten opzichte van bf16), van MoE als gegroepeerde GEMM
-per batch-emmer, van routering in één kernel (3 677 → 1 517 starts per stap) en
-van een smalle tensorcore-GEMM voor de projecties. Elk cijfer heeft zijn notitie
-in `acvram-memoire/revue/` met de vóór de meting verzegelde voorspelling, het
-instrument en zijn regime — een cijfer zonder regime wordt niet gepubliceerd.
+³ Zelfde sessie en protocol als ², zonder speculatie aan beide zijden: acvram 312,3 tegen vLLM 284,8 — **acvram 9,7% voor in doorvoer** (voorbij 2 σ); J/token: **gelijk** (verschil 0,04%, onder 2 σ).
 
-Waar acvram voorop loopt: MLA-modellen (GLM-4.7-Flash) in native sm_120-NVFP4,
-die vLLM alleen in FP8 bedient (b=1: 165,35 t/s in bedrijf); modellen die niet in
-VRAM passen; en het decoderen met één sequentie (b=1: 380,8 t/s tegen 290,6 voor
-vLLM). Bij grote batch daarentegen, op een MoE dat in VRAM past, blijft vLLM
-voorop bij b=12 (1 782 tegen 1 634 t/s, zie erratum); acvram is vooruitgegaan
-(1 540 in 0.6.34 → 1 634) zonder voorbij te gaan. Het energieverschil moet
-opnieuw worden gemeten.
+⁴ 23/09, zelfde protocol tegen llama.cpp (revue/poste2-piece72-llamacpp-b1-23-09.md), acvram 0.6.37 met herschreven routering (+5,6%): acvram 310,8 tegen llama.cpp 329,9 t/s — **llama.cpp 5,8% voor in doorvoer, acvram 13,4% voor in J/token** (0,598 tegen 0,691).
 
-## Stand van zaken
+Doorvoer van de dag (post 1030, eco-regime `-lgc 2700`, pijplijn in dienst; gulzige bemonstering vastgelegd in de CUDA-graaf, standaard sinds 0.6.35). De b=12 van acvram is een officieel verzegelde cel (mediaan van 6 verweven vensters, klok per venster).
 
-Versie 0.6.35. Alles draait op de 5090: CUDA-kernels gecompileerd voor
-`sm_120a` (native FP4) en `sm_86`, CUDA-grafen, NVFP4/INT8/INT4-kwantisatie,
-HTTP-server. Vangrails aanwezig: de kaart is onzichtbaar voor werksessies
-(`CUDA_VISIBLE_DEVICES` leeg) en alleen `outils/carte.sh` leent haar, onder
-vergrendeling, aan één meting tegelijk; een wachter logt elke toegang buiten de
-vergrendeling; een energiemeting over meer dan één kaart of korter dan 10 s
-wordt ongeldig verklaard; een model dat in gedegradeerd regime is geladen, zegt
-dat en doet niet mee aan een duel.
+> **Erratum (23/09/2026).** De eerder gepubliceerde vLLM-vergelijking (b=12: 1 782 tegen 1 634 t/s; b=1: 290,6) stelde acvram gemeten via HTTP tegenover vLLM gemeten **offline** (`LLM().generate()`), en het erratum van 22/09 beweerde ten onrechte dat de vLLM-cel via `vllm serve` liep. Op 23/09: dezelfde HTTP-client voor beide, en `-lgc` ingesteld voor beide (acvram stelt zijn eigen klok in bij het starten, `vllm serve` niet: zonder deze voorzorg draaide vLLM op ~2 930 MHz tegen ~2 650). Resultaat in noot ²: vLLM 9,1% voor bij b=12.
 
-640 tests (`pytest -q`, één minuut op de processor; GPU-tests draaien alleen
-onder `carte.sh`). Werkopvolging: `acvram-memoire/` (regels, register,
-schriften, review van 180 notities).
+Op de ochtend van 14/09 stond acvram op 630 t/s en 0,619 J/token op dezelfde cel: de winst komt van de native FP4-MMA van Blackwell (`mma.sync … kind::mxf4nvf4`, ×7,9 tegenover bf16), van MoE in gegroepeerde GEMM per lot-emmer, van routering in één enkele kernel (3 677 → 1 517 aanroepen per stap) en van een smalle GEMM op tensorkernen voor de projecties. Elk cijfer heeft zijn noot in `acvram-memoire/revue/` met de voorspelling verzegeld vóór de meting, het instrument en zijn regime — een cijfer zonder regime wordt niet gepubliceerd.
 
-## Steunen
+Waar acvram voorop loopt: MLA-modellen (GLM-4.7-Flash) in native NVFP4 op sm_120, die vLLM alleen in FP8 bedient (b=1: 165,35 t/s in dienst); modellen die niet in VRAM passen. Decoderen met één sequentie hoort daar niet bij: zonder speculatie ligt acvram er 9,7% voor op vLLM (noot ³), 5,8% achter op llama.cpp in doorvoer maar 13,4% voor in energie (noot ⁴). Bij een groot lot, op een MoE die in VRAM past, is vLLM gelijk in doorvoer bij b=12 (1 995,1 tegen 2 027,0 t/s, onder 2 σ, noot ²) maar houdt 7,0% minder J/token over; acvram is er gegaan van 1 540 t/s (0.6.34) naar 1 995 (0.6.38).
 
-acvram wordt ontwikkeld op persoonlijke hardware. Als het project u van nut
-is: **Steunen: [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)**.
+---
+
+<a id="etat"></a>
+
+## Status
+
+Versie 0.6.38. Alles draait op de 5090: CUDA-kernels gecompileerd voor `sm_120a` (native FP4) en `sm_86`, CUDA-graven, NVFP4/INT8/INT4-kwantisering, HTTP-server. Waarborgen aanwezig: de kaart is onzichtbaar voor werksessies (`CUDA_VISIBLE_DEVICES` leeg) en alleen `outils/carte.sh` leent hem, onder slot, aan één meting op een moment; een wachter registreert elke toegang buiten het slot; een energiemeting die meer dan één kaart beslaat of minder dan 10 s duurt, wordt ongeldig verklaard; een model dat in verslechterd regime is geladen, meldt dit en neemt niet deel aan een duel.
+
+4 107 tests (`pytest --collect-only -q`, één minuut op de processor; de GPU-tests draaien alleen onder `carte.sh`). Voortgang van het werk: `acvram-memoire/` (regels, register, notitieboekjes, overzicht van meerdere honderden notities).
+
+---
+
+<a id="credits"></a>
+
+## Credits
+
+- **vLLM** — [vllm-project/vllm](https://github.com/vllm-project/vllm) v0.29.0, onder Apache-2.0-licentie: `acvram/kernels/marlin_port/` draagt zijn Marlin-kernels (MoE en dicht), met volledige toeschrijving per bestand in [`acvram/kernels/marlin_port/NOTICE`](../acvram/kernels/marlin_port/NOTICE).
+- **NVIDIA** — CUDA, de FP4-tensorkernen van Blackwell (`sm_120`) en de bibliotheken waarvan dit project afhankelijk is.
+- **PyTorch** — tensor-engine en C++/CUDA-extensies.
+
+Onafhankelijk project, niet gelieerd aan ASUS, NVIDIA of het vLLM-project.
+
+---
+
+<a id="licence"></a>
 
 ## Licentie
 
-GPL-3.0 of later.
+[GPL-3.0 of later](../LICENSE) voor de code in deze repository. `acvram/kernels/marlin_port/` bevat code overgedragen van [vLLM](https://github.com/vllm-project/vllm) v0.29.0 (kernels `marlin_moe_wna16`, `gptq_marlin_repack`, `moe_align_block_size`), onder Apache-2.0-licentie: elk bestand behoudt zijn oorspronkelijke koptekst, de licentie staat in `LICENSE-vllm` en de bestandenlijst, het oorspronkelijke commit en de wijzigingen staan in [`acvram/kernels/marlin_port/NOTICE`](../acvram/kernels/marlin_port/NOTICE).
+
+---
+
+<a id="soutien"></a>
+
+## Het project steunen
+
+De ontwikkeling van acvram gebeurt op persoonlijke hardware. Als het project je van pas komt:
+
+[![Buy Me a Coffee](https://img.buymeacoffee.com/button-api/?text=Trakteer%20op%20een%20koffie&emoji=☕&slug=anticitoyen&button_colour=FFDD00&font_colour=000000&font_family=Lato&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/anticitoyen)
+
+**https://buymeacoffee.com/anticitoyen**
+
+Vertalingen: [TRADUIRE.md](TRADUIRE.md) (Frans; de bijdragegids van het project is nog niet vertaald).

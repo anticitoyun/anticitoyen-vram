@@ -1,0 +1,184 @@
+name: Release packages
+
+# When a release is published, build the AUR/Copr artefacts and attach them to the
+# GitHub release. Nothing is pushed to AUR, Copr or Flathub here — those accounts belong
+# to the maintainer (pièce 236a); this workflow only produces the files each channel needs.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.7.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  # Pièce 248b : sur le modèle des jobs aur/rpm ci-dessous (construction et
+  # attachement dans le même job) plutôt que celui d'animematrix (.deb attaché
+  # à la main avant publication, ce workflow ne fait que le récupérer) — acvram
+  # n'a pas cette étape manuelle, tools/construire-deb.sh suffit en CI.
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Dépendances du paquet et de son auto-test (--help sans torch)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 python3-venv python3-gi \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1 python3-psutil dpkg-dev
+          sudo pip install --break-system-packages --quiet numpy safetensors fastapi \
+            "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 nvidia-ml-py
+      - name: Paquet .deb (tools/construire-deb.sh)
+        run: |
+          tools/construire-deb.sh
+          gh release upload "$TAG" acvram_*_amd64.deb --clobber --repo "$GITHUB_REPOSITORY"
+
+  rpm:
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build RPM and source RPM (for Copr)
+        run: |
+          dnf install -y rpm-build python3 gh
+          V="${TAG#v}"
+          mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS
+          # git is missing when checkout runs in this container: the tree has no .git
+          tar --exclude=.git --transform "s,^\.,anticitoyen-vram-$V," \
+            -czf ~/rpmbuild/SOURCES/"anticitoyen-vram-$V.tar.gz" .
+          sed "s/@VERSION@/$V/" packaging/rpm/acvram.spec > ~/rpmbuild/SPECS/acvram.spec
+          rpmbuild -bb ~/rpmbuild/SPECS/acvram.spec
+          rpmbuild -bs ~/rpmbuild/SPECS/acvram.spec
+          gh release upload "$TAG" ~/rpmbuild/RPMS/noarch/*.rpm ~/rpmbuild/SRPMS/*.src.rpm \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+  aur:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: AUR files (PKGBUILD, .SRCINFO, install script)
+        run: |
+          # No CUDA in this container, and none is needed here: acvram's CUDA kernels JIT-compile
+          # at first real use (torch.utils.cpp_extension), not at package-build time — unlike a
+          # project that ships prebuilt .so files. `makepkg` only stages the source tree, so a
+          # plain archlinux:latest image is enough; the runtime `cuda` dependency is declared in
+          # the PKGBUILD (depends=), not exercised in CI.
+          pacman -Syu --noconfirm base-devel git github-cli
+          V="${TAG#v}"
+          useradd -m builder
+          mkdir /build/pkg
+          sed "s/@VERSION@/$V/" packaging/aur/PKGBUILD > /build/pkg/PKGBUILD
+          cp packaging/aur/acvram.install /build/pkg/
+          chown -R builder /build/pkg
+          su builder -c "cd /build/pkg && makepkg --nodeps --noconfirm"
+          SUM=$(sha256sum /build/pkg/*-"$V".tar.gz | cut -d' ' -f1)
+          sed -i "s/^sha256sums=('SKIP')/sha256sums=('$SUM')/" /build/pkg/PKGBUILD
+          su builder -c "cd /build/pkg && makepkg --printsrcinfo > .SRCINFO"
+          mkdir -p aur/acvram
+          cp /build/pkg/PKGBUILD /build/pkg/.SRCINFO /build/pkg/acvram.install aur/acvram/
+          tar -C aur -czf "aur-$V.tar.gz" acvram
+          gh release upload "$TAG" "aur-$V.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Flathub: manifest and module list supplied by poste6 (packaging/flathub/). Job wired the
+  # same way as animematrix's (pin the manifest's source to this tag/commit, attach a bundle
+  # and the pinned manifest to the release) — filled in once packaging/flathub/*.yml exists.
+  # Pièce 241 (poste6) : noyaux CUDA précompilés dans un conteneur sans carte, puis Flatpak hors ligne (packaging/flathub/,
+  # 236/240). Nothing is submitted to Flathub here either: the bundle is attached to the release, the maintainer submits.
+  noyaux-precompiles:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.0.1-devel-ubuntu24.04          # nvcc 13.0 (≥ 12.9 : sm_120f, cuda_fp4.h), aucun GPU requis
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Python et torch cu130 (la roue que le Flatpak embarque)
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ninja-build git
+          python3 -m venv /opt/venv && . /opt/venv/bin/activate
+          pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.14.0" && pip install ninja
+          pip install --no-deps .
+      - name: Noyaux précompilés (sm_120f, sm_89, sm_86)
+        env:
+          CUDA_HOME: /usr/local/cuda
+        run: |
+          . /opt/venv/bin/activate
+          python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0,8.9,8.6 | tee build/noyaux/precompiles.json
+          test -n "$(find build/noyaux -name acvram_kernels.so)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+
+  flatpak:
+    needs: noyaux-precompiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+      - name: Outils Flatpak et runtime GNOME 51
+        run: |
+          sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder python3-pip
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
+      - name: Sources Python hors ligne (PyPI par flatpak-pip-generator, torch cu130 par sources-torch.sh)
+        run: |
+          pip3 install --user --break-system-packages requirements-parser pyyaml
+          curl -fsSLo pipgen.py https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator.py
+          [ -f packaging/flathub/python3-modules.json ] || python3 pipgen.py --runtime org.gnome.Sdk//51 --output packaging/flathub/python3-modules \
+              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py
+          [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0)
+      - name: Construction hors ligne et lint
+        run: |
+          sed -e 's#path: \.\./\.\.$#path: .#' -e 's#path: \.\./\.\./build/noyaux#path: build/noyaux#' \
+              -e 's#^  - python3-modules.json#  - packaging/flathub/python3-modules.json#' -e 's#^  - torch-cu130.json#  - packaging/flathub/torch-cu130.json#' \
+              packaging/flathub/io.github.anticitoyen.acvram.yml > io.github.anticitoyen.acvram.yml
+          flatpak-builder --user --force-clean --sandbox --repo=repo build io.github.anticitoyen.acvram.yml
+          flatpak build-bundle repo "acvram-${TAG#v}.flatpak" io.github.anticitoyen.acvram
+          gh release upload "$TAG" acvram-*.flatpak --clobber --repo "$GITHUB_REPOSITORY"
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest io.github.anticitoyen.acvram.yml | tee lint-manifest.txt || true
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo | tee lint-repo.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flathub
+          path: |
+            lint-*.txt
+            acvram-*.flatpak
+            packaging/flathub/python3-modules.json
+            packaging/flathub/torch-cu130.json
+
+  # Weblate: acvram has no locale/*.json (unlike animematrix) — poste2's 236c extracted the
+  # translatable UI strings into packaging/langues/_source.json instead (README.md itself is
+  # excluded: Weblate segments a whole .md poorly, and nothing there could guard the numbers
+  # or HTTP field names inside it — revue/poste2-piece236c-25-09.md).
+  translations:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Translation files (Weblate)
+        run: |
+          V="${TAG#v}"
+          zip -q "translations-$V.zip" packaging/langues/*.json docs/TRADUIRE.md
+          gh release upload "$TAG" "translations-$V.zip" --clobber --repo "$GITHUB_REPOSITORY"

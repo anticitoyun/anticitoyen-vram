@@ -27,6 +27,7 @@ Une passerelle d'inférence compatible avec l'API OpenAI, qui traite la mémoire
 
 - [Les deux idées](#idees)
 - [Démarrage rapide](#demarrage)
+- [Installer](#installer)
 - [Ce que dit `acvram plan`](#plan)
 - [Aller vite](#optimisations)
 - [Points d'entrée HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Installer
+
+Depuis la source (toutes plateformes) :
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Ou par paquet, un fichier joint à chaque [release GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest) :
+
+| Canal | Fichier joint à la release | Commande |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (noms générés par `rpmbuild`, non fixes) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (ou `rpmbuild --rebuild *.src.rpm` depuis le `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip n'est pas publié comme paquet (pas de roue construite) : `pip install -e '.[dev]'` installe depuis un clone de la source, comme `./install.sh`.
 
 ---
 
@@ -242,6 +267,7 @@ Deux constats issus de ces mesures ont changé les valeurs par défaut :
 |---|---|
 | [`REPRISE.md`](REPRISE.md) | **reprendre le projet sur une autre machine** |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | comment les pièces s'assemblent |
+| [`docs/CHOIX-FORMAT-GDN.md`](docs/CHOIX-FORMAT-GDN.md) | NVFP4 pur ou attention+GDN en int8 par canal, sur un hybride Gated DeltaNet |
 | [`docs/MATERIEL.md`](docs/MATERIEL.md) | régler cette machine précise |
 | [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) | **ce qui n'est pas fait**, à lire en premier |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | conventions de travail sur le code (langue, style, contrôles avant de pousser) |
