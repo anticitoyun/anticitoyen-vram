@@ -1,5 +1,18 @@
 # Journal des changements
 
+## 0.7.4 (26/09/2026)
+
+* **26/09/2026 — pièce 269 d (poste6, mesure 276, décision chef) : le guet d'admission est COUPÉ pour les alias
+  vision ; inchangé en texte (défaut 1).** La 276 a mesuré le guet hors de son régime : en texte (Qwen3-Coder, b = 2/4/8,
+  ABBA par point) aucun coût — mur et TTFT p50 B = A ± 1 ms, 14/14 tours à un pas chez B (A : 14, 11, 11), 0 tour de
+  l'issue nommée sur 42 ; **avec images** (Qwen3-VL-2B-Instruct-bf16-vision, b = 4, une image 448×448 par requête) la
+  préparation d'image d'une requête entrée (`preparer_images`, 16-34 ms) dépasse toujours la fenêtre de 5 ms : le fil
+  attendait le plafond de 20 ms à chaque tour (12/14) pour un pas groupé qui n'en rend que 8 — **mur +10,2 ms, TTFT p50
+  +9,6 ms (104,5 → 114,0), p95 +25 ms (113 → 138)**. `EngineService.guet_actif()` = guet ET pas `vision_servie()` ; test
+  cassant `test_269d_alias_vision_le_guet_est_coupe` ; opt-out `ACVRAM_ADMISSION_GUET=0` inchangé. **Non couvert : un
+  alias vision servant du texte seul (guet coupé pour lui aussi), plusieurs images par requête, b = 12 avec images, 2e
+  modèle (274).** `revue/poste6-piece276-{a-sec,verdict}-26-09.md`.
+
 ## 0.7.3 (26/09/2026)
 
 * **26/09/2026 — pièce 269 c (poste6, décision chef sur la mesure 269 b) : le guet d'admission est AU DÉFAUT

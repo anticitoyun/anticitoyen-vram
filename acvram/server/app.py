@@ -141,7 +141,8 @@ class EngineService:
         if eng.running or not eng.waiting:
             return
         # 269 b : à une requête en file, la porte ne s'ouvre que si une autre est déjà entrée (opt-in) ; sinon ≥ 2 (179 b)
-        if len(eng.waiting) < 2 and not (_GUET_ADMISSION and self.en_entree > 0):
+        guet = self.guet_actif()
+        if len(eng.waiting) < 2 and not (guet and self.en_entree > 0):
             return
         debut = derniere = time.perf_counter()
         n = len(eng.waiting)
@@ -151,7 +152,7 @@ class EngineService:
             m = len(eng.waiting)
             # 269 b : une requête entrée mais pas encore soumise compte comme une file qui grossit ; le plafond de 4 fenêtres
             # se vérifie à CHAQUE tour (pas seulement quand la file n'a pas bougé), sinon le guet tiendrait le fil sans fin
-            if m != n or (_GUET_ADMISSION and self.en_entree > 0):
+            if m != n or (guet and self.en_entree > 0):
                 n, derniere = m, maintenant
             if maintenant - derniere >= _FENETRE_ADMISSION_S or maintenant - debut >= 4 * _FENETRE_ADMISSION_S:
                 break
@@ -227,6 +228,13 @@ class EngineService:
         return request_id, q
 
     # -- images ------------------------------------------------------------
+    def guet_actif(self) -> bool:
+        """269 d (mesure 276) : le guet d'admission est coupé pour un alias vision — la préparation d'image d'une requête
+        entrée (`preparer_images`, 16-34 ms) dépasse toujours la fenêtre de 5 ms, le fil attendait le plafond de 20 ms à
+        chaque tour pour un pas groupé qui n'en rend que 8 : +10 ms de mur et de TTFT p50, +25 ms au p95 (Qwen3-VL-2B,
+        b = 4). En texte le guet reste au défaut (269 c ; 276 : b = 2/4/8 sans coût)."""
+        return _GUET_ADMISSION and not self.vision_servie()
+
     def vision_servie(self) -> bool:
         """Le manifeste de l'alias servi porte ``vision: oui`` (pièce (a))."""
         man = getattr(getattr(self.engine, "loaded", None), "manifest", None) or {}
