@@ -28,6 +28,13 @@ from pathlib import Path
 import pytest
 
 RACINE = Path(__file__).resolve().parents[1]
+
+# Instantané public (publier-github.sh) : une partie des notes de revue y reste privée et la prose est
+# anonymisée — le contrôle 3 y échouait sur la 070 b de v0.7.2.md (« 070 », « 19 » introuvables,
+# CI publique de la 0.7.4) alors qu'il passe sur l'arbre privé. Ce
+# contrôle confronte les notes de version au corpus INTERNE complet ; il se joue sur l'arbre privé.
+if not (RACINE / "acvram-memoire" / "revue" / "INDEX.md").exists():
+    pytest.skip("corpus de revue interne absent de cet arbre (instantané public)", allow_module_level=True)
 DOSSIER_NOTES = RACINE / "docs" / "notes"
 
 # (nom de fichier, minimum de sha, minimum de pièces citées, minimum de pièces avec chiffres) —
