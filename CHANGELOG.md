@@ -1,5 +1,13 @@
 # Journal des changements
 
+* **26/09/2026 — pièce 232 b (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut pour la 0.7.0 — la 209 est À LA
+  DEMANDE.** Deux protocoles, deux résultats sur le même Qwen3-Coder-30B-A3B-nvfp4 pur à b=8 : la 226 (banc chat 102, invites réelles,
+  salve unique de 20 s, 5 + 5) donnait 1 = **+12,8 % / −18,4 % J** ; la 229 (poste3, `banc-llamacpp-16-09.py`, invites réelles, lots
+  répétés en débit SOUTENU, 5 passes par bras) donne 1 = **−15,3 % / +25,4 % J** (B 1 547,3 contre C 1 784,0 t/s ; A = be837ca1 contre C :
+  +1,9 %, neutre). Tant que l'écart entre les deux protocoles n'est pas expliqué (pièce nsys à venir), la release garde l'ancien
+  comportement (piles à sous-normales refusées, naturel + decode_mma) et `ACVRAM_MARLIN_PAR_LIGNE=1` reste disponible ; la 209 reste
+  exacte au bit des poids et gagnante sur qkvo-i8c (209 c). Test cassant si le défaut revient à 1 :
+  `tests/test_marlin_pile_par_ligne_209.py::test_232_le_facteur_par_ligne_est_a_la_demande_et_0_le_defaut`.
 ## 0.7.0 (26/09/2026)
 
 Chaîne du 24 au 26/09, deux faits distincts, chacun avec sa pièce :
@@ -19,13 +27,10 @@ Gains propres à cette version, au-dessus de ces deux faits :
 * **201** (poste5) : un modèle vision/MTP qui ne tenait pas n'est plus chargé en silence — capacité
   KV annoncée baisse pour en tenir compte (Qwen3.8 nvfp4 −7,4 %, gemma-4-31B-vision −21,4 %) ; copie
   int8 transitoire (i8c servi sans OOM), coût nul au banc. `revue/poste5-piece201-verdict-25-09.md`.
-* **209 au défaut, confirmée par la 226** (poste6) : le facteur Marlin par ligne d'expert (209,
-  exact au bit, +5,77 % sur qkvo-i8c) reste servi par défaut (`ACVRAM_MARLIN_PAR_LIGNE=1`, 0 =
-  témoin). La 220 l'avait remis en opt-in sur une « régression » du Coder-30B-A3B-nvfp4 pur mesurée
-  par le banc de la 217 (−8,9 % t/s) ; la 226 a démontré l'artefact — ce banc génère librement
-  depuis des invites de jetons tirés, ses sorties dégénérées divergent entre bras et routent vers
-  d'autres experts — et, à invites réelles (banc chat), le même modèle gagne **+12,8 % de débit et
-  −18,4 % de J/jeton** à b=8 (`revue/poste6-piece226-verdict-26-09.md`).
+* **209 à la demande** (poste6, 232 b) : le facteur Marlin par ligne d'expert (209, exact au bit, +5,77 % sur qkvo-i8c) reste
+  disponible par `ACVRAM_MARLIN_PAR_LIGNE=1`, à 0 par défaut. Sur Qwen3-Coder-30B-A3B-nvfp4 pur il gagne en salve unique à invites
+  réelles (226 : +12,8 %) mais perd en débit soutenu (229 : −15,3 %, +25,4 % J) ; l'écart entre protocoles n'est pas expliqué, la release
+  garde l'ancien comportement (`revue/poste6-piece226-verdict-26-09.md`, `revue/poste3-piece229-scelle-26-09.md`).
 * **210/210b** (poste5) : `/v1/completions` — logprobs d'un jeton à texte vide gardés (suit
   `token_ids`, plus `text_delta`) ; usage omis dans le flux sans `stream_options.include_usage`
   (`CompletionChunk`) au lieu de {0,0,0} sur chaque fragment ; l'outil TTFT comptait ces jetons

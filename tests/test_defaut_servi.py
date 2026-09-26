@@ -160,7 +160,7 @@ DEFAUTS_PAR_VERSION = {
             "ETROIT_CANAL": "1",                                         # étroit int8 K entier par canal (table) — 195 b (décision déléguée)
             "INT8_TRANCHE": "",                                          # vide = 6 (défaut depuis la 187, au bit ; 16 = témoin d'avant)
             "INT8_TRANCHE_PREFILL": "",                                  # 187 : découpage à N > 16, vide = d'avant
-            "MARLIN_PAR_LIGNE": "1",                                     # 209 au défaut ; 220 (retour à 0 sur un artefact) ; 226 b : 1 rétabli
+            "MARLIN_PAR_LIGNE": "0",                                     # 209 À LA DEMANDE — 232 b : 229 (débit soutenu −15,3 %) contre 226 (salve +12,8 %), écart non expliqué ; la release garde l'ancien comportement
             "ADMISSION_FENETRE_MS": "5",                                 # fenêtre d'admission du service — 179
             "TRANCHE_COPIE_MIN": str(2**30),                             # copie int8 transitoire par tranche ≥ 1 Gio — 201 (3)
             "DEPAQ_PARTAGE": "1",                                        # .so du port Marlin par empreinte des sources — 161
