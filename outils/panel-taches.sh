@@ -20,6 +20,10 @@
 # step", pas de coupe prématurée (stop sur `</s>`/`Q:`/`<|im_end|>` seulement), extraction par
 # `The answer is X` (repli sur un motif `(X)` isolé) — conçu pour exactement ce cas.
 #
+# 3e correctif (261b, plancher de santé) : `_zeroshot` tire sur le split `validation` de MMLU
+# (11 questions pour `college_computer_science` — jamais 100, quel que soit `--limit`) ;
+# remplacé par `mmlu_flan_cot_fewshot_*` (même style CoT, split `test`, taille normale).
+#
 # Sous-ensemble et graine FIXÉS ICI, jamais en argument : deux bras comparés (P0, P1, ou un
 # bras et sa référence llama.cpp) doivent tourner sur EXACTEMENT le même tirage.
 #   MMLU (generative, gabarit de conversation) : mmlu_high_school_mathematics_generative,
@@ -45,7 +49,7 @@ PY="$ICI/.venv-panel/bin/python"
 [ -x "$PY" ] || { echo "REFUS : $PY absent — installer d'abord (uv venv .venv-panel --python 3.12 && uv pip install --python .venv-panel 'lm-eval[api]' transformers)"; exit 66; }
 
 GRAINE=1234
-TACHES_MMLU="mmlu_flan_cot_zeroshot_high_school_mathematics,mmlu_flan_cot_zeroshot_professional_law,mmlu_flan_cot_zeroshot_college_computer_science"
+TACHES_MMLU="mmlu_flan_cot_fewshot_high_school_mathematics,mmlu_flan_cot_fewshot_professional_law,mmlu_flan_cot_fewshot_college_computer_science"
 LIMITE_MMLU=${LIMITE_MMLU:-100}
 TACHE_GSM8K="gsm8k"
 LIMITE_GSM8K=${LIMITE_GSM8K:-50}
