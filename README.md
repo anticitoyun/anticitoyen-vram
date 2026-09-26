@@ -127,7 +127,7 @@ Ou par paquet, un fichier joint à chaque [release GitHub](https://github.com/an
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (noms générés par `rpmbuild`, non fixes) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (ou `rpmbuild --rebuild *.src.rpm` depuis le `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpakref` (dépôt OSTree sur GitHub Pages ; torch et CUDA, ≈ 3 Go, sont téléchargés à l'installation) | `flatpak install --user acvram-<version>.flatpakref` (ajouter `--no-gpg-verify` tant que le dépôt n'est pas signé) |
+| Flatpak | `acvram-<version>.flatpakref` (dépôt OSTree signé sur GitHub Pages ; torch et CUDA sont téléchargés à l'installation) | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
 Avant d'installer, vérifier le fichier téléchargé contre les sommes jointes à la release (`SHA256SUMS`,
 publié une fois tous les autres fichiers présents) :

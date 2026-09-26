@@ -127,7 +127,7 @@ Atau lewat paket, satu berkas terlampir pada setiap [rilis GitHub](https://githu
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nama yang dihasilkan oleh `rpmbuild`, tidak tetap) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (atau `rpmbuild --rebuild *.src.rpm` dari `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
 Sebelum menginstal, verifikasi berkas yang diunduh terhadap checksum yang terlampir di rilis (`SHA256SUMS`, diterbitkan setelah semua berkas lain ada):
 

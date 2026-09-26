@@ -127,7 +127,7 @@ Veya paket olarak, her [GitHub sürümüne](https://github.com/anticitoyun/antic
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (`rpmbuild` tarafından üretilen adlar, sabit değil) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (veya `.src.rpm`'den `rpmbuild --rebuild *.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
 Kurulumdan önce, indirilen dosyayı sürüme eklenen sağlama toplamlarına göre doğrulayın (`SHA256SUMS`, diğer tüm dosyalar mevcut olduktan sonra yayımlanır):
 

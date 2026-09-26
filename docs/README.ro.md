@@ -127,7 +127,7 @@ Sau pe pachet, un fișier atașat fiecărei [versiuni GitHub](https://github.com
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nume generate de `rpmbuild`, nefixe) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (sau `rpmbuild --rebuild *.src.rpm` din `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
 Înainte de instalare, verificați fișierul descărcat față de sumele atașate versiunii (`SHA256SUMS`, publicată după ce toate celelalte fișiere sunt prezente):
 

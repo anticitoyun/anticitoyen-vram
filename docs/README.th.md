@@ -127,7 +127,7 @@ git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (ชื่อไฟล์สร้างโดย `rpmbuild` จึงไม่ตายตัว) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (หรือ `rpmbuild --rebuild *.src.rpm` จากไฟล์ `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
 ก่อนติดตั้ง ให้ตรวจสอบไฟล์ที่ดาวน์โหลดเทียบกับผลรวมที่แนบมากับรีลีส (`SHA256SUMS` เผยแพร่หลังจากไฟล์อื่นทั้งหมดมีอยู่แล้ว):
 

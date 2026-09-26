@@ -127,7 +127,7 @@ Oder per Paket, eine Datei angehängt an jedes [GitHub-Release](https://github.c
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (von `rpmbuild` generierte Namen, nicht fest) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (oder `rpmbuild --rebuild *.src.rpm` ausgehend von der `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
 Vor der Installation die heruntergeladene Datei gegen die dem Release beigefügten Prüfsummen verifizieren (`SHA256SUMS`, veröffentlicht sobald alle anderen Dateien vorhanden sind):
 
