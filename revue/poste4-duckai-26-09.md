@@ -1143,3 +1143,103 @@ jetons (pas sur les logits bruts).
 `quantization/fp8.py` ; issue #27059 batch-invariant VLMs ; issue VLLM_BATCH_INVARIANT crashes NVFP4 ; issue
 tracking SGLang déterministe), lmsys.org (« Towards Deterministic Inference in SGLang »), vllm.ai (doc Batch
 Invariance).
+
+---
+
+## Q26 — recouvrement pipeliné (async scheduling/overlap scheduler) + spéculation ngram : alternance amorce/vidage coûteuse (chef/poste5, 277)
+
+**Réponse (Luna, 1 avis, très rigoureux — marque explicitement ce qui n'est PAS sourcé, comme demandé)**.
+
+**Résumé court** :
+- **vLLM** : recouvrement (« async scheduling ») et spéculatif sont CONÇUS pour tourner ensemble, activés par
+  défaut par défaut pour les méthodes supportées — y compris un travail DÉDIÉ pour le ngram GPU (pas hérité
+  automatiquement du spéculatif à base de modèle).
+- **SGLang** : le « overlap scheduler » et le spéculatif coexistent pour EAGLE/Spec-V2, **mais
+  l'implémentation ngram actuelle DÉSACTIVE explicitement le overlap** (sglang-jax issue #927 : « overlap
+  scheduling remains disabled on this path »).
+- **Hystérésis** : **SGLang EN A UNE, réelle et documentée**, mais **UNIQUEMENT pour EAGLE/EAGLE3, PAS pour
+  le ngram** — le support adaptatif ngram est un chantier séparé (PR #23629, feuille de route). **Aucune
+  hystérésis ngram trouvée ni chez vLLM ni chez SGLang.**
+- **Changement de mode en vol** : **NI L'UN NI L'AUTRE ne documente un « drain/flush » général du pipeline
+  au changement de mode**. Le mécanisme normal est différent : compter explicitement les jetons ACCEPTÉS par
+  pas, corriger l'état hôte optimiste après le résultat de vérification côté GPU, ne committer que le
+  préfixe accepté — pas de vidage global nécessaire dans le cas ordinaire « pas de correspondance
+  ngram/correspondance trouvée ».
+
+**vLLM, détail** : issue de suivi #28947 (« Legacy Effort: Asynchronous Scheduling Support ») dit
+littéralement « Asynchronous Scheduling is now enabled by default in vLLM even with Speculative Decoding » ;
+travail de compatibilité listé : PR #24799 (compatibilité de base), #30495 (pénalités), #29223 (logprobs),
+#31336, #29821 (sortie structurée). **Le ngram GPU compatible async est un item SÉPARÉ, PR/issue #29184** —
+preuve que la compatibilité n'est pas automatique pour ngram spécifiquement. Code : `vllm/config/scheduler.py`
+(`SchedulerConfig.async_scheduling`, `get_scheduler_cls()` → `AsyncScheduler` ou `Scheduler` classique).
+Limite connue : issue #29134 documente des points de synchronisation hôte/device RESTANTS dans le
+spéculatif async (`seq_lens_cpu`, comptage de jetons acceptés), fichiers
+`vllm/v1/worker/gpu_model_runner.py::_get_valid_sampled_token_count` — une limite de PERFORMANCE, pas une
+preuve que l'async est désactivé.
+
+**Sur la disponibilité ngram (pas de correspondance)** : pour vLLM, « spéculatif activé » est normalement une
+config STATIQUE de requête/moteur ; le proposeur ngram peut produire zéro jeton de brouillon utile sur un
+pas donné SANS reconfigurer dynamiquement le planificateur ni changer le mode async du moteur. **Luna n'a
+PAS trouvé de déclaration directement sourcée d'un contrôleur d'hystérésis basé sur le taux d'acceptation
+pour le ngram vLLM** — deux mécanismes distincts existent (longueur de spéculation configurée fixe ;
+comportement de proposition/vérification par pas, y compris accepter peu ou aucun jeton proposé), à ne pas
+confondre avec le travail vLLM plus large de « dynamic speculative decoding »/« adaptive verification »
+(capacités distinctes, documentées séparément).
+
+**Comment vLLM évite les doublons sans vidage global** : les candidats spéculatifs ne sont JAMAIS committés
+aveuglément — vérifiés, seul le préfixe accepté + le jeton de remplacement/bonus approprié est committé.
+Ancien code : `vllm/vllm/engine/output_processor/multi_step.py` (positions de sortie spéculatives
+invalides marquées -1, retirées avant append). Historique : `vllm/spec_decode/batch_expansion.py` (expansion
+du lot pour les positions de vérification, contraction après rejet/acceptation). **Actuel (V1 async)** :
+`vllm/v1/core/sched/{async_scheduler,scheduler}.py`, `vllm/v1/worker/gpu_model_runner.py`,
+`vllm/v1/request.py` — le planificateur peut avancer l'état HÔTE de façon optimiste pendant qu'un pas GPU
+précédent est en vol ; **le résultat côté device fait autorité, l'état hôte est corrigé APRÈS** (décrit
+explicitement dans vLLM-Ascend issue #17479 : la vérification spéculative détermine le vrai
+`num_computed_tokens`/positions/longueurs sur le device, l'état hôte optimiste est corrigé ensuite). **Luna
+n'a PAS trouvé de source documentant une opération générale « changer de mode en vol, vider toute la file
+async, puis redémarrer »** — seulement une correction par pas, pas un protocole de vidage global pour un
+changement de mode dynamique arbitraire.
+
+**SGLang, détail** : overlap scheduler = prépare le lot suivant côté CPU pendant que le GPU exécute le lot
+courant (événements CUDA pour résoudre les dépendances), activé par défaut sauf `--disable-overlap`. Suivi
+spéculatif+overlap : issue #11762 (« Overlap Spec Support ») — support EAGLE overlap déjà présent au moment
+de l'issue, **ngram listé comme item de suivi SÉPARÉ**. Preuve la plus directe pour ngram : sglang-jax issue
+#927, contrainte d'implémentation actuelle explicite « overlap scheduling remains disabled on this path »,
+travail futur = cache thread-safe/overlap-safe AVANT de pouvoir activer l'overlap pour ngram.
+
+**Hystérésis SGLang, code réel** : `python/sglang/srt/speculative/adaptive_spec_params.py`, classe
+`AdaptiveStepSlot` — suit la longueur d'acceptation par EMA, ajuste `num_steps`. Mécanismes documentés :
+`ema_alpha`, `update_interval`, `warmup_batches`, `up_hysteresis`, `down_hysteresis`, ensembles de pas
+candidats (ex. `candidate_steps: [1,3,5,7]`, `up_hysteresis: 0.0`, `down_hysteresis: -0.25`). Intention
+explicite dans le code : augmenter les pas spéculatifs quand les brouillons sont acceptés régulièrement,
+diminuer en cas de rejet précoce, lisser par EMA pour éviter l'oscillation, mise à jour PÉRIODIQUE (pas à
+chaque pas) pour la stabilité. **MAIS `adaptive_unsupported_reason()` limite actuellement l'adaptatif à
+EAGLE/EAGLE3 et rejette les autres algorithmes** — le ngram adaptatif est un item de feuille de route séparé
+(PR #23629 « feat: adaptive spec support ngram »).
+
+**Séquence ngram SGLang (sglang-jax #927)** : `SpeculativeAlgorithm.NGRAM`, `NgramCache`, `NgramWorker`,
+`NgramVerifyInput` — brouillon → allocation/préparation des créneaux de vérification → vérification cible →
+conservation du préfixe accepté → libération IMMÉDIATE des créneaux rejetés → pas suivant construit depuis
+l'état de requête corrigé. **Puisque l'overlap est désactivé sur ce chemin actuellement, la question du
+vidage d'un pas overlap-ngram en vol ne se pose pas dans cette implémentation.** Pour l'EAGLE overlap-activé,
+un bogue réel existe (issue #18168, accès mémoire illégal EAGLE+overlap scheduler) — un rapport de bogue,
+PAS une documentation d'un protocole général de vidage.
+
+**Recommandation pour la 277** : votre situation (vidage nécessaire au passage simple→spéculatif, alternance
+coûteuse ngram) N'A PAS d'équivalent documenté directement sourcé chez vLLM ou SGLang pour le ngram — ni l'un
+ni l'autre n'a d'hystérésis ngram publique à imiter telle quelle. Le patron d'hystérésis SGLang pour
+EAGLE/EAGLE3 (EMA + `up_hysteresis`/`down_hysteresis` + mise à jour périodique, pas à chaque pas) est un bon
+GABARIT à adapter au ngram vous-mêmes, mais ce n'est PAS un mécanisme existant à réutiliser directement pour
+ngram. Vérifier d'abord si votre 55 pas pour 32 jetons vient bien de l'alternance amorce/vidage (comme
+supposé) ou d'un défaut de bookkeeping similaire à celui documenté par vLLM issue #29134/#17479 (correction
+d'état hôte optimiste mal faite) avant d'investir dans un contrôleur d'hystérésis complet.
+
+**Sources** : GitHub (vLLM issue #28947 async+spéculatif, PR #24799/#30495/#29223/#31336/#29821, issue/PR
+#29184 ngram GPU async, issue #29134 sync hôte/device restante, `vllm/config/scheduler.py`,
+`vllm/v1/core/sched/{async_scheduler,scheduler}.py`, `vllm/v1/worker/gpu_model_runner.py`,
+`vllm/spec_decode/batch_expansion.py`, `vllm/engine/output_processor/multi_step.py` ; vLLM-Ascend issue
+#17479 ; SGLang issue #11762 Overlap Spec Support, issue #18168 EAGLE+overlap illegal memory access, PR
+#23629 adaptive spec ngram, roadmap Further Ngram Speculative Decoding Support,
+`python/sglang/srt/speculative/adaptive_spec_params.py` ; sglang-jax issue #927 ngram overlap désactivé),
+lmsys.org (SGLang v0.4 Zero-Overhead Batch Scheduler), vllm.ai (doc Speculative Decoding, doc
+`vllm.config.scheduler`).
