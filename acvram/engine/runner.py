@@ -1707,9 +1707,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             t0 = time.perf_counter()
             b_reel = len(decodable)
             if self.speculator is not None and self._garde_spec.eligible(b_reel):
-                n0 = self.stats.decode_tokens
-                outputs += self._speculative_decode(decodable)
-                self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
+                if self._pipeline_pendiente is not None:
+                    # pièce 277 : un pas simple est encore en vol — le livrer d'abord ; spéculer au pas suivant, sur
+                    # un état et un `output_ids` de nouveau d'accord (sinon jetons répétés, sortie ≠ décodage simple)
+                    outputs += self._pipeline_vider()
+                else:
+                    n0 = self.stats.decode_tokens
+                    outputs += self._speculative_decode(decodable)
+                    self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
             else:
                 outputs += self._plain_decode(decodable)
             t1 = time.perf_counter()
