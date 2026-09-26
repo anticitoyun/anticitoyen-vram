@@ -39,13 +39,32 @@ manque() { printf 'MANQUE  %s\n' "$*"; FAUX=1; }
 faux()   { printf 'FAUX    %s\n' "$*"; FAUX=1; }
 saute()  { printf 'SAUTÉ   %s\n' "$*"; }
 
-# ---- 1. téléchargement ----------------------------------------------------------------------------------------
+# ---- 1. téléchargement : gh s'il est authentifié, sinon l'API publique (dépôt public, aucun jeton nécessaire) ------
 if [ -z "$SIMULE" ]; then
-  command -v gh >/dev/null || { echo "gh absent" >&2; exit 69; }
-  gh release view "$TAG" --repo "$DEPOT" --json tagName,isDraft,assets \
-     --jq '"release " + .tagName + (if .isDraft then " (BROUILLON)" else "" end) + " : " + (.assets | length | tostring) + " fichiers"' \
-     || { faux "release $TAG introuvable sur $DEPOT"; echo "VERDICT: FAUX"; exit 1; }
-  gh release download "$TAG" --repo "$DEPOT" --dir "$DOSSIER" --clobber || faux "gh release download"
+  if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+    gh release view "$TAG" --repo "$DEPOT" --json tagName,isDraft,assets \
+       --jq '"release " + .tagName + (if .isDraft then " (BROUILLON)" else "" end) + " : " + (.assets | length | tostring) + " fichiers (gh)"' \
+       || { faux "release $TAG introuvable sur $DEPOT"; echo "VERDICT: FAUX"; exit 1; }
+    gh release download "$TAG" --repo "$DEPOT" --dir "$DOSSIER" --clobber || faux "gh release download"
+  else
+    # sans jeton : api.github.com (60 requêtes/h) et browser_download_url — un jeton ne transite jamais par ici
+    python3 - "$DEPOT" "$TAG" "$DOSSIER" <<'PY' || { faux "release $TAG introuvable sur $DEPOT (API publique)"; echo "VERDICT: FAUX"; exit 1; }
+import json, pathlib, sys, urllib.request
+depot, tag, dossier = sys.argv[1:4]
+with urllib.request.urlopen(f"https://api.github.com/repos/{depot}/releases/tags/{tag}", timeout=30) as r:
+    d = json.load(r)
+print(f"release {d['tag_name']}{' (BROUILLON)' if d.get('draft') else ''} : {len(d['assets'])} fichiers (API publique)")
+for a in d["assets"]:
+    cible = pathlib.Path(dossier) / a["name"]
+    with urllib.request.urlopen(a["browser_download_url"], timeout=600) as r, open(cible, "wb") as f:
+        while True:
+            bloc = r.read(1 << 20)
+            if not bloc:
+                break
+            f.write(bloc)
+    print(f"  {a['name']} ({cible.stat().st_size} o)")
+PY
+  fi
 fi
 echo "dossier : $DOSSIER"
 
