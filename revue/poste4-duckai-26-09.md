@@ -910,11 +910,25 @@ consciousengines.com (compatibilité formats checkpoint EAGLE-3).
 
 ## Q23 — MTP k>1 : rattrapage KV de la tête après vérification, ou cache écrit pendant le brouillon ? (poste5, 277)
 
-**Réponse directe (Luna, 1 avis, très sourcée)** : NON, vLLM et SGLang ne rejouent PAS un passage de
-rattrapage de la tête MTP sur les jetons acceptés avec les états cachés de la cible. Ils vérifient, tronquent
-au préfixe accepté, et continuent le brouillon depuis l'état spéculatif tel quel — **le comportement
-d'acvram (rogner la longueur, garder le cache MTP écrit par la tête elle-même) est celui des moteurs de
-référence, pas un écart**.
+**CORRECTION PAR LA SOURCE (poste5, 26/09, prime sur l'avis duck.ai ci-dessous)** : Luna se trompe pour
+vLLM. Code réel, vLLM 0.29.0 installé (`/opt/ia/vLLM/.venv`),
+`vllm/v1/spec_decode/llm_base_proposer.py::propose` (:510-560) : un PREMIER passage du brouillon
+(MTP/EAGLE) tourne sur TOUS les jetons de la passe de vérification (`target_token_ids` décalés d'un cran,
+:850-866) avec `target_hidden_states` — `self.hidden_states[:num_tokens] = target_hidden_states` (:866) —
+et écrit le KV du brouillon À CES POSITIONS. **C'est exactement le rattrapage** : les positions acceptées
+sont recalculées avec l'état caché de la CIBLE à chaque pas, pas conservées telles qu'écrites pendant la
+proposition. **vLLM fait donc le rattrapage ; acvram (qui rogne seulement) diverge de vLLM sur ce point
+précis.** Le reste de la synthèse Luna ci-dessous (SGLang, causes alternatives, protocole
+d'instrumentation) n'a pas été re-vérifié au code et reste à prendre avec cette réserve. Point à vérifier
+côté acvram signalé par poste5 : leur compte d'acceptation utilise accepté/proposé SANS le jeton bonus —
+vérifier que la comparaison à 0,475-0,489 (DGX Spark/NInfer) utilise la même définition avant de conclure
+à un écart réel.
+
+**Réponse duck.ai d'origine (Luna, 1 avis — voir correction ci-dessus, INEXACTE pour vLLM)** : affirmait que
+vLLM et SGLang ne rejouent PAS de passage de rattrapage de la tête MTP sur les jetons acceptés avec les
+états cachés de la cible, et que le comportement d'acvram (rogner la longueur, garder le cache MTP écrit
+par la tête elle-même) serait celui des moteurs de référence. **Ceci est faux pour vLLM d'après le code
+réel (voir ci-dessus).**
 
 **Deux caches distincts, à ne pas confondre** :
 - **KV de la cible** : le passage de vérification écrit les entrées K/V de la cible pour les positions
