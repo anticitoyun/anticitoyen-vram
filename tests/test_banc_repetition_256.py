@@ -3,7 +3,15 @@ cellule MoE, pas même en remplissage de longueur — l'invite répétée dépla
 experts de ± 0,6-0,9 ms/pas SELON LE SENS (237 : PAR_LIGNE=1 −12,6 % en brut/répété contre
 +12,3 % en brutchat/réel, même protocole, seule l'invite change). Cette garde refuse toute
 invite dont la part de trigrammes répétés dépasse le seuil mesuré (0,5, entre le 0,0 du texte
-réel de la 226 et le 0,89 de la même invite tuilée à 256 jetons — 229/237)."""
+réel de la 226 et le 0,89 d'une phrase courte tuilée à 256 jetons — 229/237).
+
+Pièce 256b : `_INVITE_TEXTE_REELLE` est désormais sept questions techniques réelles et
+distinctes (277 jetons), assez longue pour que `invite_reelle(gguf, 256)` ne tuile plus jamais
+— **la 229 et la 237 (invite tuilée à 256 jetons d'une phrase courte) ne sont donc plus
+reproductibles À L'IDENTIQUE avec ce banc, voulu : reproduire une invite répétée n'a plus de
+sens une fois la règle qui l'interdit écrite.** Le témoin (tuilage forcé au-delà de 277 jetons)
+prouve que le mécanisme de détection marche toujours, pas que l'ancien défaut est encore
+atteignable en usage normal."""
 import importlib.util
 import os
 import pathlib
@@ -42,25 +50,38 @@ def _tokenizer_disponible():
         pytest.skip(f"tokenizer absent : {MODELE}")
 
 
-def test_ratio_ngrammes_mesure_texte_reel_et_invite_tuilee(banc_llamacpp, _tokenizer_disponible):
-    """Les deux chiffres qui fixent le seuil (0,0 et 0,89) — pas supposés, mesurés ici même."""
+def test_ratio_ngrammes_mesure_texte_reel_et_ancienne_phrase_courte_tuilee(banc_llamacpp, _tokenizer_disponible):
+    """Les deux chiffres qui fixent le seuil (0,0 et 0,89) — pas supposés, mesurés ici même. Le
+    témoin tuilé reprend l'ANCIENNE phrase courte (28 jetons, pièce 256 initiale) : la nouvelle
+    `_INVITE_TEXTE_REELLE` (277 jetons) ne tuile plus à 256, c'est tout le point de la 256b."""
     from acvram.server.chat import load_tokenizer
     tok = load_tokenizer(MODELE)
-    texte_reel = banc_llamacpp._INVITE_TEXTE_REELLE
-    ids_reels = tok.encode(texte_reel)
-    r_reel = banc_llamacpp._ratio_ngrammes_repetes(ids_reels)
-    assert r_reel == 0.0, f"le texte reel de la 226 devrait n'avoir aucun trigramme repete, ratio={r_reel}"
+    ancienne_phrase_courte = ("Explique en detail le fonctionnement d'un cache a correspondance "
+                               "directe, puis compare-le a un cache associatif par ensembles.")
+    ids_courte = tok.encode(ancienne_phrase_courte)
+    r_reel = banc_llamacpp._ratio_ngrammes_repetes(tok.encode(banc_llamacpp._INVITE_TEXTE_REELLE))
+    assert r_reel < 0.1, (f"le texte reel (277 jetons, sept questions distinctes) devrait avoir "
+                          f"peu de trigrammes repetes (tournures communes entre questions), ratio={r_reel}")
 
-    tuile = [ids_reels[i % len(ids_reels)] for i in range(256)]
+    tuile = [ids_courte[i % len(ids_courte)] for i in range(256)]
     r_tuile = banc_llamacpp._ratio_ngrammes_repetes(tuile)
-    assert r_tuile > 0.8, f"l'invite tuilee a 256 jetons (229/237) devrait etre tres repetee, ratio={r_tuile}"
+    assert r_tuile > 0.8, f"la phrase courte tuilee a 256 jetons (229/237) devrait etre tres repetee, ratio={r_tuile}"
     assert r_reel < banc_llamacpp.SEUIL_REPETITION_NGRAMMES < r_tuile, (
-        "le seuil doit separer net le texte reel de son propre tuilage a 256 jetons")
+        "le seuil doit separer net le texte reel du tuilage d'une phrase courte")
 
 
-def test_invite_reelle_256_jetons_tuilee_de_la_229_est_refusee(banc_llamacpp, _tokenizer_disponible):
+def test_invite_reelle_256_jetons_est_maintenant_acceptee(banc_llamacpp, _tokenizer_disponible):
+    """Pièce 256b : `_INVITE_TEXTE_REELLE` (277 jetons) couvre 256 sans tuiler — accepté."""
+    ids = banc_llamacpp.invite_reelle(MODELE, 256)
+    assert len(ids) == 256
+    assert banc_llamacpp._ratio_ngrammes_repetes(ids) < banc_llamacpp.SEUIL_REPETITION_NGRAMMES
+
+
+def test_invite_reelle_au_dela_de_sa_longueur_naturelle_tuile_et_est_refusee(banc_llamacpp, _tokenizer_disponible):
+    """Témoin : au-delà de sa propre longueur (277), `invite_reelle` tuile encore par construction
+    (`ids[i % len(ids)]`) — le mécanisme de garde doit toujours l'attraper, même sur ce texte-ci."""
     with pytest.raises(RuntimeError, match="REFUS.*trigrammes"):
-        banc_llamacpp.invite_reelle(MODELE, 256)
+        banc_llamacpp.invite_reelle(MODELE, 2000)
 
 
 def test_invite_reelle_a_sa_longueur_naturelle_est_acceptee(banc_llamacpp, _tokenizer_disponible):
