@@ -1,5 +1,12 @@
 # Journal des changements
 
+* **26/09/2026 — pièce 250 (poste6) : `depaqueter_marlin(noyau="cuda")` acceptait à nouveau l'échelle globale PAR COLONNE d'un
+  tenseur dense (E = 1, pièces 134/147).** La 209 (a) (25/09, a256676f8) avait fermé le noyau CUDA à toute échelle par colonne, pile
+  OU dense, alors que seule la pile E > 1 (g [E, N]) lui est inconnue : deux tests p147 rouges depuis, sur main comme sur la branche
+  232 (rejeu seul, même prise, 04:07). Le service n'était pas touché (`auto`, jamais `"cuda"` explicite, et aucune pile E > 1 n'est
+  dépaquetée en service). Le choix `auto` refuse désormais lui aussi le noyau CUDA à une pile E > 1 par colonne (il aurait lu g[e]
+  comme scalaire, sans erreur) ; test cassant `test_pile_par_colonne_refusee_au_cuda_et_auto_evite_cuda`.
+
 * **26/09/2026 — pièce 226 (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE=1` REVIENT AU DÉFAUT — la « régression » de la 209
   sur le Coder nvfp4 pur était un artefact du banc.** L'histoire vraie : la 209 (25/09) sert en Marlin les piles d'experts à échelles
   sous-normales par un facteur par ligne, exact au bit, +5,77 % sur qkvo-i8c ; la 220 (25/09) l'a remise en opt-in sur le banc de la 217

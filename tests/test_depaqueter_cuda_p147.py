@@ -102,3 +102,20 @@ def test_le_defaut_n_appelle_pas_le_depaquetage(monkeypatch):
     x = torch.randn(64, 128).to(torch.bfloat16)
     K.nvfp4_matmul(x, t)
     assert not appels
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="noyau CUDA requis")
+def test_pile_par_colonne_refusee_au_cuda_et_auto_evite_cuda():
+    """Pièce 250 : une pile E > 1 à g [E, N] (209, facteur par ligne d'expert) n'est pas servie par l'extension CUDA
+    (elle lirait g[e] comme scalaire, sans erreur) — refus explicite en ``noyau="cuda"``, et ``auto`` passe par un
+    autre noyau, au bit du juge torch. Cassant : sans la garde, ``cuda`` rendrait une sortie fausse silencieuse."""
+    E, K, N = 4, 1024, 512
+    w, s, _ = _entrees(E, K, N, 11)
+    g = (torch.rand(E, N, device="cuda") + 0.5) * 2.0 ** 108
+    with pytest.raises(ValueError, match="E > 1"):
+        MP.depaqueter_marlin(w, s, g, K, N, noyau="cuda")
+    avant = dict(MP.DEPAQUETAGES)
+    au = MP.depaqueter_marlin(w, s, g, K, N, noyau="auto")
+    assert MP.DEPAQUETAGES["cuda"] == avant.get("cuda", 0), "auto a pris le noyau CUDA sur une pile à g [E, N]"
+    to = MP.depaqueter_marlin(w, s, g, K, N, noyau="torch")
+    assert torch.equal(au.view(torch.int16), to.view(torch.int16))
