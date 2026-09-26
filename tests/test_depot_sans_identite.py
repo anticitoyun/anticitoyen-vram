@@ -46,7 +46,7 @@ SESSION = re.compile(
 # règle a retiré cinq faux positifs sur cinq.
 COURRIEL = re.compile(
     r"[A-Za-z0-9._%+-]+@(?!\d)[A-Za-z0-9.-]+\.(?!service\b)[A-Za-z]{2,}")
-COURRIEL_TOLERE = ("noreply", "example")
+COURRIEL_TOLERE = ("noreply", "example", "aur@aur.archlinux.org")  # adresse SSH du service AUR (docs/PUBLIER-CANAUX.md, 278), pas un courriel de personne
 # Corpus de calibration cite la documentation Python (argparse) avec les
 # adresses de ses auteurs : texte public, pas notre identite (20/09, chef).
 EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}

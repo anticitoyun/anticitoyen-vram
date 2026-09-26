@@ -42,11 +42,20 @@ def _lancer(depot: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
                           cwd=depot, capture_output=True, text=True, timeout=60)
 
 
-def test_refuse_si_main_sale(tmp_path):
+def test_refuse_si_un_fichier_suivi_est_modifie(tmp_path):
     d = _depot_jetable(tmp_path)
-    (d / "sale.txt").write_text("x", encoding="utf-8")
+    (d / "pyproject.toml").write_text(f'[project]\nname = "acvram"\nversion = "{VNUM}"\n# modifié\n', encoding="utf-8")
     r = _lancer(d, f"v{V}")
     assert r.returncode == 65 and "n'est pas propre" in r.stderr, r.stderr
+
+
+def test_accepte_un_fichier_non_suivi_sur_main(tmp_path):
+    """282 (chef) : un scratchpad/<piece>/ non suivi ne bloque pas — seul le contenu
+    SUIVI compte, comme sur la vraie main pendant une pièce en cours."""
+    d = _depot_jetable(tmp_path)
+    (d / "scratchpad-en-cours.txt").write_text("x", encoding="utf-8")
+    r = _lancer(d, f"v{V}", "--simule")
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 def test_refuse_si_version_pyproject_differente(tmp_path):

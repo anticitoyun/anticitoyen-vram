@@ -18,6 +18,7 @@ class _ModeleSansTete:
 
 class _ChargeSansTete:
     model = _ModeleSansTete()
+    spec = SimpleNamespace(layer_types=[])   # 283 : non hybride, `--speculative ngram` explicite reste au défaut inchangé
 
 
 class _EngineFausse:

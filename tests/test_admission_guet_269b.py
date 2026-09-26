@@ -3,6 +3,7 @@ ENTRÉE dans le service (gestionnaire HTTP commencé, `submit` pas encore fait �
 seule : compteur à 0, porte fermée, aucune attente (179 b tenue). Au défaut (0), rien ne change : la porte reste « ≥ 2 ».
 Processeur seul, moteur factice, comme tests/test_fenetre_admission_179.py."""
 import time
+import types
 
 from acvram.server import app as A
 
@@ -12,9 +13,10 @@ class _Moteur:
         self.running, self.waiting, self.max_batch_size = [], list(range(n)), 8
 
 
-def _service(n, en_entree=0):
+def _service(n, en_entree=0, vision=False):
     s = A.EngineService.__new__(A.EngineService)
     s.engine = _Moteur(n)
+    s.engine.loaded = types.SimpleNamespace(manifest={"vision": "oui"} if vision else {})   # 269 d : lu par vision_servie()
     s.en_entree = en_entree
     return s
 
@@ -85,3 +87,13 @@ def test_defaut_un_et_variable_declaree():
     from acvram.regime import VARIABLES
     v = [x for x in VARIABLES if x.nom == "ADMISSION_GUET"]
     assert len(v) == 1 and v[0].defaut == "1" and v[0].lu_a == ("acvram.server.app", "_GUET_ADMISSION")
+
+
+def test_269d_alias_vision_le_guet_est_coupe(monkeypatch):
+    """Test cassant 269 d (mesure 276, images FAUX) : pour un alias vision, une requête en file + une entrée = pas d'attente,
+    comme avant la 269 b ; le même service sans vision attend la fenêtre (le guet reste au défaut en texte)."""
+    monkeypatch.setattr(A, "_FENETRE_ADMISSION_S", 0.005)
+    monkeypatch.setattr(A, "_GUET_ADMISSION", True)
+    assert _duree(_service(1, en_entree=1, vision=True)) < 0.002
+    assert _duree(_service(1, en_entree=1, vision=False)) >= 0.004
+    assert _service(1, vision=True).guet_actif() is False and _service(1, vision=False).guet_actif() is True
