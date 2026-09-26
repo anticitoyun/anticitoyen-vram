@@ -1,5 +1,18 @@
 # Journal des changements
 
+## 0.7.3 (26/09/2026)
+
+* **26/09/2026 — pièce 269 c (poste6, décision chef sur la mesure 269 b) : le guet d'admission est AU DÉFAUT
+  (`ACVRAM_ADMISSION_GUET=1` ; `0` = opt-out, comportement d'avant).** Après la 268, tout tour à deux pas restant à b=12
+  venait du fil moteur réveillé avec UNE requête en file, la 2e à quelques millisecondes derrière dans le gabarit et le
+  tokeniseur hors boucle ; le guet (compteur `en_entree` des requêtes entrées non soumises) tient la fenêtre d'admission
+  ouverte tant qu'une autre requête est en route. Mesure 269 b (ABBA ×3 sous carte.sh, 6a5df2a12, instruments 262,
+  Qwen3-Coder-30B-A3B nvfp4, 21 tours à 12 + 15 solo par côté) : **21/21 tours en un pas contre 15/21**, TTFT p50 par
+  requête **247,4 ms contre 251,6**, p95 par tour (médiane/max) 247,8/263,4 contre 256,2/271,5, max par tour 248,0/263,5
+  contre 256,3/272,7, solo 37,7 ms contre 38,4 (aucun coût, fenêtre solo identique), 0 tour de l'issue nommée (fenêtre
+  ≈ 20 ms puis pas de 1). **Non couvert : b < 12, images, autre modèle.** `revue/poste6-piece269b-{a-sec,verdict}-26-09.md` ;
+  test cassant « défaut 1 » `tests/test_admission_guet_269b.py::test_269c_au_defaut_le_guet_est_ouvert`, opt-out testé.
+
 ## 0.7.2 (26/09/2026)
 
 * **26/09/2026 — pièce 070 b (poste6) : `acvram doctor` sortait 1 partout, hôte et Flatpak.** `_doctor_eco` (poste7-eco
