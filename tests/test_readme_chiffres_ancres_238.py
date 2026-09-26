@@ -94,13 +94,15 @@ def _sans_dates(texte: str, garder: frozenset | None = None) -> str:
 
 
 # 249 : en japonais, chinois et coréen les grands nombres se comptent en 億 / 亿 / 억 (10⁸) — « 56 milliards »
-# s'écrit « 560 億 ». Ramené au milliard (÷ 10) pour comparer au FR ; un reste non nul reste tel quel
-# (et fait échouer la comparaison : ce n'est pas une conversion d'unité, c'est un chiffre changé).
+# s'écrit « 560 億 ». Ramené au milliard (÷ 10) pour comparer au FR. Un nombre d'億 qui n'est PAS un multiple
+# de 10 (« 56 億 » = 5,6 milliards) n'est pas une conversion d'unité mais un chiffre changé : il est rendu
+# INVISIBLE au compte (lettre collée devant, que `_NOMBRE` exclut) pour que le « 56 » du FR manque — et non
+# laissé tel quel, où « 56 億 » compterait comme le « 56 » du FR (témoin de test_l_elargissement_249_sait_dire_faux).
 _OKU = re.compile(r"(\d+)\s*[億亿억]")
 
 
 def _sans_oku(texte: str) -> str:
-    return _OKU.sub(lambda m: str(int(m.group(1)) // 10) if int(m.group(1)) % 10 == 0 else m.group(0), texte)
+    return _OKU.sub(lambda m: str(int(m.group(1)) // 10) if int(m.group(1)) % 10 == 0 else "x" + m.group(0), texte)
 
 
 def _sans_cibles(texte: str) -> str:
