@@ -826,10 +826,12 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
-# Pièce 243 (179 b, opt-in, HORS BIT) : seuil GEMV → GEMM int8 SOUS une portée `depaquetage_partage` (boucle par
-# séquence d'une couche GDN au préfill). La déquant y est payée une fois pour toutes les séquences et le GEMV à n = 78
-# est borné par le calcul (221) : le croisement tombe bien sous 80. Vide = INT8_GEMV_MAX (sortie inchangée).
-_INT8_GEMV_MAX_PARTAGE = int(os.environ.get("ACVRAM_INT8_GEMV_MAX_PARTAGE", "") or _INT8_GEMV_MAX)
+# Pièce 243 (179 b, HORS BIT, défaut 16 depuis 0.7.0) : seuil GEMV → GEMM int8 SOUS une portée `depaquetage_partage`
+# (boucle par séquence d'une couche GDN au préfill). La déquant y est payée une fois pour toutes les séquences et le GEMV
+# à n = 78 est borné par le calcul (221) : croisement mesuré ≈ 17 (banc isolé). Service mixte b=8 : +9,70 % t/s,
+# −9,3 % J/jeton, KL scellée tenue (revue/poste5-piece243-verdict-26-09.md). Hors portée, la déquant NON partagée
+# régresse (733,7 µs contre 636,4 de GEMV à n = 78) : INT8_GEMV_MAX reste 80. Témoin (sortie d'avant) : 80.
+_INT8_GEMV_MAX_PARTAGE = int(os.environ.get("ACVRAM_INT8_GEMV_MAX_PARTAGE", "") or 16)
 
 
 def seuil_gemv_int8() -> int:

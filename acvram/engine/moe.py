@@ -1998,8 +1998,11 @@ _MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "1") == "1"
 # l'avait remise en opt-in sur une « régression » du Coder nvfp4 PUR (217 : −8,9 %) ; la 226 (26/09) a démontré l'artefact :
 # le banc 217 génère librement depuis des invites de jetons TIRÉS, ses sorties dégénérées divergent entre bras et routent
 # vers d'autres experts ; à invites réelles (banc chat) le 1 gagne +12,8 % de débit et −18,4 % de J/jeton sur le pur (b=8,
-# 5 + 5). Défaut 1 (décision chef, 26/09) ; 0 = TÉMOIN : la préparation d'avant, ces piles refusées (naturel, decode_mma).
-MARLIN_PAR_LIGNE_DEFAUT = "1"
+# 5 + 5). Pièce 229 (poste3, 26/09) : en débit SOUTENU (banc-llamacpp, invites réelles, lots répétés, 5 passes par bras) le 1 perd
+# −15,3 % de débit et +25,4 % de J/jeton sur le même modèle — deux protocoles, deux résultats, écart non expliqué (pièce nsys à venir).
+# Décision chef (232 b, 26/09) : la release garde l'ancien comportement, **défaut 0** ; 1 reste disponible à la demande.
+# 0 = la préparation d'avant : ces piles refusées (naturel, decode_mma) comme depuis la 157.
+MARLIN_PAR_LIGNE_DEFAUT = "0"
 _MARLIN_PAR_LIGNE = os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", MARLIN_PAR_LIGNE_DEFAUT) == "1"
 # Pièce 82 ter : phase de la passe en cours, posée par le modèle (model.forward : batch.is_prefill ; decode_fixed :
 # False). Un préfill court (T ≤ _MOE_GROUPED_MAX) passe par le même `_forward_grouped` qu un pas de décodage : sans

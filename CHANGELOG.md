@@ -1,5 +1,59 @@
 # Journal des changements
 
+* **26/09/2026 — pièce 232 b (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut pour la 0.7.0 — la 209 est À LA
+  DEMANDE.** Deux protocoles, deux résultats sur le même Qwen3-Coder-30B-A3B-nvfp4 pur à b=8 : la 226 (banc chat 102, invites réelles,
+  salve unique de 20 s, 5 + 5) donnait 1 = **+12,8 % / −18,4 % J** ; la 229 (poste3, `banc-llamacpp-16-09.py`, invites réelles, lots
+  répétés en débit SOUTENU, 5 passes par bras) donne 1 = **−15,3 % / +25,4 % J** (B 1 547,3 contre C 1 784,0 t/s ; A = be837ca1 contre C :
+  +1,9 %, neutre). Tant que l'écart entre les deux protocoles n'est pas expliqué (pièce nsys à venir), la release garde l'ancien
+  comportement (piles à sous-normales refusées, naturel + decode_mma) et `ACVRAM_MARLIN_PAR_LIGNE=1` reste disponible ; la 209 reste
+  exacte au bit des poids et gagnante sur qkvo-i8c (209 c). Test cassant si le défaut revient à 1 :
+  `tests/test_marlin_pile_par_ligne_209.py::test_232_le_facteur_par_ligne_est_a_la_demande_et_0_le_defaut`.
+## 0.7.0 (26/09/2026)
+
+Chaîne du 24 au 26/09, deux faits distincts, chacun avec sa pièce :
+* **parité du pas de décodage contre NInfer** (202, poste1) : Qwen3.8-27B-unsloth-mixte-i8c b=8, pas
+  hôte 16,09 ms contre 15,98 chez NInfer (**+0,7 %, parité**). Le banc chat servi reste derrière,
+  422,6 t/s contre ≈ 463 chez NInfer (**−8,7 %**) : l'écart est dans le service (banc − pas, 2,84 ms
+  contre 1,29 au bit), pas dans les noyaux — décomposition en cours (204/221).
+* **gain interne de la nuit du 24-25/09** (190, bilan poste2, main contre main, sans comparaison à un
+  autre moteur) : même alias, même b, débit 323,4 → 394,8 t/s (**+22,08 %**), composé de
+  172/175b/176/179/182/187 (`revue/poste2-piece190-cellule-mixte-b8-25-09.md`).
+
+Gains propres à cette version, au-dessus de ces deux faits :
+* **175/187/194/195b** au défaut : portes GDN α/β en un appel (`ACVRAM_GDN_AB=auto`, 175/175b) ;
+  GEMV int8 par tranches de 6 au lieu de 16 (187, +6,65 % b=8 mixte) ; β‖α GDN sur un second flux
+  (194 b2, `ACVRAM_GDN_AB_FLUX=1`, +2,20 % b=8) ; GEMM int8 étroit à K entier par canal (195b,
+  `ACVRAM_ETROIT_CANAL=1`, +4,01 % b=8, −3,76 % J/jeton).
+* **201** (poste5) : un modèle vision/MTP qui ne tenait pas n'est plus chargé en silence — capacité
+  KV annoncée baisse pour en tenir compte (Qwen3.8 nvfp4 −7,4 %, gemma-4-31B-vision −21,4 %) ; copie
+  int8 transitoire (i8c servi sans OOM), coût nul au banc. `revue/poste5-piece201-verdict-25-09.md`.
+* **209 à la demande** (poste6, 232 b) : le facteur Marlin par ligne d'expert (209, exact au bit, +5,77 % sur qkvo-i8c) reste
+  disponible par `ACVRAM_MARLIN_PAR_LIGNE=1`, à 0 par défaut. Sur Qwen3-Coder-30B-A3B-nvfp4 pur il gagne en salve unique à invites
+  réelles (226 : +12,8 %) mais perd en débit soutenu (229 : −15,3 %, +25,4 % J) ; l'écart entre protocoles n'est pas expliqué, la release
+  garde l'ancien comportement (`revue/poste6-piece226-verdict-26-09.md`, `revue/poste3-piece229-verdict-3bras-26-09.md`).
+* **210/210b** (poste5) : `/v1/completions` — logprobs d'un jeton à texte vide gardés (suit
+  `token_ids`, plus `text_delta`) ; usage omis dans le flux sans `stream_options.include_usage`
+  (`CompletionChunk`) au lieu de {0,0,0} sur chaque fragment ; l'outil TTFT comptait ces jetons
+  vides comme « aucun jeton reçu » — corrigé, ce n'était pas le service.
+* **212** (poste4) : la marge de VRAM avant capture des graphes double sur les modèles à couche
+  récurrente (GDN/KDA/mamba2) — `_KV_MARGE_MIN_GDN` 3 072 Mio au lieu de 1 536, ≈ −12 192 jetons de
+  capacité KV sur les Qwen3.8.
+* **Purge d'historique** (171, poste6) : `outils/purge-historique.sh` exécuté réellement le 25/09,
+  1 015 Mio → 67 Mio, 146 réfs réécrites, Dolt intacte, vérifié sur clone neuf.
+
+* **213 b** (poste5) : la contamination servie de la 213 (mixte b=8 : le 1er lot différait des lots suivants,
+  requête après requête ≠ requête seule) est corrigée — le dtype du RoPE est fixé et `loader.py:313` ne
+  laisse plus la première passe choisir une précision différente : **le 1er lot égale désormais les lots
+  suivants au bit** ; la calibration fixe aussi sa précision (235).
+
+* **243** (poste5, décision chef) : seuil GEMV → GEMM int8 abaissé à 16 dans la portée de déquant PARTAGÉE du préfill
+  GDN (`ACVRAM_INT8_GEMV_MAX_PARTAGE=16` par défaut, 80 = témoin, sortie d'avant). HORS BIT, KL scellée tenue (b=8, 32 pas :
+  max 0,00603 ≤ 0,00793 = 2 × le témoin déjà servi, argmax 254/256, PPL 6,0483 → 6,0657). Qwen3.8-27B-unsloth-mixte-i8c b=8 :
+  préfill 8 × 78 0,821 → 0,410 s par lot (**−50 %**) ; banc chat servi (ABBA ×5, serveur neuf, -lgc 2700) 423,6 → **464,7 t/s
+  (+9,70 %)**, J/jeton net 0,7615 → 0,6906 (**−9,3 %**) — le niveau de NInfer (≈ 463). Réserve : les dix fenêtres sont bridées en
+  puissance (plafond 400 W), les deux bras également. Hors portée, le seuil reste 80 : la déquant non partagée régresse (733,7 µs
+  contre 636,4 de GEMV à n = 78). `revue/poste5-piece243-verdict-26-09.md` ; test cassant `tests/test_int8_seuil_partage_243.py`.
+
 * **26/09/2026 — pièce 226 (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE=1` REVIENT AU DÉFAUT — la « régression » de la 209
   sur le Coder nvfp4 pur était un artefact du banc.** L'histoire vraie : la 209 (25/09) sert en Marlin les piles d'experts à échelles
   sous-normales par un facteur par ligne, exact au bit, +5,77 % sur qkvo-i8c ; la 220 (25/09) l'a remise en opt-in sur le banc de la 217
