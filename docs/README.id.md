@@ -129,6 +129,13 @@ Atau lewat paket, satu berkas terlampir pada setiap [rilis GitHub](https://githu
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nama yang dihasilkan oleh `rpmbuild`, tidak tetap) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (atau `rpmbuild --rebuild *.src.rpm` dari `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
 
+Sebelum menginstal, verifikasi berkas yang diunduh terhadap checksum yang terlampir di rilis (`SHA256SUMS`, diterbitkan setelah semua berkas lain ada):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
 Pip tidak dipublikasikan sebagai paket (tidak ada wheel yang dibangun): `pip install -e '.[dev]'` menginstal dari klon sumber, sama seperti `./install.sh`.
 
 ---

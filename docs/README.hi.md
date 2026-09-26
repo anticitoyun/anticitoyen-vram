@@ -129,6 +129,13 @@ git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (नाम `rpmbuild` द्वारा बनाए जाते हैं, तय नहीं होते) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (या `rpmbuild --rebuild *.src.rpm`, जो `.src.rpm` से पैकेज बनाता है) |
 | Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
 
+इंस्टॉल करने से पहले, डाउनलोड की गई फ़ाइल को रिलीज़ से जुड़े योगों के विरुद्ध सत्यापित करें (`SHA256SUMS`, बाकी सभी फ़ाइलों के मौजूद होने के बाद प्रकाशित):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
 Pip पैकेज के रूप में प्रकाशित नहीं है (कोई wheel नहीं बनाया जाता): `pip install -e '.[dev]'` सोर्स के क्लोन से इंस्टॉल करता है, ठीक `./install.sh` की तरह।
 
 ---

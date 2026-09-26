@@ -17,6 +17,7 @@ MOTIFS_RELEASE_YML = [
     "aur-$V.tar.gz",           # AUR : job aur
     "*.src.rpm",               # RPM/COPR : job rpm
     "acvram-${TAG#v}.flatpak", # Flatpak : job flatpak
+    "SHA256SUMS",              # pièce 259b/271 : sommes de tout ce que la release joint, job sommes
 ]
 
 
@@ -52,3 +53,16 @@ def test_les_noms_cites_dans_le_readme_correspondent_aux_motifs_release_yml():
         for cite, attendu_release_yml in correspondances.items():
             assert cite in texte, f"{nom} ne cite pas {cite}"
             assert attendu_release_yml in RELEASE_YML, f"release.yml n'a plus {attendu_release_yml}"
+
+
+def test_la_verification_sha256sums_est_documentee_fr_et_en():
+    """Pièce 271 : SHA256SUMS existe réellement (job `sommes`, release.yml) — le README doit dire comment
+    s'en servir AVANT d'installer, jamais un nom de fichier de sommes inventé."""
+    assert "sommes:" in RELEASE_YML and "SHA256SUMS" in RELEASE_YML, (
+        "release.yml n'a plus de job produisant SHA256SUMS"
+    )
+    for texte, nom in ((README, "README.md"), (README_EN, "docs/README.en.md")):
+        assert "SHA256SUMS" in texte, f"{nom} ne mentionne pas SHA256SUMS"
+        assert "sha256sum -c SHA256SUMS --ignore-missing" in texte, (
+            f"{nom} : commande de vérification sha256sum -c absente ou modifiée"
+        )
