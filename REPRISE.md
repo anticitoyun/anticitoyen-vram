@@ -308,11 +308,11 @@ chacune ferme une classe d'incident réellement observée ce jour-là.
   plusieurs worktrees d'un même prénom existent presque toujours ; `git worktree list | grep
   -i $p` rendait la première ligne dans l'ordre d'AJOUT du worktree, jamais celui de
   fraîcheur du travail — poste2 et poste4 ont repris sur un vieux worktree au redémarrage du
-  26/09 à cause de ce piège. Proposition écrite (pas encore appliquée à `~/.local/bin`,
-  chef l'applique lui-même) : classer les branches `origin/<prénom>[-*]` par
-  `git for-each-ref --sort=-committerdate`, rendre le worktree de la première qui en a un ;
-  purger `CLAUDE*`/`ANTHROPIC*`/`ACVRAM_SESSION` hérités avant de lancer `claude` (une
-  relance depuis une session désactivait les transcripts).
+  26/09 à cause de ce piège. Classe les branches `origin/<prénom>[-*]` par
+  `git for-each-ref --sort=-committerdate`, rend le worktree de la première qui en a un ;
+  purge `CLAUDE*`/`ANTHROPIC*`/`ACVRAM_SESSION` hérités avant de lancer `claude` (une
+  relance depuis une session désactivait les transcripts). **Appliquée le 26/09** à
+  `~/.local/bin/session-acvram` (chef, sauvegarde `.avant-26-09`).
 
 ## 11. Terminé — définition (20/09/2026, `revue/poste7-tests-rapides-cloture-20-09`, mot pour mot)
 
