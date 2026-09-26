@@ -263,3 +263,292 @@ texte explicites vers `README.fr.md` etc. (README.md anglais = référence).
 
 **Sources** : vllm.ai, GitHub (llama.cpp, SGLang, ExLlamaV2 — noté archivé, développement continué dans
 ExLlamaV3, à ne reprendre que pour la présentation des résultats).
+
+---
+
+# Lot 2 (26/09, chef — questions 8 à 12, releases GitHub AUR/COPR/Flathub/Weblate, pièces 236a/236b/236c/213b/235)
+
+## Q8 — Flathub et CUDA : embarquer torch cu12x ou télécharger post-install ?
+
+**Consensus fort Luna/Gemma** : embarquer la roue torch cu12x dans le manifeste flatpak (limiter à
+`only-arches: x86_64` si pas de roue aarch64) ; `org.freedesktop.Platform.GL.nvidia` sert UNIQUEMENT à
+exposer les bibliothèques du pilote NVIDIA de l'hôte dans le sandbox — **ce n'est PAS un fournisseur de
+runtime CUDA ni un précédent pour PyTorch**, les deux modèles insistent sur cette distinction. Le pilote
+NVIDIA complet, `libcuda.so`, le module noyau et un toolkit CUDA système complet ne doivent jamais être
+embarqués — seule la roue torch (qui embarque déjà cuBLAS/cuDNN/cuFFT/NCCL etc.) suffit, avec un pilote
+hôte compatible. Téléchargement post-install déconseillé pour la dépendance fondamentale (non
+reproductible, réseau requis, taille invisible côté centre logiciel) — acceptable seulement pour des
+modèles/checkpoints optionnels dans `~/.var/app/<appid>/data/`.
+
+**Précédent concret cité (Luna)** : `io.github.tntwise.REAL-Video-EnhancerV2` télécharge PyTorch après
+installation (>5 Gio), avec un bug documenté « no space left on device » malgré de l'espace disponible —
+preuve que ce modèle marche mais reste fragile.
+
+**Taille** : aucune limite officielle simple trouvée par aucun des deux modèles — seule limite documentée
+et citée par Luna : 25 Mio pour le **dépôt Git du manifeste** (pas l'app construite). Seuils pratiques
+donnés par Luna : <1 Gio confortable, 1-2 Gio défendable, 2-4 Gio réaliste mais à justifier, >5 Gio
+possible mais mauvaise UX. Gemma ajoute une donnée non sourcée précisément : des bundles >10 Gio « peuvent
+être signalés lors de la revue Flathub » — à vérifier soi-même avant de s'y fier telle quelle.
+
+**Nuance de Gemma absente chez Luna** : beaucoup d'applications ML grand public préfèrent Docker/Distrobox
+à Flatpak pour CUDA à cause du problème de compatibilité pilote/toolkit (source citée : Red Hat) — piste
+alternative à considérer si Flathub s'avère trop contraignant pour acvram-gui.
+
+**Retenu** : embarquer torch cu12x dans le manifeste (une seule variante CUDA, `only-arches: x86_64`),
+`GL.nvidia` en extension GL classique, `torch.cuda.is_available()` vérifié au lancement avec message
+explicite si absent, modèles optionnels téléchargés à part et annoncés en taille.
+
+**Sources** : flatpak.org (docs Extensions), igalia.com (Digging further into Flatpak with NVIDIA),
+flathub.org (docs Maintenance, fil 2022 packaging PyTorch), pytorch.org (Get Started, TORCH_CUDA_ARCH_LIST),
+GitHub (issue REAL-Video-EnhancerV2 « no space left on device »).
+
+## Q9 — AUR : dépendre de python-pytorch-cuda, ou venv/pip cu12x dans le paquet ?
+
+**Consensus fort Luna/gpt-oss, aucun désaccord** : `depends=('python-pytorch-cuda' ...)` est la pratique
+communautaire normale pour un paquet AUR intégré au système Arch. python-pytorch-cuda `Provides:
+python-pytorch`, entre en conflit avec la variante CPU, dépendances déjà cohérentes (cuda, cudnn, nccl).
+**Installer un venv + `pip install torch` pendant `prepare()`/`package()` est déconseillé** : pacman ne
+connaît alors ni les fichiers ni les dépendances réelles, mises à jour torch/numpy/triton découplées des
+mises à jour Arch, doublonnage des runtimes CUDA déjà empaquetés, build dépendant du réseau (contraire aux
+règles makepkg/clean chroot), venv cassable par une mise à jour Python système. Règle générale citée
+(discussions ArchWiki) : les dépendances Python doivent être exprimées dans `depends` du PKGBUILD via des
+paquets pacman/AUR, pas dans un requirements.txt installé par pip.
+
+**Exception légitime au venv** (les deux modèles d'accord) : seulement si l'application exige une version
+précise/un index CUDA (cu124/cu126) absent des dépôts Arch — dans ce cas, le venv doit être créé HORS du
+PKGBUILD (au premier lancement, dans `~/.local/share/...`), jamais silencieusement embarqué par le paquet,
+et le PKGBUILD n'empaquette alors que le lanceur.
+
+**Retenu pour acvram** : `depends=('python-pytorch-cuda' ...)` en pratique par défaut ; si acvram a besoin
+d'une version torch/CUDA précise non fournie par Arch, documenter explicitement le modèle « environnement
+Python privé » plutôt que de le déguiser en paquet Arch classique intégré.
+
+**Sources** : archlinux.org (fiche python-pytorch-cuda, discussions forum sur les Python package
+guidelines, template PKGBUILD wheel-only), manjaro.org (PKGBUILD UnstableFusion), pytorch.org.
+
+## Q10 — COPR/Fedora : pas de torch CUDA empaqueté, quelle stratégie ?
+
+**Consensus total Luna/Gemma, aucun désaccord.** Classement identique des trois options :
+
+1. **RPM de l'application + venv CUDA documenté (utilisateur)** — recommandé, seule solution vraiment
+   conforme à l'esprit Fedora pour une pile IA.
+2. RPM tiers reconditionnant les wheels — possible techniquement dans un COPR indépendant (COPR n'exige
+   PAS le respect des Fedora Packaging Guidelines, seulement les droits sur le contenu et des licences
+   acceptables), mais PAS un paquet Fedora conforme par défaut : audit de licence par composant embarqué
+   (CUDA/cuDNN/NCCL peuvent avoir des conditions de redistribution particulières), gestion CVE
+   indépendante, ABI/architecture/version Python/variante CUDA multiplient les builds — à étiqueter
+   explicitement comme paquet tiers expérimental si fait, jamais présenté comme du Fedora standard.
+3. **`pip install torch` dans un scriptlet `%post` : interdit dans les faits** — hors du contenu
+   contrôlé/vérifiable du paquet, nécessite réseau à l'installation (contraire à l'esprit des règles
+   Fedora sur les scriptlets « sains », citées par Luna), casse dnf/résolution de dépendances, échoue en
+   offline/images minimales/installations transactionnelles.
+
+**Règle Fedora citée par les deux** : éviter les bibliothèques « bundlées » — un binaire précompilé ne doit
+pas être simplement copié dans `%{buildroot}` sans justification ; les revues de paquets vérifient
+explicitement l'absence de bibliothèques embarquées sans exception du Fedora Packaging Committee.
+
+**Retenu pour acvram** : RPM COPR = code de l'application + dépendances Python standard des dépôts Fedora
+uniquement ; torch CUDA en venv documenté (commande pip + index cu12x explicite dans la doc), détection
+`torch.cuda.is_available()` au démarrage avec message clair si absent, jamais de téléchargement silencieux
+dans `%post`.
+
+**Sources** : fedoraproject.org (Packaging Guidelines wiki), copr.fedorainfracloud.org (User Documentation),
+discussion.fedoraproject.org (fil « PyTorch to Fedora Introduction »), lwn.net (vendoring/bundled
+libraries), pytorch.org.
+
+## Q11 — Weblate : JSON monolingue + README Markdown dans le même projet
+
+**Consensus total Luna/Gemma.** Un projet Weblate, deux composants distincts (JSON et Markdown ne
+partagent jamais un composant) :
+
+* **Interface** : `Format: i18next JSON file v4` (ou v3 selon la version de pluriels côté app),
+  `Base file: locales/_source.json`, `File mask: locales/*.json`. Format générique JSON acceptable si
+  `_source.json` est un simple objet clé-valeur sans particularité i18next, mais i18next JSON est plus
+  cohérent (interpolations et pluriels CLDR gérés nativement).
+* **README** : **il existe un format Markdown dédié** (`Format: Markdown file`) — ne jamais utiliser texte
+  libre/JSON générique pour du Markdown. `File mask: README*.md` ou `docs/**/*.md`, `Base file:
+  README.md`. Monolingue : Weblate extrait le contenu traduisible (titres, paragraphes, liens) en
+  préservant la syntaxe structurelle (`#`, `**`, `[]()`), segmente par bloc/paragraphe.
+
+**Points opérationnels critiques (Luna, non mentionnés par Gemma)** :
+* Pour du Markdown avec syntaxe JSX, utiliser `MDX file`, pas `Markdown file`.
+* **Weblate devient la source de vérité des traductions Markdown** : modifier directement un
+  `README.fr.md` dans le dépôt risque d'être ignoré à la prochaine synchro — flux Git à prévoir en
+  conséquence (export/génération depuis Weblate, pas d'édition manuelle des fichiers traduits).
+* Chaînes identiques répétées (tableaux Markdown) : par défaut chaque occurrence = unité distincte
+  (contexte ligne conservé) ; `markdown_merge_duplicates=True` regroupe au prix de ce contexte.
+* Front matter YAML pris en charge, avec option pour traduire séparément les valeurs scalaires en
+  préservant clés/structure.
+
+**Retenu pour acvram** : projet Weblate unique, composant JSON i18next v4 pour l'interface + composant
+Markdown dédié pour les README (masque à ajuster selon la convention `README.xx.md` déjà en place dans le
+dépôt, cf. REGLES §langue) — vérifier le comportement `markdown_merge_duplicates` sur nos tableaux de
+benchmarks avant de l'activer.
+
+**Sources** : weblate.org (docs i18next JSON files, Markdown files — version 2026.9, Components,
+Supported Formats).
+
+## Q12 — RoPE : cache cos/sin à dtype fixe par module, ou indexé par dtype ?
+
+**Réponse de fond (Luna, code réel cité) : ni un dtype fixe immuable, ni un dict[dtype] — un cache
+mutable unique qui se recaste et se REMPLACE à chaque changement de dtype demandé, avec UNE exception
+notable.**
+
+* **vLLM** (`vllm/model_executor/layers/rotary_embedding/base.py`, réel) : `RotaryEmbeddingBase.__init__`
+  calcule `cos_sin_cache` une fois, casté au dtype du module. À l'exécution,
+  `_match_cos_sin_cache_dtype(query)` compare le dtype du cache à celui de `query` : s'ils diffèrent, le
+  cache est casté vers `query.dtype` **et remplace le buffer principal** (`self.cos_sin_cache = ...`) —
+  donc si l'usage alterne fp32/bf16 d'un appel à l'autre, **le cache est recasté et remplacé à chaque
+  appel** (ping-pong), jamais deux versions gardées en mémoire simultanément dans le cas général.
+  **Exception explicite documentée dans le code** : le chemin **AITER compilé** garde un second buffer
+  persistant `cos_sin_cache_bf16` en PARALLÈLE du cache principal (`register_buffer`, jamais écrasé) —
+  c'est la seule vraie forme de « cache indexé par dtype » (2 entrées fixes, pas un dict général). Le
+  chemin **FlashInfer** est un cas à part : il consomme directement `self.cos_sin_cache` SANS passer par
+  `_match_cos_sin_cache_dtype` — suppose que le dtype stocké est déjà compatible avec son propre contrat.
+* **HF Transformers actuel** (`LlamaRotaryEmbedding`) : **aucun cache persistant** — les fréquences sont
+  RECALCULÉES en fp32 à CHAQUE appel (`inv_freq_expanded @ position_ids_expanded`, sous
+  `maybe_autocast(enabled=False)`), puis `cos.to(x.dtype)`/`sin.to(x.dtype)` à la fin seulement. Donc un
+  appelant fp32 et un appelant bf16 obtiennent chacun un calcul frais, jamais de cache à invalider/remplacer.
+* **Anciennes versions HF** : `_cos_cached`/`_sin_cached`, reconstruits (pas indexés) si `dtype`/`device`/
+  `seq_len` changent — même famille de bug que vLLM standard (ping-pong), documenté dans une issue HF
+  citée (cache reconstruit à précision insuffisante si le module était converti en bf16/fp16 avant
+  l'extension de longueur).
+
+**Désaccord net avec gpt-oss** : gpt-oss (répondu SANS recherche web cette fois, raisonnement à vide)
+affirme catégoriquement que « vLLM ne maintient PAS de cache multi-dtype » — **contredit directement par
+le code réel cité par Luna** (l'exception AITER `cos_sin_cache_bf16`). gpt-oss cite aussi un chemin de
+fichier obsolète (`rotary_embedding.py` en fichier unique, plus la structure actuelle en sous-module) et
+navigue à vue sans jamais confirmer par une source — **à ignorer sur ce point précis, faire confiance au
+code cité par Luna**.
+
+**Ce que ça donne pour la 213b/235 (arbitrage RoPE)** : si acvram fait alterner un chemin fusionné fp32
+et un repli eager bf16 sur le MÊME module RoPE, le comportement par défaut (hors AITER) est un
+cast-et-remplacement à CHAQUE appel — un coût caché (recast) à chaque bascule, PAS une conservation à la
+demande. Si cette alternance est fréquente dans notre pipeline, envisager le motif AITER (second buffer
+persistant nommé) plutôt que de compter sur `_match_cos_sin_cache_dtype`-like pour éviter le ping-pong.
+
+**Sources** : GitHub (code réel `vllm/model_executor/layers/rotary_embedding/base.py`,
+`modeling_llama.py` transformers actuel, ancienne implémentation `_cos_cached`, issue HF citée sur le
+cache recasté bf16/fp16).
+
+---
+
+# Lot 3 (26/09, chef — questions 13 à 15, pièces 209/213b/235, verdict 221 d'poste1)
+
+## Q13 — Marlin MoE nvfp4 échelles par ligne : inversion de signe salve (+12,8%) vs soutenu (−15,3%, −25% J/jeton)
+
+**Consensus fort Luna/gpt-oss** : le bridage puissance/thermique est l'explication « la plus directe »
+d'une inversion de signe après quelques secondes (les deux modèles le disent en ces termes, cohérent avec
+la mémoire du groupe : « les invalidations de poste3 sont toutes dues au bridage »). Mécanisme : la salve
+tourne au boost clock max (transitoire) ; le régime soutenu chauffe la carte, maintient la consommation
+près de la limite, le pilote réduit la fréquence SM — **si le noyau row-wise est plus gourmand en
+puissance par FLOP que la référence** (accès mémoire différents, plus d'instructions), il déclenche le
+throttling plus tôt/plus fort, inversant un gain brut en perte nette. gpt-oss ajoute cette nuance
+(spécifique au coût énergétique du noyau lui-même) sans la contredire.
+
+**Quatre hypothèses, chacune avec sa signature distincte (tableau de Luna)** :
+
+| Hypothèse | Signature salve | Signature soutenu (20s) | Mesure discriminante |
+|---|---|---|---|
+| Pression L2/DRAM (échelles row-wise) | échelles/poids encore en L2, coût faible | hit rate L2 baisse progressivement, secteurs L2/DRAM et latence montent, noyau devient memory-bound | `lts__t_sector_hit_rate.pct`, secteurs L2, `dram__bytes_read/write.sum`, sections NCU Memory Workload Analysis/Speed of Light/Roofline |
+| Bridage puissance/thermique | boost clock élevé, transitoire | fréquence SM moyenne baisse, puissance proche limite, température/throttle reasons montent | nsys `--gpu-metrics-device` + `nvidia-smi dmon -s pucm -d 1`, `nvidia-smi -q -d CLOCK,POWER,TEMPERATURE,PERFORMANCE` ; raisons NVML `SwPowerCap`/`SwThermalSlowdown`/`HwThermalSlowdown`/`HwSlowdown`/`HwPowerBrakeSlowdown` |
+| Alternance prefill/decode (M variable) | salve dominée par une forme GEMM favorable | agrège plusieurs formes, petit M (decode) où chargement des échelles/lancement dominent | marqueurs NVTX par phase prefill/decode, NCU séparément à M grand/moyen/petit, `débit(M) = tokens/temps_à_M` |
+| Warmup/premier passage | cache froid, compilation, allocations | ne devrait PAS expliquer une perte persistante après exclusion du warmup | comparer fenêtres initiale/médiane/finale sur la même mesure |
+
+**Protocole discriminant recommandé (Luna)** : 4 runs NCU ciblés (référence/row-wise × cache froid/workload
+répété, à petit M) avec `SpeedOfLight_RooflineChart`, `MemoryWorkloadAnalysis`, `LaunchStats`, `Occupancy`,
+`SchedulerStats` + compteurs `lts__t_sector_hit_rate.pct`, `dram__throughput.avg.pct_of_peak_sustained_active`,
+`sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active`. Interprétation : fréquence SM qui baisse +
+throttle reason = bridage ; fréquence stable + hits L2 qui chutent + octets DRAM qui montent = pression
+mémoire ; perte concentrée à petit M = effet prefill/decode ; seules les premières fenêtres diffèrent =
+warmup. **Les effets peuvent se cumuler** (plus de trafic mémoire → plus de puissance → throttling
+déclenché plus tôt) — ne pas chercher une cause unique si plusieurs signatures apparaissent ensemble.
+
+**Point méthodologique NCU signalé par Luna** : NCU peut rejouer le kernel plusieurs fois pour ses
+métriques, ce qui peut vider ou modifier l'état du cache — utiliser `--cache-control none` et le replay
+d'application si l'état persistant du cache fait partie de ce qu'on mesure.
+
+**Sources** : docs NVIDIA (Nsight Compute Profiling Guide, Nsight Systems, NVML Clocks Event Reasons API
+Reference), arXiv (« Measuring GPU utilization one level deeper »).
+
+## Q14 — GEMV int8 (n=78-80) : seuil de bascule vers GEMM tensor cores (verdict 221 d'poste1)
+
+**Pas de seuil universel** (Luna, explicite) : dépend de N, K, format des échelles, tuile disponible —
+**attention à ne pas transposer un seuil SM90/H100 sur RTX 5090 (SM120)**, la plupart des chemins int8
+documentés (vLLM CUTLASS notamment) ciblent SM80/89/90.
+
+**Ordres de grandeur convergents (Luna + littérature citée)** : M=1-16 → GEMV CUDA/DP4A ; M≈16-32 → zone
+de transition (comparer GEMV, split-K, petite GEMM tensor core) ; **M≈32-64 → la GEMM int8 MMA devient
+généralement préférable** ; M≥64 → tenter la GEMM tensor core en premier. **À M=78-80, ne plus choisir un
+GEMV par défaut** — tester une petite GEMM int8/MMA (M arrondi à une tuile de 128, ou permutation A↔B).
+La raison n'est PAS la bande passante DRAM (poids déjà en L2, confirmé par la question) mais le manque de
+parallélisme dans la dimension M pour un GEMV, alors qu'une GEMM réutilise mieux les activations et
+expose plus de travail aux tensor cores.
+
+**Code réel cité (vLLM)** : `scaled_mm_sm90_int8_dispatch.cuh` route par buckets `M∈[1,32]` /
+`(32,64]` / `(64,128]` / `>128` vers des configs CUTLASS différentes (M32_NSmall/NBig, M64, M128,
+défaut) — **M=80 tombe dans le bucket (64,128], config M128** — mais c'est un choix de TAILLE DE TUILE
+GEMM, pas un choix GEMV-vs-GEMM (vLLM ne fait pas ce choix explicitement à ce niveau). **Point critique
+pour nous** : ce code est spécifique SM90, et la doc vLLM actuelle signale une limitation INT8 sur
+Blackwell, recommandant **FP8 plutôt qu'INT8 pour compute capability ≥10.0** — à vérifier si ça nous
+concerne.
+
+**SGLang/GemLite** : politique plus explicite documentée — batch=1 → GEMV ; 2-64 → GEMM split-K (matrices
+« skinny »), retombant en GEMM classique `SPLIT_K=1` « à partir de 32 ou 64 selon la forme/le device » ;
+>64 → GEMM généralement privilégiée.
+
+**TensorRT-LLM** : aucun seuil global fixe documenté publiquement pour un GEMV W8A8 per-channel — seule
+une mesure expérimentale publiée (H800, comparaison W4A16/FP8 sur Mixtral, pas notre cas) montre un
+crossover autour de M≈32.
+
+**Retenu pour acvram** : tester nous-mêmes M∈{1,2,4,8,16,24,32,40,48,64,80,96,128} avec GEMV CUDA dp4a
+vs GEMM CUTLASS/cuBLASLt (accumulation int32) vs GEMM transposée (swap A/B) vs split-K — aucune des
+sources ne donne de seuil validé sur RTX 5090/SM120 pour notre cas précis (int8 per-channel), seulement
+des ordres de grandeur 32-64 à vérifier empiriquement chez nous ; vérifier aussi si le conseil « FP8 au
+lieu d'INT8 sur Blackwell » de vLLM s'applique à notre chemin.
+
+**Sources** : GitHub (`scaled_mm_sm90_int8_dispatch.cuh` réel), vllm.ai (doc INT8 W8A8, limitation
+Blackwell), pytorch.org (GemLite/TorchAO/SGLang), arXiv (mesure Mixtral H800), GitHub (discussion
+TensorRT-LLM CUDA graph batch sizes).
+
+## Q15 — invites de texte répété biaisent-elles le routage MoE (Qwen3-Coder-30B-A3B) ?
+
+**Réponse directe, papier réel trouvé et directement pertinent (Luna)** : « RepetitionCurse: Measuring
+and Understanding Router Imbalance in Mixture-of-Experts LLMs under DoS Stress » (arXiv) — mesure
+exactement ce biais sur **Mixtral-8x7B ET Qwen3-30B-A3B** (même famille que notre Qwen3-Coder-30B-A3B),
+longueurs 100 à 16k jetons. Invites quasi-monotones → entropie de routage basse et stable, déséquilibre
+>90% pour certains experts (concentré dans les couches intermédiaires, moins dans les premières/dernières
+couches). **Sur Qwen3-30B-A3B précisément : facteur de latence ×2,14 mesuré sur leur déploiement** —
+confirme que le biais atteint le débit/latence système, pas seulement l'histogramme de routage.
+
+**Nuance importante pour notre protocole (256 jetons, texte répété pas token unique)** : le papier utilise
+des invites quasi-identiques token par token ; un passage de plusieurs jetons répété est moins extrême
+(le modèle est causal, les états cachés dépendent du contexte précédent, les embeddings positionnels
+cassent une partie de la symétrie) — **reste potentiellement biaisé mais pas garanti aussi sévère que
+le cas extrême du papier**. Mesures recommandées par couche (pas seulement en moyenne, le déséquilibre
+peut être localisé) : entropie normalisée `H_l = -Σ p_l,e log(p_l,e) / log(E_l)` et coefficient de
+variation `CV_l = std_e(n_l,e) / mean_e(n_l,e)` — un prompt répété donne typiquement H plus bas et CV
+plus élevé qu'un prompt naturel de même longueur.
+
+**Effet dépend du matériel** : TP seul (pas d'EP) → déséquilibre modéré si les kernels sont bien groupés ;
+**EP multi-GPU → effet plus sérieux** (le GPU le plus chargé détermine le temps de la couche, straggler) ;
+petit batch decode → le hasard de quelques tokens domine ; gros préfill → la répétition sature
+systématiquement les mêmes experts.
+
+**Ce que font les bancs publics (aucune correction MoE spécifique appliquée par défaut)** :
+* **vLLM** `vllm bench serve` : `sharegpt` (conversations réelles, référence la plus défendable),
+  `sonnet` (longueur contrôlée mais contenu lexical varié — meilleur choix qu'une chaîne répétée pour un
+  préfill contrôlé), `random` (**PIÈGE** : dans certaines versions échantillonne des séquences de
+  ShareGPT puis les répète/tronque pour la longueur demandée — **PAS un texte naturel indépendant**,
+  documenté dans l'issue GitHub #4133 déjà croisée en Q4), `prefix_repetition` (mesure le prefix caching,
+  pas le débit MoE représentatif).
+* **SGLang** `sglang.bench_serving` : mêmes familles (`sharegpt`, `random`) — privilégier `sharegpt` réel
+  pour un routage proche du trafic naturel.
+
+**Recommandation retenue (Luna)** : au minimum 3 charges à même longueur/concurrence — ShareGPT (référence
+naturelle), Sonnet (contrôle reproductible), passage répété (stress de routage, jamais présenté comme
+débit nominal) — publier `débit naturel vs débit répété` + ΔH et ΔCV, jamais un seul chiffre isolé.
+
+**Sources** : arXiv (« RepetitionCurse », mesure directe Qwen3-30B-A3B), nvidia.com (routage MoE et
+distribution sémantique du corpus), vllm.ai (`vllm bench serve` datasets), GitHub (issue #4133 « random
+n'est pas random »).
