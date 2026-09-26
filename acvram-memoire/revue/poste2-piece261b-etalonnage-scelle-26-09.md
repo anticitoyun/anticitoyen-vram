@@ -94,3 +94,24 @@ d'étalonner finement, il suffit que l'instrument ne soit ni au plancher (hasard
   discordantes (b = P0 correct/P1 faux, c = P0 faux/P1 correct).
 
 Écrit et poussé AVANT la mesure de santé.
+
+## Résultat du plancher de santé (P0, mesuré) — TENU
+
+* GSM8K, n=50 : **0,98** (≥ 0,70, largement tenu).
+* MMLU college_computer_science, n=100 : **0,76** (≥ 0,50, largement tenu). **Substitution
+  faite AVANT de voir un score** : `mmlu_flan_cot_zeroshot_college_computer_science` (scellée
+  initialement) tire sur le split `validation` de MMLU, qui ne contient que **11** questions
+  pour ce sujet (`sample_len=11` mesuré, pas configurable par `--limit`) — structurellement
+  incompatible avec n=100. Remplacée par `mmlu_flan_cot_fewshot_college_computer_science`
+  (même famille, même style CoT + extraction « the answer is X », mais tire sur le split
+  `test`, 100 questions, 4-shot fixé par la config) — substitution découverte en tentant la
+  mesure scellée, pas après un score défavorable.
+* **Plancher TENU des deux côtés → instrument valide pour la comparaison P1/P0.**
+
+## Suite : McNemar P1 contre P0
+
+`scratchpad/poste2-p261b-26-09/mcnemar-261b.py` (paires par `doc_id`, filtre principal choisi
+explicitement — gsm8k `strict-match`, mmlu `get-answer`), vérifié sur une comparaison P0
+contre lui-même (accord parfait, p=1,0). P1 (`ACVRAM_MARLIN_PAR_LIGNE=1`) à mesurer sur les
+MÊMES deux tâches, même graine 1234, prises ≤ 30 min chacune, `prise-tache-261b.sh
+acvram-p1 <tache> <n> <sortie>`. Écrit et poussé AVANT ces deux prises.
