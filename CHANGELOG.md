@@ -30,7 +30,7 @@ Gains propres à cette version, au-dessus de ces deux faits :
 * **209 à la demande** (poste6, 232 b) : le facteur Marlin par ligne d'expert (209, exact au bit, +5,77 % sur qkvo-i8c) reste
   disponible par `ACVRAM_MARLIN_PAR_LIGNE=1`, à 0 par défaut. Sur Qwen3-Coder-30B-A3B-nvfp4 pur il gagne en salve unique à invites
   réelles (226 : +12,8 %) mais perd en débit soutenu (229 : −15,3 %, +25,4 % J) ; l'écart entre protocoles n'est pas expliqué, la release
-  garde l'ancien comportement (`revue/poste6-piece226-verdict-26-09.md`, `revue/poste3-piece229-scelle-26-09.md`).
+  garde l'ancien comportement (`revue/poste6-piece226-verdict-26-09.md`, `revue/poste3-piece229-verdict-3bras-26-09.md`).
 * **210/210b** (poste5) : `/v1/completions` — logprobs d'un jeton à texte vide gardés (suit
   `token_ids`, plus `text_delta`) ; usage omis dans le flux sans `stream_options.include_usage`
   (`CompletionChunk`) au lieu de {0,0,0} sur chaque fragment ; l'outil TTFT comptait ces jetons
@@ -41,9 +41,10 @@ Gains propres à cette version, au-dessus de ces deux faits :
 * **Purge d'historique** (171, poste6) : `outils/purge-historique.sh` exécuté réellement le 25/09,
   1 015 Mio → 67 Mio, 146 réfs réécrites, Dolt intacte, vérifié sur clone neuf.
 
-Suspendue à la clôture de la 213 (poste5) : contamination servie confirmée et reproductible (mixte
-b=8, même moteur, requête après requête ≠ requête seule) — cause pas encore montrée. Cette section
-prépare la version ; **rien n'est publié ni étiqueté ici**, décision de chef.
+* **213 b** (poste5) : la contamination servie de la 213 (mixte b=8 : le 1er lot différait des lots suivants,
+  requête après requête ≠ requête seule) est corrigée — le dtype du RoPE est fixé et `loader.py:313` ne
+  laisse plus la première passe choisir une précision différente : **le 1er lot égale désormais les lots
+  suivants au bit** ; la calibration fixe aussi sa précision (235).
 
 * **26/09/2026 — pièce 226 (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE=1` REVIENT AU DÉFAUT — la « régression » de la 209
   sur le Coder nvfp4 pur était un artefact du banc.** L'histoire vraie : la 209 (25/09) sert en Marlin les piles d'experts à échelles
