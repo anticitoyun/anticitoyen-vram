@@ -27,6 +27,7 @@ Una passarel·la d'inferència compatible amb l'API d'OpenAI, que tracta la mem�
 
 - [Les dues idees](#idees)
 - [Inici ràpid](#demarrage)
+- [Instal·lació](#installer)
 - [Què diu `acvram plan`](#plan)
 - [Anar ràpid](#optimisations)
 - [Punts d'entrada HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Instal·lació
+
+Des del codi font (totes les plataformes):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+O per paquet, un fitxer adjunt a cada [versió de GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Canal | Fitxer adjunt a la versió | Ordre |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (noms generats per `rpmbuild`, no fixos) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (o `rpmbuild --rebuild *.src.rpm` des del `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip no es publica com a paquet (no hi ha wheel construïda): `pip install -e '.[dev]'` instal·la des d'un clon del codi font, igual que `./install.sh`.
 
 ---
 
