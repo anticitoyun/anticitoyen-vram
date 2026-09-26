@@ -20,7 +20,25 @@ PAS = 32                                    # frontière d'instantané (multiple
 
 @pytest.fixture(scope="module")
 def modele(tmp_path_factory):
-    return T167._convertir(tmp_path_factory.mktemp("hyb284"), gdn_int8_canal=True)
+    """Le petit hybride de la 167 (une couche GDN, une couche d'attention pleine), complété de la norme finale qu'il
+    n'avait pas (il ne servait qu'à la conversion) pour être CHARGEABLE ; même conversion que `T167._convertir`."""
+    from safetensors.torch import load_file, save_file
+    from acvram.engine.config import load_model_spec
+    from acvram.hardware.profiles import load_profile
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    d = tmp_path_factory.mktemp("hyb284")
+    ckpt = T167._checkpoint_167(d)
+    f = pathlib.Path(ckpt) / "model.safetensors"
+    sd = load_file(str(f))
+    sd.setdefault("model.norm.weight", torch.ones(T167.H, dtype=next(iter(sd.values())).dtype))
+    save_file(sd, str(f))
+    spec = load_model_spec(ckpt, "tiny-gdn-284")
+    plan, _ = auto_plan(spec, load_profile("rig-14900k-5090-3080ti"), PlannerOptions(max_model_len=256, max_concurrent_seqs=4))
+    out = d / "out"
+    T167.convert_checkpoint(ckpt, plan, T167.ConversionOptions(
+        out_dir=str(out), attn_qkvo_int8_canal=True, gdn_int8_canal=True, snr_floor=999.0,
+        promotion_classes=T167._CLASSES_ATTN_GDN, max_promotions=1.0), spec=spec)
+    return out
 
 
 def _invites(n, graine=284):
