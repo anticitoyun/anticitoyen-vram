@@ -284,17 +284,17 @@ def test_l_elargissement_249_sait_dire_faux():
         assert Counter(_nombres(t, garder)) == src_compte, f"{nom} : le témoin part d'un fichier déjà rouge"
     # un débit altéré (312,3 → 321,3), en japonais et en chinois
     for nom, t in (("ja", ja), ("zh", zh)):
-        assert t.count("312.3") == 1, f"{nom} : gabarit du témoin obsolète (312.3 absent)"
-        assert Counter(_nombres(t.replace("312.3", "321.3"), garder)) != src_compte, f"{nom} : débit altéré non vu"
+        assert t.count("312.3") >= 1, f"{nom} : gabarit du témoin obsolète (312.3 absent)"
+        assert Counter(_nombres(t.replace("312.3", "321.3", 1), garder)) != src_compte, f"{nom} : débit altéré non vu"
     # 560 億 → 56 億 (ce n'est plus 56 milliards mais 5,6)
-    assert ja.count("560 億") == 1 and zh.count("560 亿") == 1, "gabarit du témoin obsolète (560 億/亿 absent)"
-    assert Counter(_nombres(ja.replace("560 億", "56 億"), garder)) != src_compte, "ja : 560 億 → 56 億 non vu"
-    assert Counter(_nombres(zh.replace("560 亿", "56 亿"), garder)) != src_compte, "zh : 560 亿 → 56 亿 non vu"
+    assert ja.count("560 億") >= 1 and zh.count("560 亿") >= 1, "gabarit du témoin obsolète (560 億/亿 absent)"
+    assert Counter(_nombres(ja.replace("560 億", "56 億", 1), garder)) != src_compte, "ja : 560 億 → 56 億 non vu"
+    assert Counter(_nombres(zh.replace("560 亿", "56 亿", 1), garder)) != src_compte, "zh : 560 亿 → 56 亿 non vu"
     # une date réelle changée, dans une forme locale (finnois 22.9.2026, hongrois 2026.09.22)
     src_dates = _dates_jour_mois(src, None)
-    assert fi.count("22.9.2026") == 1 and hu.count("2026.09.22") == 1, "gabarit du témoin obsolète (date absente)"
-    assert _dates_jour_mois(fi.replace("22.9.2026", "21.9.2026"), garder) != src_dates, "fi : date changée non vue"
-    assert _dates_jour_mois(hu.replace("2026.09.22", "2026.09.21"), garder) != src_dates, "hu : date changée non vue"
+    assert fi.count("22.9.2026") >= 1 and hu.count("2026.09.22") >= 1, "gabarit du témoin obsolète (date absente)"
+    assert _dates_jour_mois(fi.replace("22.9.2026", "21.9.2026", 1), garder) != src_dates, "fi : date changée non vue"
+    assert _dates_jour_mois(hu.replace("2026.09.22", "2026.09.21", 1), garder) != src_dates, "hu : date changée non vue"
     # un « 16.02 » (nombre du FR au point décimal) altéré reste vu, même s'il ressemble à une date
-    assert ja.count("16.02") == 1
-    assert Counter(_nombres(ja.replace("16.02", "16.03"), garder)) != src_compte, "ja : 16.02 → 16.03 non vu"
+    assert ja.count("16.02") >= 1
+    assert Counter(_nombres(ja.replace("16.02", "16.03", 1), garder)) != src_compte, "ja : 16.02 → 16.03 non vu"
