@@ -310,9 +310,10 @@ def load_model(path: str, plan: Optional[Plan] = None,
             embed = embed.pin_memory()
 
     rope_gemma = None
+    # dtype du service (pièce 213) : sans lui, fp32 par défaut, et la table dépendait du 1er appelant
     rope = RotaryEmbedding(spec.rotary_dim or spec.head_dim,
                            spec.max_position_embeddings,
-                           spec.rope_theta, spec.rope_scaling)
+                           spec.rope_theta, spec.rope_scaling, None, dtype)
 
     # Profil de routage persistant (bead pds, point 1) : lu une seule fois
     # pour tout le modèle, `None` si aucun n'existe encore — cas normal au
