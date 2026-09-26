@@ -20,6 +20,28 @@ env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  # Pièce 248b : sur le modèle des jobs aur/rpm ci-dessous (construction et
+  # attachement dans le même job) plutôt que celui d'animematrix (.deb attaché
+  # à la main avant publication, ce workflow ne fait que le récupérer) — acvram
+  # n'a pas cette étape manuelle, tools/construire-deb.sh suffit en CI.
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Dépendances du paquet et de son auto-test (--help sans torch)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 python3-venv python3-gi \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1 python3-psutil dpkg-dev
+          sudo pip install --break-system-packages --quiet numpy safetensors fastapi \
+            "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 nvidia-ml-py
+      - name: Paquet .deb (tools/construire-deb.sh)
+        run: |
+          tools/construire-deb.sh
+          gh release upload "$TAG" acvram_*_amd64.deb --clobber --repo "$GITHUB_REPOSITORY"
+
   rpm:
     runs-on: ubuntu-24.04
     container: fedora:latest
