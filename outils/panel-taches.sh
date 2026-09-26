@@ -60,9 +60,14 @@ rm -rf "$D"
 mkdir -p "$D"
 
 echo "=== MMLU generative (gabarit de conversation, limite $LIMITE_MMLU/tâche, graine $GRAINE)"
+# max_gen_toks : defaut lm-eval 256, beaucoup trop court pour un CoT ("Let's think step by
+# step") qui raisonne AVANT de conclure "The answer is X" -- verifie sur echantillon reel :
+# reponses coupees en plein raisonnement, jamais la conclusion, filtered_resps = [invalid]
+# partout, 0 % des DEUX cotes (acvram ET llama.cpp) -- signe du panel, pas du modele.
 "$PY" -m lm_eval run --model local-chat-completions --apply_chat_template \
   --model_args "model=${SERVED},base_url=${BASE_URL}/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=${TOK},num_concurrent=1,max_retries=3" \
   --tasks "$TACHES_MMLU" --limit "$LIMITE_MMLU" --seed "$GRAINE" \
+  --gen_kwargs "max_gen_toks=1536" \
   --output_path "$D/mmlu" --batch_size 1 --log_samples
 
 echo "=== GSM8K (gabarit de conversation, limite $LIMITE_GSM8K, graine $GRAINE)"
