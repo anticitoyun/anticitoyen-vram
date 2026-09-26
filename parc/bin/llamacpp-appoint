@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# llamacpp-appoint — petit modèle PERMANENT sur la RTX 3080 Ti (port 8081).
+# Cohabite avec ComfyUI ; jamais touché par l'arrêt croisé des gros moteurs.
+# Usage : llamacpp-appoint [chemin.gguf] [contexte]
+set -uo pipefail
+
+# Binaire officiel b10569 (Vulkan) : le b9967 CUDA de Jan a un bug de grammaire
+# d'outils (templates hermes) qui casse le tool-calling kimi — corrigé upstream.
+BIN=/mnt/AI_GENERATOR/llamacpp/officiel/llama-server
+DIR=/mnt/AI_GENERATOR/llamacpp
+PORT=8081
+# clés d'API : fichier unique en 0600, hors sauvegardes (voir ~/.config/ia-secrets.env)
+[ -r "$HOME/.config/ia-secrets.env" ] && . "$HOME/.config/ia-secrets.env"
+CLE="${CLE_RAPIDE:-rapide-3080ti-4f7a}"
+MODELE="${1:-/mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3-4B-Instruct-2507-Q4_K_M/Qwen3-4B-Instruct-2507-Q4_K_M.gguf}"
+CTX="${2:-65536}"
+mkdir -p "$DIR"
+
+c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_d=''; c_v=''; c_r=''; c_0=''; }
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+
+# le disque des modèles doit être monté (au boot il ne l'est pas encore)
+if ! mountpoint -q /mnt/4TO_SATACMR_2022; then
+  udisksctl mount -b /dev/disk/by-label/4TO_SATACMR_2022 >/dev/null 2>&1
+  for _ in $(seq 1 15); do mountpoint -q /mnt/4TO_SATACMR_2022 && break; sleep 2; done
+fi
+
+[ -f "$MODELE" ] || { err "GGUF introuvable : $MODELE"; exit 1; }
+
+# déjà en service avec le bon modèle ?
+servi=$(curl -s -m 2 -H "Authorization: Bearer $CLE" "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)
+if [ -n "$servi" ] && [ "$(basename "${servi%.gguf}")" = "$(basename "${MODELE%.gguf}")" ]; then
+  printf '%sModèle d'"'"'appoint déjà en service (port %s).%s\n' "$c_v" "$PORT" "$c_0"
+  exit 0
+fi
+
+# instance précédente (par PID, jamais pkill -f)
+if [ -f "$DIR/appoint.pid" ]; then
+  ancien=$(cat "$DIR/appoint.pid")
+  kill "$ancien" 2>/dev/null && sleep 2
+  kill -9 "$ancien" 2>/dev/null
+fi
+
+# garde-fou : il faut ~4,2 Go libres sur la 3080 Ti (GPU1)
+libre=$(nvidia-smi --id=1 --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null)
+if [ -n "$libre" ] && [ "$libre" -lt 4200 ]; then
+  err "3080 Ti trop occupée (${libre} MiB libres, 4200 requis) — ComfyUI en pleine génération ?"
+  exit 1
+fi
+
+printf '%sDémarrage appoint 3080 Ti : %s (ctx %s, port %s)%s\n' "$c_d" "$(basename "$MODELE")" "$CTX" "$PORT" "$c_0"
+# cache q4_0 : le contexte de 65k doit tenir dans ~5,5 Go aux côtés de ComfyUI
+export LD_LIBRARY_PATH="$(dirname "$BIN")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# La 3080 Ti seule : sans ce masque, --device CUDA1 ouvre quand meme un contexte
+# CUDA de ~500 Mio sur la 5090 (19/09, mesure : 498 Mio sur GPU-7985…), donc
+# l appoint pesait sur la carte de mesure. Masque = carte 0 invisible ici.
+export CUDA_VISIBLE_DEVICES=1
+DEV=$("$BIN" --list-devices 2>/dev/null | awk -F: '/3080 Ti/{gsub(/ /,"",$1); print $1}')
+# --list-devices vide = CUDA invisible dans CE shell (bac a sable d un agent,
+# 19/09 : « Vulkan2 » n existe pas, le serveur mourait a l argument) : on
+# refuse plutot que d inventer un nom ; lancer via systemd (unite
+# llamacpp-appoint.service) ou un vrai terminal.
+[ -n "$DEV" ] || { err "aucune carte 3080 Ti vue par --list-devices (CUDA invisible ici) : lancer depuis systemd --user ou un terminal, pas depuis un bac a sable"; exit 1; }
+setsid nohup "$BIN" --model "$MODELE" --host 127.0.0.1 --port "$PORT" \
+  --ctx-size "$CTX" --jinja --api-key "$CLE" --alias "$(basename "$MODELE")" \
+  --cache-type-k q4_0 --cache-type-v q4_0 --flash-attn on \
+  --n-gpu-layers 999 --device "$DEV" >> "$DIR/appoint.log" 2>&1 < /dev/null &
+echo $! > "$DIR/appoint.pid"
+
+for _ in $(seq 1 45); do
+  if curl -s -m 2 -H "Authorization: Bearer $CLE" "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ok"\|healthy'; then
+    printf '%sAppoint prêt sur 127.0.0.1:%s (%s)%s\n' "$c_v" "$PORT" "$(basename "$MODELE")" "$c_0"
+    exit 0
+  fi
+  kill -0 "$(cat "$DIR/appoint.pid")" 2>/dev/null || { err "appoint mort au démarrage (voir $DIR/appoint.log)"; exit 1; }
+  sleep 2
+done
+err "L'appoint n'a pas ouvert le port $PORT en 90 s (voir $DIR/appoint.log)"
+exit 1

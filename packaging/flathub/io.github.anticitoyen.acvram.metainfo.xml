@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.anticitoyen.acvram</id>
+  <name>acvram</name>
+  <summary>Local LLM inference server for NVIDIA GPUs, OpenAI-compatible</summary>
+  <summary xml:lang="fr">Serveur d'inférence LLM local pour GPU NVIDIA, compatible OpenAI</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.anticitoyen"><name>anticitoyen</name></developer>
+  <description>
+    <p>acvram serves large language models on a single NVIDIA GPU through an OpenAI-compatible HTTP API (/v1/chat/completions, /v1/completions). It treats memory as a hierarchy (VRAM, host RAM), gives every layer the numeric format its silicon reads best (NVFP4 experts, int8 projections, int8 KV cache) and measures its own throughput and energy per token.</p>
+    <ul>
+      <li>Native console window: start and stop the server, pick a model, watch GPUs, sensors and temperatures</li>
+      <li>Mixture-of-experts models (Qwen3-Coder, GLM, Kimi) and dense models, NVFP4 and int8 formats</li>
+      <li>CUDA graphs, paged attention, prefix cache, speculative decoding</li>
+      <li>Requires an NVIDIA GPU with a recent driver (Blackwell RTX 50 recommended; Ada and Ampere with precompiled kernels)</li>
+    </ul>
+    <p>Models are read from the user's folders (read-only). The NVIDIA driver is provided by the org.freedesktop.Platform.GL.nvidia extension; CUDA libraries are bundled.</p>
+  </description>
+  <description xml:lang="fr">
+    <p>acvram sert des grands modèles de langage sur un GPU NVIDIA par une API HTTP compatible OpenAI. Il traite la mémoire comme une hiérarchie (VRAM, RAM), donne à chaque étage le format numérique que son silicium sait le mieux lire (experts NVFP4, projections int8, cache KV int8) et mesure son débit et son énergie par jeton.</p>
+  </description>
+  <launchable type="desktop-id">io.github.anticitoyen.acvram.desktop</launchable>
+  <url type="homepage">https://github.com/anticitoyun/anticitoyen-vram</url>
+  <url type="bugtracker">https://github.com/anticitoyun/anticitoyen-vram/issues</url>
+  <url type="vcs-browser">https://github.com/anticitoyun/anticitoyen-vram</url>
+  <url type="donation">https://buymeacoffee.com/anticitoyen</url>
+  <branding>
+    <color type="primary" scheme_preference="light">#f2c6cc</color>
+    <color type="primary" scheme_preference="dark">#5a0d17</color>
+  </branding>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Throughput and energy against vLLM and llama.cpp</caption>
+      <image>https://raw.githubusercontent.com/anticitoyun/anticitoyen-vram/main/docs/captures/resultats-22-09.png</image>
+    </screenshot>
+  </screenshots>
+  <requires><display_length compare="ge">640</display_length></requires>
+  <recommends><memory>32768</memory></recommends>
+  <supports><control>pointing</control><control>keyboard</control></supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.7.1" date="2026-09-26"><description><p>/metrics served off the HTTP event loop (TTFT at 12 requests under a 20 Hz metrics reader 0.78 → 0.24 s); chat template and tokenizer off the loop; FP8-origin int8 prefill on demand (ACVRAM_I8C_FP8_PREFILL=cublas), signed copy by xor by default.</p></description></release>
+    <release version="0.7.0" date="2026-09-26"><description><p>Marlin MoE by expert row on demand (ACVRAM_MARLIN_PAR_LIGNE=1 ; default 0 for the release), int8 narrow projections per channel, GDN alpha/beta on a second stream, admission window, KV margins for recurrent models, TTFT tool, logprobs and usage in the OpenAI API.</p></description></release>
+    <release version="0.6.38" date="2026-09-23"><description><p>Experts on tensor cores by default (w13), MAX_GRAPHS 64, unrolled attention reduction.</p></description></release>
+  </releases>
+</component>

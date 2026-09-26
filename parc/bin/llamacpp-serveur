@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# llamacpp-serveur — sert un GGUF sur http://127.0.0.1:8080/v1 (llama-server CUDA).
+# Usage : llamacpp-serveur <chemin.gguf|dossier> [contexte] [--deux-gpu] [--draft]
+#   Sans --deux-gpu : RTX 5090 seule si le fichier tient (< 28 Go), sinon split.
+#   --draft : décodage spéculatif avec Qwen3-0.6B (utile pour un gros modèle DENSE
+#   de la famille Qwen3 ; mesuré inutile sur le MoE 30B-A3B : 221 vs 223 tok/s).
+set -uo pipefail
+
+BIN=/mnt/AI_GENERATOR/llamacpp/officiel/bin/llama-server
+DIR=/mnt/AI_GENERATOR/llamacpp
+PORT=8080
+# clés d'API : fichier unique en 0600, hors sauvegardes (voir ~/.config/ia-secrets.env)
+[ -r "$HOME/.config/ia-secrets.env" ] && . "$HOME/.config/ia-secrets.env"
+CLE="${CLE_LLAMACPP:-llamacpp-9c1f4c1e6f2a4d0f}"
+mkdir -p "$DIR"
+
+c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_d=''; c_v=''; c_r=''; c_0=''; }
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+
+[ $# -ge 1 ] || { err "Usage : llamacpp-serveur <chemin.gguf|dossier> [contexte] [--deux-gpu]"; exit 1; }
+MODELE="$1"; CTX="${2:-262144}"; MODE="${3:-}"
+# un modèle multimodal range son mmproj à côté, en .gguf lui aussi : l écarter
+[ -d "$MODELE" ] && MODELE=$(find -L "$MODELE" -maxdepth 1 -name "*.gguf" -size +1M ! -iname "*mmproj*" ! -name "gabarit*" | sort | head -1)
+[ -f "$MODELE" ] || { err "GGUF introuvable : $1"; exit 1; }
+
+# décharger l'exl3 TabbyAPI s'il occupe la VRAM
+admin_tabby=$(awk '/^admin_key:/{print $2}' /opt/ia/TabbyAPI/api_tokens.yml 2>/dev/null)
+[ -n "$admin_tabby" ] && curl -s -m 30 -X POST -H "Authorization: Bearer $admin_tabby" \
+  http://127.0.0.1:5000/v1/model/unload >/dev/null 2>&1
+
+# un seul gros moteur à la fois : stopper vLLM s'il tourne
+if [ -f /mnt/AI_GENERATOR/vLLM/serveur.pid ]; then
+  kill "$(cat /mnt/AI_GENERATOR/vLLM/serveur.pid)" 2>/dev/null && sleep 6
+fi
+
+# arrêt de l'instance précédente (par PID enregistré, jamais pkill -f)
+if [ -f "$DIR/serveur.pid" ]; then
+  ancien=$(cat "$DIR/serveur.pid")
+  kill "$ancien" 2>/dev/null && sleep 3
+  kill -9 "$ancien" 2>/dev/null
+fi
+
+# filet de sécurité : tuer le vrai propriétaire du port 8000 (pid-file parfois faux)
+p8000=$(ss -tlnp 2>/dev/null | grep '127.0.0.1:8000' | grep -oP 'pid=\K[0-9]+' | head -1)
+[ -n "$p8000" ] && { kill "$p8000" 2>/dev/null; sleep 4; kill -9 "$p8000" 2>/dev/null; }
+# filet de sécurité : tuer le vrai propriétaire du port 8080 (pid-file parfois faux)
+p8080=$(ss -tlnp 2>/dev/null | grep '127.0.0.1:8080' | grep -oP 'pid=\K[0-9]+' | head -1)
+[ -n "$p8080" ] && { kill "$p8080" 2>/dev/null; sleep 4; kill -9 "$p8080" 2>/dev/null; }
+
+# libère la VRAM des serveurs orphelins : un lanceur interrompu laisse son modèle
+# en mémoire et fait échouer le démarrage suivant en « cudaMalloc failed »
+[ -x "$HOME/.local/bin/liberer-vram" ] && "$HOME/.local/bin/liberer-vram" >/dev/null 2>&1
+
+# attendre que le pilote ait vraiment rendu la mémoire du moteur précédent
+for _ in $(seq 1 60); do
+  libre=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i 0 2>/dev/null | head -1)
+  [ -n "$libre" ] || break
+  [ "$libre" -gt 24000 ] 2>/dev/null && break
+  sleep 2
+done
+
+taille=$(stat -c%s "$MODELE")
+# un GGUF découpé (…-00001-of-00003.gguf) : la taille qui compte est celle de
+# TOUS les morceaux, pas du premier (7,8 Mo sur le 119B : il aurait été jugé
+# « tient sur la 5090 »)
+case "$MODELE" in
+  *-of-*.gguf) taille=$(stat -c%s "$(dirname "$MODELE")"/*-of-*.gguf | awk '{s+=$1} END{print s}') ;;
+esac
+gpu_args=(--n-gpu-layers 999)
+DRAFT=/mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3-0.6B-Q8_0/Qwen3-0.6B-Q8_0.gguf
+for arg in "$@"; do
+  if [ "$arg" = "--draft" ] && [ -f "$DRAFT" ]; then
+    printf '%sDécodage spéculatif : draft Qwen3-0.6B%s\n' "$c_d" "$c_0"
+    gpu_args+=(--spec-draft-model "$DRAFT" --spec-draft-ngl 999 --spec-draft-n-max 8)
+  fi
+done
+if [ "$taille" -gt 40000000000 ]; then
+  # plus gros que les deux cartes (32 + 12 Go) : les experts restent en RAM
+  # (-ot exps=CPU, 19/09, Mistral-Small-4-119B Q4_K_M 74 Go), le reste sur les GPU
+  printf '%sTrès grand modèle (%d Go) : experts en RAM (-ot exps=CPU), attention sur RTX 5090 + 3080 Ti%s\n' "$c_d" "$((taille/1000000000))" "$c_0"
+  gpu_args+=(--split-mode layer --override-tensor 'exps=CPU')
+elif [ "$MODE" = "--deux-gpu" ] || [ "$taille" -gt 30000000000 ]; then
+  printf '%sGrand modèle : répartition RTX 5090 + RTX 3080 Ti%s\n' "$c_d" "$c_0"
+  gpu_args+=(--split-mode layer)
+else
+  # la 3080 Ti ralentirait un modèle qui tient sur la 5090
+  export CUDA_VISIBLE_DEVICES=0
+fi
+
+# ─── raisonnement ─────────────────────────────────────────────────────────────
+# Sans --reasoning-format deepseek, les balises <think> restent dans message.content :
+# kimi affiche la réflexion comme si c'était la réponse et la renvoie au tour suivant,
+# ce qui fait gonfler le contexte à chaque échange.
+# PENSER=off (ou 3e argument « sans-penser ») coupe le raisonnement : utile pour une
+# tâche mécanique où 2000 tokens de réflexion ne servent à rien.
+# ─── type de cache KV ─────────────────────────────────────────────────────────
+# q4_0 quantifie par blocs de 32 : sur un modèle dont les têtes ne font pas un
+# multiple de 32 (Kimi-Linear : 72), llama.cpp refuse et meurt au démarrage.
+# La sonde lit les dimensions dans le GGUF et retombe sur f16 quand il le faut.
+lu=$("$HOME/.local/bin/gguf-cache-compatible" "$MODELE" 2>/dev/null)
+CK=${lu% *}; CV=${lu#* }
+[ -n "$CK" ] || { CK=q4_0; CV=q4_0; }
+[ "$CV" = f16 ] && printf '%scache V en f16 : têtes non multiples de 32, le contexte tient moins%s\n' "$c_d" "$c_0"
+
+# Gabarit de chat de remplacement : GABARIT=/chemin/x.jinja llamacpp-serveur …
+# Sert quand le gabarit embarqué dans le GGUF ne correspond pas à ce que le modèle
+# sait produire (tokens spéciaux absents du vocabulaire, format d outils exotique).
+TMPL=()
+[ -n "${GABARIT:-}" ] && [ -f "$GABARIT" ] && TMPL=(--chat-template-file "$GABARIT")
+# Sans gabarit imposé : assouplir automatiquement les gabarits Qwen3.x qui refusent un message
+# système hors première position (sinon l'API Anthropic de Claude Code échoue : « Unable to
+# generate parser for this template »). Voir ~/.local/bin/gabarit-souple.
+if [ ${#TMPL[@]} -eq 0 ] && [ -x "$HOME/.local/bin/gabarit-souple" ]; then
+  souple=$("$HOME/.local/bin/gabarit-souple" "$MODELE" 2>/dev/null)
+  [ -n "$souple" ] && [ -f "$souple" ] && { TMPL=(--chat-template-file "$souple"); printf '%sGabarit assoupli : %s%s\n' "$c_d" "$(basename "$souple")" "$c_0"; }
+fi
+
+# Vision : un mmproj*.gguf à côté du modèle est chargé automatiquement (images acceptées)
+MMPROJ=()
+mm=$(find "$(dirname "$MODELE")" -maxdepth 1 -iname "*mmproj*.gguf" 2>/dev/null | sort | head -1)
+[ -n "$mm" ] && { MMPROJ=(--mmproj "$mm"); printf '%sVision : %s%s\n' "$c_d" "$(basename "$mm")" "$c_0"; }
+
+RAISON=(--reasoning-format deepseek)
+case "${PENSER:-}${MODE:-}" in
+  off|non|*sans-penser*) RAISON+=(--reasoning-budget 0) ;;
+esac
+
+printf '%sDémarrage llama-server : %s (ctx %s)%s\n' "$c_d" "$(basename "$MODELE")" "$CTX" "$c_0"
+export LD_LIBRARY_PATH="$(dirname "$BIN")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+CMD=("$BIN" --model "$MODELE" --host 127.0.0.1 --port "$PORT"
+  --ctx-size "$CTX" --jinja --api-key "$CLE" --alias "$(basename "$MODELE")"
+  --cache-type-k "$CK" --cache-type-v "$CV" --flash-attn on --cache-reuse 256 -np 1
+  "${RAISON[@]}" "${TMPL[@]}" "${MMPROJ[@]}" "${gpu_args[@]}")
+# Le serveur PREND LE VERROU carte.sh (mode service) : sinon une mesure le croit
+# libre (trou du 21/09, REGLES § 2). Repli sans verrou, avec avertissement, si
+# carte.sh est introuvable. NB deux-gpu : le verrou ne couvre que la carte 0.
+_ici=$(dirname "$(readlink -f "$0")")
+CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
+if [ -x "$CARTE_SH" ]; then
+  srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$(basename "$MODELE")" ACVRAM_SERVICE_LOG="$DIR/serveur.log" \
+            ACVRAM_CARTE="${ACVRAM_CARTE:-${CUDA_VISIBLE_DEVICES:-0}}" \
+            "$CARTE_SH" "${CMD[@]}") \
+      || { err "carte.sh a refuse le verrou de la carte (voir ci-dessus)"; exit 1; }
+  echo "$srv_pid" > "$DIR/serveur.pid"
+else
+  err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
+  setsid nohup "${CMD[@]}" >> "$DIR/serveur.log" 2>&1 < /dev/null &
+  echo $! > "$DIR/serveur.pid"
+fi
+echo "$CTX" > "$DIR/ctx-actuel"
+
+for _ in $(seq 1 450); do
+  if curl -s -m 2 -H "Authorization: Bearer $CLE" "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"ok"\|healthy'; then
+    printf '%sllama-server prêt sur 127.0.0.1:%s (%s)%s\n' "$c_v" "$PORT" "$(basename "$MODELE")" "$c_0"
+    exit 0
+  fi
+  kill -0 "$(cat "$DIR/serveur.pid")" 2>/dev/null || { err "llama-server mort au démarrage (voir $DIR/serveur.log)"; exit 1; }
+  sleep 2
+done
+err "llama-server n'a pas ouvert le port $PORT en 900 s (voir $DIR/serveur.log)"
+exit 1

@@ -1,0 +1,35 @@
+# Maintainer: AntiCitoyen <anticitoyen@users.noreply.gitlab.com>
+pkgname=acvram
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="OpenAI-API-compatible inference gateway: per-GPU quantisation (NVFP4/INT4/INT8) and VRAM->VRAM->RAM tiering"
+arch=('any')
+url="https://github.com/anticitoyun/anticitoyen-vram"
+license=('GPL-3.0-or-later')
+depends=('python' 'python-pytorch-cuda' 'python-numpy' 'python-safetensors' 'python-fastapi'
+         'python-uvicorn' 'python-pydantic' 'python-yaml' 'python-tokenizers'
+         'python-huggingface-hub' 'python-jinja' 'python-psutil' 'cuda')
+optdepends=('python-nvidia-ml-py: /metrics GPU sensors (nvml)'
+            'python-transformers: GDN hybrids (Qwen3-Next/Kimi) and the vision tower'
+            'python-flash-linear-attention: chunked Gated DeltaNet kernels for GDN hybrids')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+install=acvram.install
+
+package() {
+    cd "anticitoyen-vram-$pkgver" || exit 1
+    install -d "$pkgdir/usr/share/acvram" "$pkgdir/usr/bin"
+    cp -r acvram pyproject.toml README.md LICENSE "$pkgdir/usr/share/acvram/"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    # Toutes les dépendances (dont python-pytorch-cuda) sont déjà celles du système Arch :
+    # pas de venv privé ici, contrairement au .deb (tools/construire-deb.sh) qui télécharge son
+    # propre torch selon les GPU présents faute d'un paquet système équivalent sur Debian/Ubuntu.
+    # Les noyaux CUDA (acvram_kernels.cu) se compilent en JIT au premier appel qui les touche
+    # (torch.utils.cpp_extension), pas ici : `cuda` (nvcc) est donc une dépendance d'exécution,
+    # pas seulement de compilation.
+    install -Dm755 /dev/stdin "$pkgdir/usr/bin/acvram" <<'LANCEUR'
+#!/usr/bin/env bash
+export PYTHONPATH="/usr/share/acvram${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m acvram.cli "$@"
+LANCEUR
+}

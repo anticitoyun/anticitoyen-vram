@@ -1,0 +1,7 @@
+[
+  {"nom": "court", "messages": [{"role": "user", "content": "Quelle est la capitale de la France ?"}]},
+  {"nom": "code", "messages": [{"role": "user", "content": "Écris une fonction Rust qui renvoie le n-ième nombre de Fibonacci, en itératif."}]},
+  {"nom": "systeme", "messages": [{"role": "system", "content": "Tu réponds en une seule phrase."}, {"role": "user", "content": "Pourquoi le ciel est-il bleu ?"}]},
+  {"nom": "anglais", "messages": [{"role": "user", "content": "Explain in three bullet points how a paged KV cache works in an LLM inference engine."}]},
+  {"nom": "tours", "messages": [{"role": "user", "content": "Donne-moi trois nombres premiers."}, {"role": "assistant", "content": "2, 3 et 5."}, {"role": "user", "content": "Et leur somme ?"}]}
+]

@@ -1,0 +1,40 @@
+Par pas (moyenne sur 1 pas), 3809 lancements profilés, 0 valeurs illisibles
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+nvfp4_gemm_grouped_mma2_kernel<16, 4>                              144.0    3.900   4.328    1156    0.569      0.13   2.6   0.0   0.0   0.0  2798
+native::vectorized_elementwise_kernel                              967.0    1.484   0.004       3    0.003      0.63   0.0   0.0   0.0   0.0  2774
+int8_gemv_kernel<4, 12> grille=(512, 1, 1)                          48.0    1.466   0.412     289    0.556      1.35   0.0   0.0   0.0   0.0  2767
+int8_gemv_kernel<4, 12> grille=(1280, 1, 1)                         48.0    1.388   0.518     384    0.705      1.36   0.0   0.0   0.0   0.0  2729
+int8_gemv lm_head (37984, 1, 1)                                      1.0    0.799   0.319     410    0.395      1.24   0.0   0.0   0.0   0.0  2815
+paged_attn_partial_kernel<128, __nv_bfloat16>                       48.0    0.780   0.080     116    0.293      3.65   0.0   0.0   0.0   0.0  2755
+native::unrolled_elementwise_kernel                                385.0    0.645   0.004       7    0.000      0.06   0.0   0.0   0.0   0.0  2780
+native::reduce_kernel                                              195.0    0.465   0.013      29    0.005      0.38   0.0   0.0   0.0   0.0  2801
+native::index_elementwise_kernel                                   192.0    0.431   0.006      14    0.000      0.01   0.0   0.0   0.0   0.0  2793
+native::elementwise_kernel                                         193.0    0.412   0.001       5    0.007      4.52   0.0   0.0   0.0   0.0  2793
+at_cuda_detail::DeviceScanKernel                                   192.0    0.342   0.001       3    0.000      0.16   0.0   0.0   0.0   0.0  2786
+moe_route_kernel                                                    48.0    0.310   0.001       4    0.004      4.26   0.0   0.0   0.0   0.0  2830
+elementwise_kernel_with_index                                      240.0    0.299   0.000       0    0.000      0.20   0.0   0.0   0.0   0.0  2759
+native::_scatter_gather_elementwise_kernel                         145.0    0.297   0.005      18    0.000      0.01   0.0   0.0   0.0   0.0  2791
+rmsnorm_bf16_kernel                                                 97.0    0.292   0.001       4    0.008     14.23   0.0   0.0   0.0   0.0  2804
+nvfp4_quant_act_kernel                                              96.0    0.243   0.000       6    0.009     18.20   0.0   0.0   0.0   0.0  2793
+at_cuda_detail::DeviceScanInitKernel                               192.0    0.243   0.000       0    0.000      0.13   0.0   0.0   0.0   0.0  2763
+native::warpMergeSortKVInPlace                                      48.0    0.186   0.001       4    0.000      0.07   0.0   0.0   0.0   0.0  2817
+rope_inplace_kernel                                                 48.0    0.180   0.000       3    0.012     25.46   0.0   0.0   0.0   0.0  2800
+0_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8>        48.0    0.178   0.026     151    0.003      0.10   3.7   0.0   0.0   0.0  2813
+compute_cuda_kernel<long>                                           96.0    0.177   0.000       1    0.001      3.90   0.0   0.0   0.0   0.0  2787
+kv_write_int8_kernel                                                48.0    0.136   0.000       2    0.002      8.21   0.0   0.0   0.0   0.0  2803
+cuda::kernelHistogram1D                                             48.0    0.122   0.001      10    0.000      0.05   0.0   0.0   0.0   0.0  2803
+paged_attn_reduce_kernel<128, __nv_bfloat16>                        48.0    0.105   0.000      21    0.009     17.75   0.0   0.0   0.0   0.0  2788
+moe_reduce_trie_kernel                                              48.0    0.094   0.000       4    0.004     16.97   0.0   0.0   0.0   0.0  2783
+cublasLt::splitKreduce_kernel<32, 16>                               48.0    0.091   0.001       9    0.000      0.38   0.0   0.0   0.0   0.0  2791
+native::vectorized_gather_kernel<16, long>                          49.0    0.087   0.000      18    0.002     15.76   0.0   0.0   0.0   0.0  2783
+moe_act_kernel                                                      48.0    0.083   0.000      11    0.009     32.82   0.0   0.0   0.0   0.0  2764
+
+Par poste
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+projections attention                                              240.0    6.754   5.258     809    1.830      0.35   0.8   0.0   0.0   0.0  2778   44.3 %
+norm + rope + élémentaires                                        1690.0    3.013   0.011       4    0.029      2.71   0.0   0.0   0.0   0.0  2780   19.8 %
+routage + glue MoE                                                1158.0    2.593   0.028      12    0.034      1.23   0.0   0.0   0.0   0.0  2788   17.0 %
+reste                                                              576.0    1.020   0.003       3    0.003      1.19   0.0   0.0   0.0   0.0  2781    6.7 %
+lm_head                                                             49.0    0.976   0.344     363    0.397      1.15   0.0   0.0   0.0   0.0  2813    6.4 %
+attention paginée                                                   96.0    0.885   0.081     104    0.301      3.74   0.0   0.0   0.0   0.0  2772    5.8 %
+TOTAL                                                             3809.0   15.241   5.724     391    2.595      0.45   0.6   0.0   0.0   0.0  2783

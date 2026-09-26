@@ -1,0 +1,33 @@
+[package]
+name = "acvram_rust"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Moteur de comparaison d'acvram : même modèle, mêmes noyaux (SASS servi), hôte en Rust"
+publish = false
+
+[[bin]]
+name = "acvram-rust"
+path = "src/main.rs"
+
+[features]
+# cassure prévue d'avance de la porte au bit (outils de contrôle seulement)
+cassure-echelle = []
+
+[dependencies]
+cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "dynamic-loading"] }
+safetensors = "0.8.0"
+memmap2 = "0.9.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+half = "2.7.1"
+# Même version que le `tokenizers` Python d'acvram : l'identité des ids d'invite en dépend.
+tokenizers = "=0.23.2"
+minijinja = { version = "2", features = ["loader", "json"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+axum = "0.8.9"
+# déjà tiré par axum (même version) : `stream::unfold` pour le flux SSE de /v1/completions
+futures-util = { version = "0.3.34", default-features = false }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "sync"] }
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+sha2 = "0.10"

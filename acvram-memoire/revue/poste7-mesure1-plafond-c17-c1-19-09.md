@@ -1,0 +1,22 @@
+# poste7 — Mesure 1 : ma prédiction « mma2 280-340 W » est fausse (401 W) ; sous plafond, W est une constante et l'instruction par octet se lit dans l'horloge et le temps : mma2 −12 % à u=45, −25 % à u=27 ; Mesure 2 : non ; C17 prend son objet, et C1 se chiffre d'abord sur la MMA native (19/09, 20 h 01, heure du commit)
+
+Source : `verdict-mesure1-mma2-marlin-19-09` (poste1, poste1-11 bcd3c6a0) ; `poste7-c16bis-puissance-mesure1-19-09` § 2 (règle et réfutation écrites avant) ; `poste7-nsys-coder-c16-mma2-19-09` addendum 20 h 15 ; `verdict-porte-a8-19-09` (e4m3 −0,0002) ; REGLES § 9 (`kind::mxf8f6f4`).
+
+## 1. Mesuré (Coder b=12, même liste de 96 lignes, boucle soutenue, rapport cyclique 0,89-0,98)
+| unité | Marlin gate·up + down | mma2 | rapport | W (net repos) | horloge SM |
+|---|---|---|---|---|---|
+| 45 distincts | 110,8 µs/couche · 1,07 To/s | **97,2 · 1,24-1,41 To/s** | **×0,88** | 384 / 370-373 (les quatre à 398-402 brut) | Marlin 2 025-2 422 MHz · mma2 **2 625-2 880** |
+| 27 distincts | 89,5 | **67,0** | **×0,75** | idem | idem |
+
+**Réfutation atteinte** (§ 2 du 20 h 50 : « ≥ 380 W → la déquant matérielle ne rend pas de watts ») : elle n'en rend pas, et le modèle du 14/09 se corrige ainsi, pour MECANISMES : *sous plafond de puissance, W est une constante (398-402 pour les quatre noyaux) ; l'instruction par octet ne se lit pas dans W mais dans l'horloge que le limiteur accorde — 2 025-2 422 MHz pour Marlin contre 2 625-2 880 pour mma2 au même plafond — donc dans le temps ; J_noyau = 400 W × t, et « moins d'instructions » = « plus vite », pas « moins de watts ». Le témoin copie (318 W) est le seul cas où W bouge : un noyau sous le plafond.* Ma lecture « un noyau sous le plafond lève le bridage du pas entier » tombe avec elle : rien n'est sous le plafond.
+
+## 2. Décisions
+* **Mesure 2 : non**, tel que scellé (W ≤ 350 faux) — et sur le fond : le régime `naturel` rendrait ≈ −5 % de temps et de J au pas servi (experts 3,73 → 3,28 ms) contre −30 % de prefill, dominé par éco 2 700 (vitesse égale, −10 % J, sans perte). Pas de fenêtre. La règle de l'addendum (0,89 à u=27 tenu) ne rouvre rien : la dernière règle écrite est celle qui compte.
+* **C17 prend son objet** : *mma2 lit la disposition Marlin* rendrait au défaut −12 % sur les experts à b=12 (−0,45 ms/pas, +5 % t/s, −6 % J), −25 % aux lots à peu de distincts, sans toucher au prefill. **Mais avant C17, la question inverse** : la disposition naturelle peut-elle porter le prefill ? `kind::mxf8f6f4` (REGLES § 9) prend A en e4m3 — la porte A8 e4m3 est **tenue** (−0,0002) — et B en e2m1 tel que mma2 le lit déjà : **C1 W4A8 par la MMA native sur la pile naturelle**, sans déquant transitoire ni CUTLASS int8, au débit FP8 des tensor cores (2 × bf16). Si ce chemin tient le scellé C1 (T_experts ≤ 27,2 ms), la disposition unique est **naturelle** (mma2 au décodage, mxf8f6f4 au prefill) et C17 meurt sans une ligne. Ordre : poste1 chiffre à sec (≤ 1 h, pas de carte) les deux routes de C1 — (i) CUTLASS int8 groupé après déquant (fiche actuelle), (ii) `mxf8f6f4` A e4m3 × B e2m1 sur la pile naturelle (échelles de A : forme et coût de la quantification e4m3 par bloc, `-Xptxas -v`, jumeau torch au bit du groupement) — prédiction chiffrée pour chacune contre 27,2 ms, issue qui la gênerait nommée ; je tranche la route sur la fiche, C17 attend.
+* **Mesure 1-bis** (poste1, 5 min au prochain trou, même harnais) : u = 8 et 16 (b=1, b=2) — mma2 à t=1 rembourré à 16 contre Marlin NW=2 : dit si la route native vaut aussi à b=1 (prédiction : Marlin garde b=1, latence de lancement égale, mma2 ≥ ×1,1) ; GLM (shapes 1536, top-4) : une ligne u=34 quand GLM est chargé pour autre chose — le nsys GLM (mma2 ×1,2 plus lent) était en rafale, pas sous plafond soutenu.
+* Caveat de la double disposition (deux processus, llama-server 8081 = service permanent légitime, témoins à 1 %) : accepté tel quel, dit dans la cellule.
+
+## Ordre
+* **poste1** — (1) fiche C1 à deux routes chiffrées à sec (§ 2), commit, pointeur ; (2) Mesure 1-bis u=8/16 au prochain trou (5 min) ; (3) contrôle (b) 2 min ; C17 gelé jusqu'à la route C1 ; C13-b/C14/C15 inchangés.
+* **poste2** — rien de neuf : bras F, C4 A/B, drain, file ; aucune fenêtre Mesure 2.
+* **chef** — ETAT : Mesure 1 rendue (mma2 ×0,88 / ×0,75, 401 W), Mesure 2 non, C17 gelé derrière la route C1, C1 à deux routes ; MECANISMES : le paragraphe en italique du § 1 ; INDEX ; commit + push.
