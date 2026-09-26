@@ -6,7 +6,6 @@ nettement plus haut sur les mêmes sorties déjà écrites (aucune carte, aucun 
 Saute si la référence 275 (hors git, `~/.cache/acvram/qualite-275/`) n'est pas présente sur ce
 poste — ce n'est pas un défaut du code testé, juste une donnée absente ici.
 """
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -24,13 +23,15 @@ _TACHES = [
     "mmlu_flan_cot_fewshot_professional_law",
     "mmlu_flan_cot_fewshot_college_computer_science",
 ]
-
-
-def _charger_module():
-    spec = importlib.util.spec_from_file_location("renoter_275c", SCRIPT)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
+# scores officiels HISTORIQUES (mixte-i8c, ancien filtre `get-answer`, 275b) — fixés en dur :
+# `panel.json` de la référence a été mis à jour en 275d avec les scores CORRIGÉS sous les
+# nouveaux noms de tâche (`mmlu_v275_*`) ; ce test compare l'ancien comportement à sa valeur
+# HISTORIQUE, plus au fichier de référence (qui ne la porte plus, par construction).
+_SCORE_OFFICIEL_ANCIEN = {
+    "mmlu_flan_cot_fewshot_high_school_mathematics": 0.2,
+    "mmlu_flan_cot_fewshot_professional_law": 0.08,
+    "mmlu_flan_cot_fewshot_college_computer_science": 0.11,
+}
 
 
 def _samples(tache):
@@ -41,16 +42,13 @@ def _samples(tache):
 
 
 def test_ancien_filtre_reproduit_le_score_officiel():
-    m = _charger_module()
-    officiel = json.load(open(REF / "panel.json", encoding="utf-8"))["taches"]
     for tache in _TACHES:
-        r = m.__dict__  # noqa: F841 (juste pour forcer le chargement une fois)
         import subprocess
         out = subprocess.run([sys.executable, str(SCRIPT), str(_samples(tache)), "ancien"],
                               capture_output=True, text=True, check=True).stdout
         score = json.loads(out.split("RESULTAT_RENOTATION ", 1)[1])["score"]
-        assert abs(score - officiel[tache]["score"]) < 1e-6, (
-            f"{tache} : ancien filtre {score} != score officiel {officiel[tache]['score']}")
+        assert abs(score - _SCORE_OFFICIEL_ANCIEN[tache]) < 1e-6, (
+            f"{tache} : ancien filtre {score} != score officiel historique {_SCORE_OFFICIEL_ANCIEN[tache]}")
 
 
 def test_nouveau_filtre_rend_un_score_nettement_meilleur():

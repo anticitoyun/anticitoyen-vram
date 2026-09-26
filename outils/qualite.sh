@@ -57,15 +57,15 @@ echo "PPL bras=$PPL_BRAS reference=$PPL_REF ecart_relatif=$RATIO_PPL seuil=$SEUI
 
 declare -A LIMITES=(
   [gsm8k]=250
-  [mmlu_flan_cot_fewshot_high_school_mathematics]=150
-  [mmlu_flan_cot_fewshot_professional_law]=150
-  [mmlu_flan_cot_fewshot_college_computer_science]=150
+  [mmlu_v275_high_school_mathematics]=150
+  [mmlu_v275_professional_law]=150
+  [mmlu_v275_college_computer_science]=150
 )
 declare -A FILTRES=(
   [gsm8k]=strict-match
-  [mmlu_flan_cot_fewshot_high_school_mathematics]=get-answer
-  [mmlu_flan_cot_fewshot_professional_law]=get-answer
-  [mmlu_flan_cot_fewshot_college_computer_science]=get-answer
+  [mmlu_v275_high_school_mathematics]=get-answer-v275
+  [mmlu_v275_professional_law]=get-answer-v275
+  [mmlu_v275_college_computer_science]=get-answer-v275
 )
 
 MCNEMAR_TENU=1
