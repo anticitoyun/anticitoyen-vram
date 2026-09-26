@@ -27,6 +27,7 @@
 
 - [Οι δύο ιδέες](#idees)
 - [Γρήγορη εκκίνηση](#demarrage)
+- [Εγκατάσταση](#installer)
 - [Τι λέει η `acvram plan`](#plan)
 - [Πηγαίνοντας γρήγορα](#optimisations)
 - [Σημεία εισόδου HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Γεια σου"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Εγκατάσταση
+
+Από την πηγή (όλες οι πλατφόρμες):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Ή μέσω πακέτου, ένα αρχείο συνημμένο σε κάθε [έκδοση GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Κανάλι | Αρχείο συνημμένο στην έκδοση | Εντολή |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (ονόματα που παράγονται από το `rpmbuild`, όχι σταθερά) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (ή `rpmbuild --rebuild *.src.rpm` από το `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Το Pip δεν δημοσιεύεται ως πακέτο (καμία χτισμένη wheel): το `pip install -e '.[dev]'` εγκαθιστά από κλώνο της πηγής, όπως το `./install.sh`.
 
 ---
 

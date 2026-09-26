@@ -27,6 +27,7 @@ Belleği bir hiyerarşi olarak ele alan, her GPU'ya kendi donanımının en iyi 
 
 - [İki fikir](#idees)
 - [Hızlı başlangıç](#demarrage)
+- [Kurulum](#installer)
 - [`acvram plan` ne söylüyor](#plan)
 - [Hızlanmak](#optimisations)
 - [HTTP uç noktaları](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Merhaba"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Kurulum
+
+Kaynaktan (tüm platformlar):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Veya paket olarak, her [GitHub sürümüne](https://github.com/anticitoyun/anticitoyen-vram/releases/latest) eklenmiş bir dosya:
+
+| Kanal | Sürüme eklenen dosya | Komut |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (`rpmbuild` tarafından üretilen adlar, sabit değil) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (veya `.src.rpm`'den `rpmbuild --rebuild *.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip paket olarak yayımlanmaz (derlenmiş wheel yok): `pip install -e '.[dev]'`, `./install.sh` gibi, kaynağın bir klonundan kurar.
 
 ---
 

@@ -27,6 +27,7 @@
 
 - [Две идеи](#idees)
 - [Быстрый старт](#demarrage)
+- [Установка](#installer)
 - [Что показывает `acvram plan`](#plan)
 - [Ускорение работы](#optimisations)
 - [Точки входа HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Привет"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Установка
+
+Из исходного кода (любая платформа):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Или пакетом, файл прикреплён к каждому [релизу на GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Канал | Файл, прикреплённый к релизу | Команда |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (имена, генерируемые `rpmbuild`, не фиксированы) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (или `rpmbuild --rebuild *.src.rpm` из `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip не публикуется как пакет (нет собранного wheel): `pip install -e '.[dev]'` устанавливает из клона исходников, так же как `./install.sh`.
 
 ---
 
