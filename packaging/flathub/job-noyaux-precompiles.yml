@@ -1,4 +1,5 @@
-# Pièce 241 — job à coller dans .github/workflows/release.yml (poste3), à la place du job flatpak en `if: false`.
+# Pièce 241 — copie documentaire des deux jobs tels qu'ils sont dans .github/workflows/release.yml (qui fait foi ; la garde
+# tests/test_noyaux_precompiles_ci_241.py lit release.yml dès qu'il porte le producteur).
 # Produit build/noyaux (noyaux CUDA précompilés, un sous-dossier par empreinte de source) dans un conteneur CUDA SANS carte,
 # puis construit le Flatpak hors ligne et le lint. La garde tests/test_noyaux_precompiles_ci_241.py vérifie que ce fichier
 # et le manifeste s'accordent avec ce que `python -m acvram.kernels.precompiles` produit.
