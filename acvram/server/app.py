@@ -40,6 +40,14 @@ def _depaquetages() -> dict:
         return dict(marlin_port.DEPAQUETAGES)
     except Exception:                                            # noqa: BLE001
         return {}
+
+
+def _chemins_int8() -> dict:
+    try:
+        from .. import kernels
+        return dict(kernels.CHEMINS_INT8)
+    except Exception:                                            # noqa: BLE001
+        return {}
 from . import capteurs as _capteurs
 from .console import GALERIE, PAGE
 from ..engine.runner import Engine, GenerationOutput
@@ -1011,6 +1019,9 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "regime_ligne": _regime_ligne(),
                 # pièce 147 : noyau du dépaquetage Marlin au préfill de la disposition unique (cuda | triton), compté
                 "depaquetage": _depaquetages(),
+                # pièce 243 : chemins int8 pris (gemv | dequant | …), comptés — seule preuve en service
+                # qu'un seuil GEMV→GEMM a pris (la variable dans regime_ligne ne dit que qu'elle a été lue)
+                "int8_chemins": _chemins_int8(),
                 # pièce 49 : régime spéculatif visible dans /metrics (même source que
                 # regime_ligne — mode + état garde + gain moyen glissant)
                 "speculation": engine.regime().get("speculation"),

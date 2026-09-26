@@ -171,6 +171,8 @@ DEFAUTS_PAR_VERSION = {
             "AWQ_TENSOR": "0",                                           # échelle AWQ dans le chemin tensor : opt-in (123 non fusionnée)
             "PA_GQA": "1",                                               # attention paginée : K/V lus une fois par groupe GQA
             "MTP_ETAT": "brut",                                          # état MTP brut — 201 (planificateur vision/MTP)
+            "INT8_GEMV_MAX": "80",                                       # seuil GEMV int8 hors portée de partage (inchangé)
+            "INT8_GEMV_MAX_PARTAGE": "16",                               # GEMV→GEMM int8 sous B′ à 16 — 243 (hors bit, KL tenue, +9,70 % servi)
             # Marges KV (201/212 : `loader._KV_MARGE_MIN` 1 536 Mio, `_KV_MARGE_MIN_GDN` 3 072 Mio) sont des constantes du loader,
             # pas des variables de régime : gelées par tests/test_marge_graphes_212.py.
         },

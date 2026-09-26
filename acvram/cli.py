@@ -177,6 +177,7 @@ VARIABLES_LUES = {
     "ACVRAM_INSTA_MAX",
     "ACVRAM_INSTA_PAS",
     "ACVRAM_INT8_GEMV_MAX",
+    "ACVRAM_INT8_GEMV_MAX_PARTAGE",   # pièce 243 : seuil GEMV→GEMM int8 sous B′ (16 défaut, 80 témoin, hors bit)
     "ACVRAM_INT8_GEMV_WARP",
     "ACVRAM_PA_SANS_COMPTEUR",
     "ACVRAM_PAGED_ALLOC",

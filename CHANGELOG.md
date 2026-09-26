@@ -52,6 +52,14 @@ Gains propres à cette version, au-dessus de ces deux faits :
   dépaquetée en service). Le choix `auto` refuse désormais lui aussi le noyau CUDA à une pile E > 1 par colonne (il aurait lu g[e]
   comme scalaire, sans erreur) ; test cassant `test_pile_par_colonne_refusee_au_cuda_et_auto_evite_cuda`.
 
+* **243** (poste5, décision chef) : seuil GEMV → GEMM int8 abaissé à 16 dans la portée de déquant PARTAGÉE du préfill
+  GDN (`ACVRAM_INT8_GEMV_MAX_PARTAGE=16` par défaut, 80 = témoin, sortie d'avant). HORS BIT, KL scellée tenue (b=8, 32 pas :
+  max 0,00603 ≤ 0,00793 = 2 × le témoin déjà servi, argmax 254/256, PPL 6,0483 → 6,0657). Qwen3.8-27B-unsloth-mixte-i8c b=8 :
+  préfill 8 × 78 0,821 → 0,410 s par lot (**−50 %**) ; banc chat servi (ABBA ×5, serveur neuf, -lgc 2700) 423,6 → **464,7 t/s
+  (+9,70 %)**, J/jeton net 0,7615 → 0,6906 (**−9,3 %**) — le niveau de NInfer (≈ 463). Réserve : les dix fenêtres sont bridées en
+  puissance (plafond 400 W), les deux bras également. Hors portée, le seuil reste 80 : la déquant non partagée régresse (733,7 µs
+  contre 636,4 de GEMV à n = 78). `revue/poste5-piece243-verdict-26-09.md` ; test cassant `tests/test_int8_seuil_partage_243.py`.
+
 * **26/09/2026 — pièce 226 (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE=1` REVIENT AU DÉFAUT — la « régression » de la 209
   sur le Coder nvfp4 pur était un artefact du banc.** L'histoire vraie : la 209 (25/09) sert en Marlin les piles d'experts à échelles
   sous-normales par un facteur par ligne, exact au bit, +5,77 % sur qkvo-i8c ; la 220 (25/09) l'a remise en opt-in sur le banc de la 217
