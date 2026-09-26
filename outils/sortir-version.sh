@@ -43,9 +43,14 @@ _executer() {
 echo "== 1. main propre, à la version $VNUM"
 BRANCHE=$(git branch --show-current)
 [ "$BRANCHE" = main ] || { echo "REFUS : branche courante « $BRANCHE », attendu main" >&2; exit 65; }
-if [ -n "$(git status --porcelain)" ]; then
-  echo "REFUS : main n'est pas propre :" >&2
-  git status --short >&2
+# Pièce 282 : les fichiers NON SUIVIS sont ignorés ici — un scratchpad/<piece>-<date>/ d'une
+# pièce en cours, sur main, est l'état NORMAL du dépôt (scratchpad/ n'est pas gitignoré en
+# bloc, REGLES) et n'a rien à voir avec ce qui sera tagué (seul le contenu SUIVI l'est). Le
+# script de chef le jour de la 281 tolérait déjà ce cas ; un `git status --porcelain` nu
+# aurait refusé une main par ailleurs prête.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "REFUS : main n'est pas propre (fichiers suivis modifiés ou indexés) :" >&2
+  git status --short --untracked-files=no >&2
   exit 65
 fi
 PYVER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
