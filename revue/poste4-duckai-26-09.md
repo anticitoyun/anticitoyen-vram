@@ -990,3 +990,78 @@ gestion du rejet, ou différence de définition de métrique.
 issue MTP always rejects draft tokens, issue Step-3.5-Flash MTP), vllm.ai (doc MTP vllm-ascend, proposer
 `_prepare_inputs`/`_propose`), lmsys.org (Accelerating SGLang with Multiple Token Prediction), arXiv
 (FastMTP), redhat.com (Optimize vLLM speculative decoding with FastMTP heads).
+
+---
+
+## Q24 — décodage spéculatif greedy annoncé « identique » au décodage sans spéculation : vrai au bit ? (poste5/chef, 277a)
+
+**Réponse (Luna, 1 avis très sourcé)** : la revendication est « sans perte algorithmiquement », PAS
+« identique au bit ». Votre inquiétude (la vérification à q_len=k+1 passe par d'autres noyaux GEMM que le
+décodage à q_len=1, pouvant faire basculer un argmax sur une quasi-égalité) est explicitement reconnue par
+au moins un des trois moteurs, et démontrée réelle par des issues ouvertes sur les trois.
+
+**Ce que « sans perte » veut dire mathématiquement** : avec une arithmétique exacte, un jeton brouillon
+n'est accepté QUE s'il correspond à la règle de décodage de la cible — la preuve suppose que les logits de
+la cible utilisés pour la vérification SONT les mêmes logits mathématiques que le décodage ordinaire
+produirait. Elle ne dit RIEN sur deux exécutions en précision finie avec des formes de séquence, algorithmes
+GEMM, ordres d'accumulation, CUDA graphs ou noyaux de quantification différents.
+
+**vLLM (le plus explicite des trois)** : sa doc dit littéralement que la « sans-perte » théorique tient
+« jusqu'aux limites de précision numérique du matériel » — erreurs flottantes pouvant produire de légères
+différences de distribution ; l'égalité en décodage greedy est testée comme une propriété ALGORITHMIQUE,
+pas bit à bit. `tests/spec_decode/e2e` utilise une assertion d'égalité EXACTE (jeton par jeton), pas une
+tolérance ni une KL. **Issue vLLM #7627** (« Add documentation on lossless guarantees ») : un utilisateur
+attendait une sortie spéculative à température 0 identique au greedy ordinaire, a observé une divergence à
+quelques dizaines de jetons dans la génération — reproduite.
+
+**SGLang** : moins explicite sur la mise en garde GEMM/near-tie que vLLM, mais preuve pratique par les
+issues. **Issue #13123** : EAGLE-3 ignore le drapeau d'inférence déterministe — le chemin non-spéculatif est
+stable d'un run à l'autre, EAGLE3 spéculatif varie, scores GSM8K qui varient avec EAGLE3 alors que le
+non-spéculatif reste constant. Étude « Batch Speculative Decoding Done Right » (arXiv, 2026) : exact-match
+ET partial-match utilisés (PAS de KL) ; le mode déterministe SGLang-EAGLE améliore l'exact-match de
+**69,8 % à 85,0 %** sur un montage Vicuna, SANS atteindre 100 % — rendre l'exécution plus déterministe
+RÉDUIT mais n'élimine PAS toute divergence. **Issue #33985** : la vérification spéculative arrive avec une
+forme d'attention différente (topk=192) du décodage normal (topk=128), un chemin de noyau différent est
+sélectionné — confirme que le chemin spéculatif n'est PAS simplement le noyau de décodage à un jeton
+rappelé en boucle.
+
+**TensorRT-LLM** : test le plus révélateur de la bonne séparation à faire. Dans
+`tests/unittest/_torch/modeling/test_modeling_llama.py` : les logits spéculatif/référence sont comparés
+avec `torch.testing.assert_close(..., atol=1.0, rtol=1.0)` (**tolérance TRÈS large sur les logits**), mais
+les IDs de jeton greedy sont vérifiés par égalité EXACTE :
+`assert token_id_ref == token_id_gen, "Greedy sampling token id not match"`. **C'est presque exactement la
+bonne séparation pour ce problème** : les logits n'ont pas besoin d'être numériquement identiques, mais le
+jeton greedy sélectionné doit correspondre. **Issue TensorRT-LLM #10309** (« Qwen3 + Eagle3 generates
+different result with greedy decoding compared to no eagle version ») : à température 0, sortie différente
+avec/sans EAGLE3 — preuve directe contre une garantie bit-à-bit inconditionnelle.
+
+**Réponse directe à l'inquiétude technique** : le scénario est réel — décodage ordinaire (forme
+[batch, 1, hidden]) et vérification spéculative (forme [batch, k+1, hidden]) peuvent sélectionner des
+noyaux GEMM int8/fp8 différents, des configurations split-K/tuile différentes, des précisions
+d'accumulation différentes, des épilogues fusionnés ou non, des noyaux d'attention différents, des captures
+CUDA graph différentes — assez pour faire basculer un argmax sur une quasi-égalité (`ℓ_a=10.000000,
+ℓ_b=9.999999` vs `ℓ̃_a=9.999998, ℓ̃_b=10.000000` → argmax bascule de a à b, aucune preuve de rejection
+sampling ne peut réparer ça). L'affirmation correcte est « préserve la distribution/décision greedy de la
+cible EN SUPPOSANT des logits/probabilités cible cohérents » — PAS « identique au bit à travers tous les
+noyaux, formes, tailles de lot, modes de quantification et configurations matérielles ».
+
+**Comment les 3 moteurs testent (aucun n'utilise la KL comme critère principal de production)** :
+égalité exacte jeton par jeton (les 3, détecte toute divergence greedy visible, n'établit PAS des logits
+identiques au bit) ; TensorRT-LLM ajoute une tolérance sur les logits (`allclose`) EN PLUS de l'égalité
+exacte des jetons — une tolérance sur les logits SEULE est insuffisante (un `allclose` peut passer alors
+que l'argmax bascule si la marge top-1/top-2 est plus petite que l'erreur tolérée).
+
+**Protocole de test recommandé (Luna)** : décoder greedy ordinaire et spéculatif (même modèle, prompt,
+graine, échantillonnage) ; comparer les IDs de jeton EXACTEMENT ; à chaque pas de vérification, comparer
+les logits cible aux positions correspondantes ; noter la marge top-1/top-2 `m_t = ℓ_t(1) − ℓ_t(2)` ;
+signaler les cas où l'écart absolu de logit entre les deux chemins est comparable à `m_t` ; répéter sur
+k=1..K, tailles de lot 1/2/4/…, chemins CUDA-graph et ordinaires, FP16/BF16/FP8/INT8, tous les
+noyaux/backends GEMM pertinents ; tester séparément le mode déterministe.
+
+**Sources** : vllm.ai (doc Speculative Decoding, `docs/features/speculative_decoding/README.md`), GitHub
+(vLLM issue #7627 lossless guarantees, issue scoring model prepare_inputs GPU ; SGLang issue #13123 EAGLE-3
+ignore deterministic flag, issue #33985 topk=192 vs 128 dispatch différent ; TensorRT-LLM
+`speculative-decoding.md`, `test_modeling_llama.py` (assert_close atol/rtol=1.0 + égalité exacte des
+jetons), issue #10309 Qwen3+Eagle3 greedy différent, release notes précision EAGLE3 multi-GPU), arXiv
+(« Batch Speculative Decoding Done Right », exact/partial match, 69,8 %→85,0 % en mode déterministe),
+nvidia.com (tutoriel Speculative Decoding with TensorRT-LLM, cohérence de distribution).
