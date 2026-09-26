@@ -8,10 +8,17 @@
 # BRUT (sans gabarit de conversation) donnait MMLU ≈ 20 % (le hasard, 4 choix) et GSM8K 0/50
 # sur un modèle Instruct — l'INSTRUMENT était faux, pas le modèle. Corrigé : `local-chat-
 # completions` + `--apply_chat_template` (le gabarit du modèle, via `/v1/chat/completions`)
-# ET les variantes MMLU *_generative (`local-chat-completions` ne supporte PAS
+# ET les variantes MMLU `*_generative` (`local-chat-completions` ne supporte PAS
 # `loglikelihood` — `openai_completions.py:LocalChatCompletion.loglikelihood` lève
-# `NotImplementedError` — les variantes par défaut de MMLU sont donc incompatibles avec un
-# gabarit de conversation, seules les *_generative le sont).
+# `NotImplementedError`, vérifié dans le code).
+#
+# 2e correctif (même journée) : `*_generative` coupe la génération au 1er saut de ligne
+# (`until: ["</s>", "\n"]`) et compare la 1re ligne au bit à la lettre attendue — conçu pour un
+# modèle DE BASE qui répond "Answer: C" tout de suite, pas pour un modèle Instruct qui
+# raisonne d'abord (vérifié sur échantillon réel : réponse coupée après « I need to find... »,
+# jamais la lettre). Remplacé par `mmlu_flan_cot_zeroshot_*` : prompt "Let's think step by
+# step", pas de coupe prématurée (stop sur `</s>`/`Q:`/`<|im_end|>` seulement), extraction par
+# `The answer is X` (repli sur un motif `(X)` isolé) — conçu pour exactement ce cas.
 #
 # Sous-ensemble et graine FIXÉS ICI, jamais en argument : deux bras comparés (P0, P1, ou un
 # bras et sa référence llama.cpp) doivent tourner sur EXACTEMENT le même tirage.
@@ -38,7 +45,7 @@ PY="$ICI/.venv-panel/bin/python"
 [ -x "$PY" ] || { echo "REFUS : $PY absent — installer d'abord (uv venv .venv-panel --python 3.12 && uv pip install --python .venv-panel 'lm-eval[api]' transformers)"; exit 66; }
 
 GRAINE=1234
-TACHES_MMLU="mmlu_high_school_mathematics_generative,mmlu_professional_law_generative,mmlu_college_computer_science_generative"
+TACHES_MMLU="mmlu_flan_cot_zeroshot_high_school_mathematics,mmlu_flan_cot_zeroshot_professional_law,mmlu_flan_cot_zeroshot_college_computer_science"
 LIMITE_MMLU=${LIMITE_MMLU:-100}
 TACHE_GSM8K="gsm8k"
 LIMITE_GSM8K=${LIMITE_GSM8K:-50}
