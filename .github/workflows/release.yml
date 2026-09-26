@@ -154,12 +154,12 @@ jobs:
           sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder python3-pip
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
-      - name: Sources Python hors ligne (PyPI par flatpak-pip-generator, torch cu130 par sources-torch.sh)
+      # 266 d : plus de flatpak-pip-generator (sdists → numpy construit par meson, tokenizers/pydantic-core par cargo dans le bac
+      # à sable : « Cannot import 'mesonpy' », v0.7.0) — sources-pypi.py ne prend que des ROUES (--only-binary=:all:), comme torch.
+      - name: Sources Python hors ligne (roues PyPI par sources-pypi.py, torch cu130 par sources-torch.sh)
         run: |
-          pip3 install --user --break-system-packages requirements-parser pyyaml
-          curl -fsSLo pipgen.py https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator.py
-          [ -f packaging/flathub/python3-modules.json ] || python3 pipgen.py --runtime org.gnome.Sdk//51 --output packaging/flathub/python3-modules \
-              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py
+          [ -f packaging/flathub/python3-modules.json ] || (cd packaging/flathub && ./sources-pypi.py \
+              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py)
           [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0)
       - name: Construction hors ligne et lint
         run: |

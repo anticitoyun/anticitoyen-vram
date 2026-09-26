@@ -9,7 +9,7 @@ lint le paquet est branché par poste3 dans `release.yml` (modèle : `rog-flare2
 |---|---|---|
 | `io.github.anticitoyen.acvram.yml` | manifeste (runtime GNOME 51, `--device=all`, noyaux précompilés, roues hors ligne) | ce répertoire |
 | `io.github.anticitoyen.acvram.metainfo.xml` | AppStream (en/fr, captures, releases) | ce répertoire ; `<release>` à tenir par version |
-| `python3-modules.json` | dépendances PyPI en sources `file` | CI : `flatpak-pip-generator --runtime org.gnome.Sdk//51 numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py` |
+| `python3-modules.json` | dépendances PyPI en sources `file`, ROUES binaires seulement (266 d : plus de sdist, plus de meson ni cargo dans le bac à sable) | `./sources-pypi.py numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py` (réseau) |
 | `torch-cu130.json` | torch 2.14 cu130, triton 3.8, roues nvidia-* (sans cudnn/nccl/nvshmem/cusparselt) | `./sources-torch.sh 2.14.0` (réseau) |
 | `build/noyaux/` (hors dépôt) | `acvram_kernels.so` et port Marlin précompilés par empreinte, sm_120 (+ sm_89, sm_86) | CI avec nvcc (script à écrire : `tools/noyaux-precompiles.sh`) |
 
