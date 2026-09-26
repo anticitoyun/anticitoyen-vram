@@ -129,6 +129,13 @@ Eller som pakke, en fil vedlagt hver [GitHub-utgivelse](https://github.com/antic
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (navn generert av `rpmbuild`, ikke faste) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (eller `rpmbuild --rebuild *.src.rpm` fra `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
 
+Før installasjon, verifiser den nedlastede filen mot summene vedlagt utgivelsen (`SHA256SUMS`, publisert når alle andre filer er til stede):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
 Pip publiseres ikke som pakke (ingen bygget wheel): `pip install -e '.[dev]'` installerer fra en klone av kilden, akkurat som `./install.sh`.
 
 ---

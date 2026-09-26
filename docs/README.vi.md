@@ -129,6 +129,13 @@ Hoặc qua gói cài đặt, mỗi gói là một tệp đính kèm trong từng
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (tên do `rpmbuild` tạo ra, không cố định) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (hoặc `rpmbuild --rebuild *.src.rpm` từ tệp `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
 
+Trước khi cài đặt, hãy xác minh tệp đã tải xuống với các tổng kiểm tra đính kèm bản phát hành (`SHA256SUMS`, được phát hành sau khi tất cả các tệp khác đã có mặt):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
 Pip không được phát hành dưới dạng gói (không có bản wheel dựng sẵn): `pip install -e '.[dev]'` cài đặt từ một bản sao mã nguồn, giống như `./install.sh`.
 
 ---
