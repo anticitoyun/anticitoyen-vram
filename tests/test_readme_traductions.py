@@ -34,9 +34,13 @@ LOGO = '<p align="center"><img src="logo-acvram.png" alt="acvram" width="420"></
 # commentaires, texte de démo (« Bonjour » → « Hello »), unités (Go → GB), séparateur décimal, en-têtes de colonnes.
 # Seuls les COMMANDES et DRAPEAUX du contrat CLI ne changent jamais — comptés sur tout le fichier, en plus du
 # contrôle par bloc de `_commandes_et_chiffres` (242).
+# 249 : frontière ASCII (?![A-Za-z0-9_]) et non \b — en coréen, thaï ou chinois une particule se colle au nom
+# (« acvram은 ») et \b, qui tient le hangul pour une lettre de mot, ne comptait plus la mention (ko : 35 contre 45).
+_F = r"(?![A-Za-z0-9_])"
 _JETONS_CLI = re.compile(
-    r"acvram\b|curl\b|python\b|pip\b|install\.sh|--[\w-]+|-H\b|-d\b|OpenAI\b|openai\b|"
-    r"nvfp4\b|int4_awq\b|int4\b|sm_120\b|qwen3-32b\b|8000\b")
+    r"acvram" + _F + r"|curl" + _F + r"|python" + _F + r"|pip" + _F + r"|install\.sh|--[\w-]+|-H" + _F + r"|-d" + _F +
+    r"|OpenAI" + _F + r"|openai" + _F + r"|nvfp4" + _F + r"|int4_awq" + _F + r"|int4" + _F + r"|sm_120" + _F +
+    r"|qwen3-32b" + _F + r"|8000" + _F)
 
 
 def _jetons_cli(texte: str) -> list[str]:

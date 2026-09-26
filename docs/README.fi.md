@@ -293,9 +293,9 @@ Qwen3-Coder-30B-A3B NVFP4:ssä (asiantuntijat) + INT8:ssa (huomio, pää), sama 
 
 ⁴ 23.9., sama protokolla llama.cpp:tä vastaan (revue/poste2-piece72-llamacpp-b1-23-09.md), acvram 0.6.37 uudelleenkirjoitetulla reitityksellä (+5,6 %): acvram 310,8 vs. llama.cpp 329,9 t/s — **llama.cpp edellä 5,8 %:lla läpäisyssä, acvram edellä 13,4 %:lla J/tokenissa** (0,598 vs. 0,691).
 
-Päivän läpäisyt (asema 1030, eco-tila `-lgc 2700`, putki käytössä; ahne näytteistys otettu CUDA-graafiin, oletus versiosta 0.6.35 lähtien). acvramin b=12-arvo on virallinen sinetöity solu (mediaani 6:sta lomitetusta ikkunasta, kello ikkunaa kohti).
+Päivän läpäisyt (asema 1030, eco-tila `-lgc 2700`, putki käytössä; ahne näytteistys otettu CUDA-graafiin, oletus versiosta 0.6.35 lähtien). acvram-moottorin b=12-arvo on virallinen sinetöity solu (mediaani 6:sta lomitetusta ikkunasta, kello ikkunaa kohti).
 
-> **Oikaisu (23.9.2026).** Tähän asti julkaistu vLLM-vertailu (b=12: 1 782 vs. 1 634 t/s; b=1: 290,6) asetti HTTP:llä mitatun acvramin vastakkain **offline**-mitatun vLLM:n kanssa (`LLM().generate()`), ja 22.9. oikaisu väitti virheellisesti, että vLLM-solu kulki `vllm serve`:n kautta. 23.9.: sama HTTP-asiakas molemmille, ja `-lgc` asetettu molemmille (acvram asettaa omansa käynnistyksessä, `vllm serve` ei: ilman tätä varotoimea vLLM pyöri ~2930 MHz:llä ~2650:n sijaan). Tulos huomautuksessa ²: vLLM edellä 9,1 %:lla b=12:lla.
+> **Oikaisu (23.9.2026).** Tähän asti julkaistu vLLM-vertailu (b=12: 1 782 vs. 1 634 t/s; b=1: 290,6) asetti HTTP:llä mitatun acvram-moottorin vastakkain **offline**-mitatun vLLM:n kanssa (`LLM().generate()`), ja 22.9. oikaisu väitti virheellisesti, että vLLM-solu kulki `vllm serve`:n kautta. 23.9.: sama HTTP-asiakas molemmille, ja `-lgc` asetettu molemmille (acvram asettaa omansa käynnistyksessä, `vllm serve` ei: ilman tätä varotoimea vLLM pyöri ~2930 MHz:llä ~2650:n sijaan). Tulos huomautuksessa ²: vLLM edellä 9,1 %:lla b=12:lla.
 
 Aamulla 14.9. acvram oli 630 t/s:ssä ja 0,619 J/tokenissa samalla solulla: hyödyt tulevat Blackwellin natiivista FP4 MMA:sta (`mma.sync … kind::mxf4nvf4`, ×7,9 bf16:een verrattuna), erän ämpäreittäin ryhmitellystä GEMM-MoE:sta, yhteen ytimeen tiivistetystä reitityksestä (3677 → 1517 käynnistystä per askel) ja kapeasta tensoriydin-GEMM:stä projektioille. Jokaisella luvulla on oma muistiinpanonsa `acvram-memoire/revue/`-hakemistossa, mittausta edeltävällä sinetöidyllä ennusteella, instrumentilla ja sen tilalla — lukua ilman tilaa ei julkaista.
 
@@ -337,7 +337,7 @@ Riippumaton projekti, ei sidoksissa ASUS:iin, NVIDIAan eikä vLLM-projektiin.
 
 ## Tue projektia
 
-Acvramin kehitys tapahtuu henkilökohtaisella laitteistolla. Jos projektista on sinulle hyötyä:
+acvram-moottorin kehitys tapahtuu henkilökohtaisella laitteistolla. Jos projektista on sinulle hyötyä:
 
 [![Buy Me a Coffee](https://img.buymeacoffee.com/button-api/?text=Tarjoa%20kahvi&emoji=☕&slug=anticitoyen&button_colour=FFDD00&font_colour=000000&font_family=Lato&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/anticitoyen)
 
