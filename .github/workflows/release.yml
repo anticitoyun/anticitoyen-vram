@@ -217,10 +217,18 @@ jobs:
           { printf '[Flatpak Ref]\nTitle=acvram\nName=io.github.anticitoyen.acvram\nBranch=master\nUrl=%s\n' "$PAGES"
             printf 'SuggestRemoteName=acvram\nRuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo\nIsRuntime=false\n'
             [ "$SIGNE" = 1 ] && printf 'GPGKey=%s\n' "$(cat cle.b64)"; } > "acvram-$V.flatpakref"
-          git fetch origin gh-pages:gh-pages 2>/dev/null || git branch gh-pages "$(git commit-tree -m 'gh-pages' "$(git hash-object -t tree /dev/null)")"
+          # 266 j : le coureur n'a aucune identité git — tout commit (commit-tree compris) porte celle du bot Actions, pour ce
+          # commit seulement (pas de git config). Sans elle, commit-tree rendait '' et `git branch gh-pages ''` tombait en 128.
+          if ! git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            RACINE=$(git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree -m 'gh-pages' "$(git hash-object -t tree /dev/null)")
+            [ -n "$RACINE" ] || { echo "gh-pages : commit-tree n'a rendu aucun sha" >&2; exit 1; }
+            git branch gh-pages "$RACINE"
+          fi
           git worktree add pages gh-pages
           rm -rf pages/flatpak && cp -a repo pages/flatpak && touch pages/.nojekyll
-          git -C pages add -A flatpak .nojekyll && git -C pages -c user.name=anticitoyen -c user.email=anticitoyen@users.noreply.github.com commit -q -m "flatpak : dépôt $TAG" || true
+          git -C pages add -A flatpak .nojekyll
+          # « rien à commettre » (rejeu à dépôt identique) n'est pas une faute ; un commit qui échoue, si.
+          git -C pages diff --cached --quiet || git -C pages -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -q -m "flatpak : dépôt $TAG"
           git -C pages push origin gh-pages
           gh release delete-asset "$TAG" "acvram-$V.flatpak" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true   # l'ancien bundle cassé (v0.7.0)
           gh release upload "$TAG" "acvram-$V.flatpakref" --clobber --repo "$GITHUB_REPOSITORY"

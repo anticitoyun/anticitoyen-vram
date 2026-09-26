@@ -72,3 +72,32 @@ def test_verifier_release_attend_le_flatpakref_et_separe_installation_et_doctor(
     t = (RACINE / "outils" / "verifier-release.sh").read_text(encoding="utf-8")
     assert 'un_seul "flatpak" "acvram-${V}.flatpakref"' in t and "--flatpak-installer" in t and "--flatpak-doctor" in t
     assert '--from "$FLAT"' in t and "--bundle" not in t and "l'ancien bundle" in t
+
+
+# ---- 266 j : identité git du coureur ------------------------------------------------------------------------------------
+_RELEASE = RACINE / ".github" / "workflows" / "release.yml"
+_BOT = "-c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com'"
+
+
+def test_266j_tout_commit_de_release_porte_l_identite_du_bot():
+    """Run 36234968029 : `empty ident name` sur commit-tree → '' → `git branch gh-pages ''` → 128. Chaque `git … commit`
+    et `commit-tree` de release.yml porte -c user.name/-c user.email du bot Actions, jamais une adresse personnelle,
+    jamais de `git config`."""
+    texte = _RELEASE.read_text(encoding="utf-8")
+    commits = [l for l in texte.splitlines() if not l.lstrip().startswith("#") and re.search(r"\bgit\b.*\b(commit -q|commit-tree)\b", l)]
+    assert len(commits) >= 2, commits
+    for l in commits:
+        assert _BOT in l, l
+    code = "\n".join(l for l in texte.splitlines() if not l.lstrip().startswith("#"))
+    assert "git config" not in code, "l'identité se pose par -c, pour ce commit seulement"
+    for courriel in re.findall(r"user\.email=([^ '\"]+)", texte):
+        assert courriel.endswith("@users.noreply.github.com"), courriel
+
+
+def test_266j_un_commit_tree_muet_fait_echouer_le_job():
+    """Témoin : le sha de la racine orpheline est contrôlé non vide avant `git branch`, et le commit n'est plus avalé par
+    `|| true` (seul « rien à commettre », diff --cached --quiet, est toléré)."""
+    texte = _RELEASE.read_text(encoding="utf-8")
+    assert 'RACINE=$(git' in texte and '[ -n "$RACINE" ] ||' in texte and 'git branch gh-pages "$RACINE"' in texte
+    assert not re.search(r"commit -q[^\n]*\|\| true", texte), "un commit gh-pages qui échoue doit faire échouer le job"
+    assert "git -C pages diff --cached --quiet ||" in texte
