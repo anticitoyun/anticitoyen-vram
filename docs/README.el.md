@@ -267,6 +267,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **επανεκκίνηση του έργου σε άλλο μηχάνημα** (γαλλικά) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | πώς συναρμολογούνται τα κομμάτια |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | καθαρό NVFP4 ή attention+GDN σε int8 ανά κανάλι, σε υβρίδιο Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ρύθμιση αυτού του συγκεκριμένου μηχανήματος |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **τι δεν έχει γίνει ακόμη**, διαβάστε το πρώτο |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | συμβάσεις εργασίας στον κώδικα (γλώσσα, στυλ, έλεγχοι πριν το push) |

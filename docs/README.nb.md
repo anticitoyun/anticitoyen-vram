@@ -267,6 +267,7 @@ To funn fra disse målingene har endret standardverdiene:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **gjenoppta prosjektet på en annen maskin** |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | hvordan delene henger sammen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | ren NVFP4 eller attention+GDN i int8 per kanal, på en Gated DeltaNet-hybrid |
 | [`docs/MATERIEL.md`](MATERIEL.md) | innstilling av akkurat denne maskinen |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **det som ikke er gjort**, les først |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | arbeidskonvensjoner for koden (språk, stil, kontroller før push) |

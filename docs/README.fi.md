@@ -267,6 +267,7 @@ Kaksi näistä mittauksista tehtyä havaintoa muuttivat oletusarvoja:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **projektin jatkaminen toisella koneella** (ranskaksi) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | miten palaset sopivat yhteen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | puhdas NVFP4 tai attention+GDN kanavakohtaisena int8:na, Gated DeltaNet -hybridissä |
 | [`docs/MATERIEL.md`](MATERIEL.md) | tämän tietyn koneen säätäminen |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **mitä ei ole vielä tehty**, lue tämä ensin |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | koodityön käytännöt (kieli, tyyli, tarkistukset ennen pushia) |

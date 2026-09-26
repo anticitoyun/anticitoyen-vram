@@ -267,6 +267,7 @@ Dos hallazgos de estas mediciones cambiaron los valores por defecto:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **reanudar el proyecto en otra máquina** (francés) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | cómo se ensamblan las piezas |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 puro o atención+GDN en int8 por canal, sobre un híbrido Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ajustar esta máquina concreta |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **lo que no está hecho**, léase primero |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | convenciones de trabajo sobre el código (idioma, estilo, comprobaciones antes de subir) |

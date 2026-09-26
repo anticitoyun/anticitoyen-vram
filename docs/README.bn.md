@@ -267,6 +267,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **অন্য মেশিনে প্রকল্পের কাজ আবার শুরু করা** (ফরাসি ভাষায়) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | অংশগুলো কীভাবে একসঙ্গে কাজ করে |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | বিশুদ্ধ NVFP4 নাকি অ্যাটেনশন+GDN প্রতি-চ্যানেল int8-এ, একটি Gated DeltaNet হাইব্রিডে |
 | [`docs/MATERIEL.md`](MATERIEL.md) | এই নির্দিষ্ট মেশিনটি টিউন করা |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **যা এখনো করা হয়নি**, এটি সবার আগে পড়ুন |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | কোডে কাজের রীতিনীতি (ভাষা, শৈলী, পুশ করার আগের যাচাই) |

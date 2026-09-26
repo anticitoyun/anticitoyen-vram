@@ -267,6 +267,7 @@ Două constatări din aceste măsurători au schimbat valorile implicite:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **reluarea proiectului pe altă mașină** (franceză) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | cum se asamblează piesele |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 pur sau attention+GDN în int8 pe canal, pe un hibrid Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | reglarea acestei mașini precise |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **ce nu este încă făcut**, de citit primul |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | convenții de lucru pe cod (limbă, stil, verificări înainte de a împinge) |

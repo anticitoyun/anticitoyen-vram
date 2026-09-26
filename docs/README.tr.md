@@ -267,6 +267,7 @@ Bu ölçümlerden çıkan iki tespit, varsayılan değerleri değiştirdi:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **projeyi başka bir makinede sürdürmek** (Fransızca) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | parçaların nasıl bir araya geldiği |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | saf NVFP4 ya da kanal başına int8 ile attention+GDN, bir Gated DeltaNet hibrit üzerinde |
 | [`docs/MATERIEL.md`](MATERIEL.md) | bu belirli makineyi ayarlamak |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **henüz yapılmamış olan**, önce bunu okuyun |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | kod üzerinde çalışma kuralları (dil, stil, itmeden önceki kontroller) |

@@ -267,6 +267,7 @@ Hai phát hiện từ các phép đo này đã làm thay đổi các giá trị 
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **tiếp tục dự án trên một máy khác** (tiếng Pháp) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | các thành phần khớp với nhau như thế nào |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 thuần hoặc attention+GDN ở int8 theo từng kênh, trên một hybrid Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | tinh chỉnh chính cỗ máy này |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **những gì chưa làm xong**, hãy đọc trước tiên |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | quy ước làm việc với mã (ngôn ngữ, phong cách, kiểm tra trước khi push) |

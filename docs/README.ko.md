@@ -267,6 +267,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **다른 머신에서 프로젝트 이어받기** (프랑스어) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | 구성 요소들이 맞물리는 방식 |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | 순수 NVFP4 또는 채널별 int8의 attention+GDN, Gated DeltaNet 하이브리드에서 |
 | [`docs/MATERIEL.md`](MATERIEL.md) | 이 특정 머신의 튜닝 |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **아직 끝나지 않은 것**, 가장 먼저 읽을 것 |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | 코드 작업 규칙 (언어, 스타일, 푸시 전 점검) |

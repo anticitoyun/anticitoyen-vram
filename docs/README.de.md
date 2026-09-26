@@ -267,6 +267,7 @@ Zwei Erkenntnisse aus diesen Messungen haben die Standardwerte verändert:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **das Projekt auf einer anderen Maschine fortsetzen** (Französisch) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | wie die Teile zusammenpassen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | reines NVFP4 oder Attention+GDN in Int8 pro Kanal, auf einem Gated-DeltaNet-Hybrid |
 | [`docs/MATERIEL.md`](MATERIEL.md) | diese spezifische Maschine einstellen |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **was noch nicht fertig ist**, zuerst lesen |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | Arbeitskonventionen für den Code (Sprache, Stil, Prüfungen vor dem Push) |

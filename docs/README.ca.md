@@ -267,6 +267,7 @@ Dues constatacions sorgides d'aquestes mesures han canviat els valors per defect
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **represa del projecte en una altra màquina** (francès) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | com s'ensamblen les peces |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 pur o atenció+GDN en int8 per canal, sobre un híbrid Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ajustar aquesta màquina precisa |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **el que encara no està fet**, per llegir primer |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | convencions de treball sobre el codi (llengua, estil, controls abans de pujar) |
