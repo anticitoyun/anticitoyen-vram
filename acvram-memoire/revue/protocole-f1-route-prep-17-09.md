@@ -1,0 +1,6 @@
+# Protocole — F1 `route_prep` (282a258, opt-in `ACVRAM_ROUTE_PREP=1`) : capture par godet, équivalence bit à bit sur 512 pas, lancements b=1
+instrument : (a) `capture-godets-17-09.py 1,2,8,16` sous `ROUTE_PREP=1` ; (b) `equiv-route-prep-17-09.py` (512 pas, b=1 et b=12, graphes, mêmes invites) sous `ROUTE_PREP=0` puis `=1`, comparaison des ids de sortie ; (c) `profil-pas-coder-17-09.py b1` sous `ROUTE_PREP=1` (contre ee25761 : 1 275 lancements, petits 1,159 ms, GPU 3,498) — `scratchpad/f1-route-prep-17-09/`.
+commit : arbre poste3 (= main 282a258, 9/9 CPU) ; régime classé + défauts 0.6.8.
+scellé (chef/poste4) : (a) aucune erreur ; (b) ids identiques bit à bit ; (c) 800-860 lancements, petits noyaux − 0,25 à − 0,33 ms, pas GPU ≈ 3,2 ms (≈ 310 t/s pur) ; réfutation : un jeton différent → bogue ; < 100 lancements de moins → la colle n'était pas là.
+mes prédictions : (a) tenue ; (b) tenue à b=1 ; à b=12 identique aussi (la route est déterministe, les fantômes masqués valent 0) ; (c) 850-950 lancements (la colle de `_forward_grouped` = ≈ 380 lancements de copies/compare/arange/scatter, F1 en retire une partie, pas les copies de `x[tok]`), petits − 0,20 à − 0,30 ms, GPU 3,2-3,3 ms.
+falsification : b=12 différent et b=1 identique → les fantômes du godet sont traités autrement ; lancements > 1 000 → F1 n'a pas retiré la colle visée.

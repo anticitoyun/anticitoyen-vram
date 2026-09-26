@@ -1,0 +1,18 @@
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+0	seule	64	4096	572.2	1	0	0.00	133.2	0.0	218	34	aucun	aucune
+2048	seule	64	4096	686.8	2	0	0.00	178.2	0.0	218	38	puissance	bridage pendant la fenêtre : puissance
+2048	seule	64	4096	678.7	2	0	0.00	185.7	0.0	227	41	puissance	bridage pendant la fenêtre : puissance
+0	seule	64	4096	524.8	1	0	0.00	136.1	0.0	220	34	aucun	aucune
+0	seule	64	4096	525.3	1	0	0.00	134.6	0.0	218	35	aucun	aucune
+2048	seule	64	4096	678.7	2	0	0.00	173.8	0.0	213	35	aucun	aucune
+2048	seule	64	4096	679.0	2	0	0.00	179.6	0.0	220	41	puissance	bridage pendant la fenêtre : puissance
+0	seule	64	4096	525.7	1	0	0.00	136.3	0.0	220	42	puissance	bridage pendant la fenêtre : puissance
+#
+# VERDICT — 11/09/2026
+# Prediction scellee : D(4096) > 60 J refute le cout fixe par passe.
+# Mesure : D = 39 J (n=1 propre) a 44 J (moyennes toutes manches).
+# Le cout fixe SURVIT. L efficacite des GEMM (prediction 70-76 J) est refutee.
+# Proprete : 3 manches propres sur 8 (budget=0 : 3/4, budget=2048 : 1/4).
+# Les 5 manches bridees en puissance sont INDECIDABLES, pas imprecises.
+# Le bridage des deux cartes est permanent et delibere (contrainte du 8/09).
+# n publiable = 3 (les propres), pas 8.

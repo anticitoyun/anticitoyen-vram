@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Lanceur acvram : amorce l'environnement au premier appel, puis s'efface.
+set -euo pipefail
+BASE="${ACVRAM_HOME:-$HOME/.local/share/acvram}"
+VENV="$BASE/venv"
+SRC="/usr/share/acvram"
+
+# La version qui compte est celle du venv, pas celle du paquet : le lanceur
+# ne verifiait QUE l'existence du venv, donc une mise a jour du .deb n'avait
+# aucun effet — dpkg annoncait 0.3.0 pendant que `acvram --version` rendait
+# 0.2.0. Un defaut muet : rien ne casse, la mise a jour ne fait simplement rien.
+VERSION_SRC=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SRC/acvram/__init__.py" 2>/dev/null || true)
+# -I isole l interpreteur : sans lui, un `acvram` lance depuis un arbre de
+# developpement importe le paquet du REPERTOIRE COURANT et non celui du venv,
+# les deux versions paraissent egales, et la mise a jour ne se declenche pas.
+VERSION_VENV=$("$VENV/bin/python" -I -c 'import acvram;print(acvram.__version__)' 2>/dev/null || true)
+
+if [ -x "$VENV/bin/acvram" ] && [ -n "$VERSION_SRC" ] \
+   && [ "$VERSION_SRC" != "$VERSION_VENV" ]; then
+    echo "acvram : $VERSION_VENV installe, $VERSION_SRC disponible — mise a jour"
+    # torch n'est pas retelecharge : seul le paquet acvram est reinstalle.
+    COPIE="$BASE/src"
+    rm -rf "$COPIE"
+    cp -r "$SRC" "$COPIE"
+    "$VENV/bin/pip" install --quiet --no-deps --force-reinstall "$COPIE"
+    rm -rf "$COPIE"
+    echo "acvram : a jour en $VERSION_SRC."
+fi
+
+if [ ! -x "$VENV/bin/acvram" ]; then
+    echo "acvram : premier lancement, préparation de l'environnement dans $VENV"
+    echo "         (torch se choisit selon les GPU présents ; plusieurs Gio)"
+    mkdir -p "$BASE"
+    python3 -m venv "$VENV"
+    # shellcheck disable=SC1091
+    . "$VENV/bin/activate"
+    pip install --quiet --upgrade pip wheel
+    INDEX="https://download.pytorch.org/whl/cpu"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        CAPS=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d ' ')
+        if echo "$CAPS" | grep -qE '^(1[0-9])\.'; then
+            INDEX="https://download.pytorch.org/whl/cu130"
+            pip install --quiet --only-binary=:all: 'cuda-toolkit[nvcc,cccl]==13.0.*' || true
+        else
+            INDEX="https://download.pytorch.org/whl/cu124"
+        fi
+    fi
+    pip install --quiet --index-url "$INDEX" torch
+    # 0.6.33 (poste7 20/09 14 h 10) : la tour de vision (Gemma 4, Qwen3-VL) passe par les classes
+    # transformers, version EPINGLEE = celle qui charge gemma4 sur le poste (5.17.0) ; import
+    # paresseux dans acvram/engine/vision.py : un alias texte ne l importe jamais.
+    pip install --quiet "transformers==5.17.0" pillow
+    # processing_gemma4 importe torchvision : la version accordée à torch (même index cu*), jamais une autre
+    pip install --quiet --index-url "$INDEX" torchvision
+    # /usr/share est en lecture seule : construire depuis une copie, sinon
+    # setuptools échoue en voulant y écrire acvram.egg-info
+    COPIE="$BASE/src"
+    rm -rf "$COPIE"
+    cp -r "$SRC" "$COPIE"
+    pip install --quiet "$COPIE"
+    rm -rf "$COPIE"
+    echo "acvram : prêt. « acvram doctor » pour vérifier."
+fi
+exec "$VENV/bin/acvram" "$@"

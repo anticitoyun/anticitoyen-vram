@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dépendances (torch CPU)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Paquet et outils de test
+        run: pip install -e '.[dev]'
+      - name: pytest (chemin de référence, sans GPU)
+        env:
+          ACVRAM_DISABLE_KERNELS: "1"
+          ACVRAM_DISABLE_CPU_KERNELS: "1"
+        run: pytest -q
