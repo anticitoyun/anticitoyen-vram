@@ -1,5 +1,40 @@
 # Journal des changements
 
+## 0.7.1 (26/09/2026)
+
+* **26/09/2026 — pièce 268 (poste1) : `/metrics` hors de la boucle HTTP, AU DÉFAUT, sortie identique champ par champ.** Il
+  était un `async def` qui appelait `engine.regime()` sept fois (cinq à six parcours de l'arbre des modules chacun) : 343 ms
+  par appel DANS la boucle — aucune requête lue ni rendue pendant ce temps. Désormais `def` (pool de fils), `regime()` une
+  fois par appel, un seul parcours. Sous un lecteur de `/metrics` à 20 Hz, TTFT à 12 requêtes (Qwen3-Coder-30B-A3B
+  srcQ4_K_M-nvfp4) **0,78 → 0,24 s** (témoin sans lecteur 0,247 s) ; `/metrics` **343 → 60 ms**. Étape 2 : gabarit et
+  tokeniseur de `/v1/chat/completions` dans un fil (au bit, neutre à 12 requêtes). `revue/poste1-268-verdict-26-09.md` ;
+  tests cassants `tests/test_metrics_hors_boucle_268.py` (rouges sur l'ancien code).
+* **26/09/2026 — pièce 262 (poste1) : le « TTFT 2,29 × plus lent que llama.cpp à 12 séquences » est requalifié.** Mesuré
+  sans lecteur `/metrics` concurrent, le TTFT à 12 de la 0.7.0 vaut **0,242 s** contre 0,66 s pour llama.cpp `-np 1` ; le
+  duel (`duel-moteurs.py`) interrogeait `/metrics` pendant le tour et mesurait surtout ce défaut (0,80 s).
+  `revue/poste1-262-verdict-26-09.md`.
+* **Notes sans changement de code** : 269 (poste6, fenêtre d'admission 10/15 ms FAUX, défaut 5 ms inchangé,
+  `revue/poste6-piece269-*`) ; 270 (poste1, préfill du Coder décomposé, MoE 55 % au solo, levier au bit ≤ 7 ms, clos,
+  `revue/poste1-270-decomposition-26-09.md`).
+
+* **26/09/2026 — pièce 260 (poste5, décision chef) : `ACVRAM_I8C_FP8_PREFILL=cublas` À LA DEMANDE, pas au défaut.** Les int8
+  ré-encodés du fp8 (manifeste « origine: fp8 », 233 tenseurs du Qwen3.8-27B-unsloth-mixte-i8c) étaient exclus du chemin W8A8
+  int8 du préfill depuis la 139 (copie signée persistante, 10,6 Go) ; la 201 a rendu cette copie transitoire, l'opt-in les y
+  remet. **Gain** : préfill par lot 8 × 78 **−26,8 %** (0,4105 → 0,3005 s), mur par lot seulement **−2,4 %**. **Prix** : KL de
+  décodage (b=8, 32 pas après le préfill) max **0,215**, 9 × le seuil admis (0,0242) ; argmax **94,1 %** contre 99,6 % au
+  témoin ; PPL wiki-gptq 2048 **+1,05 %** (7,0273 → 7,1013). Au mur, le gain ne paie pas la qualité : défaut inchangé (bf16).
+  Aide : `acvram serve --help`. `revue/poste5-piece260-{scelle,banc,moteur}-26-09.md` ; tests `tests/test_i8c_copie_260.py`.
+  Écartés en chemin (255) : le FP8 natif W8A8 (`_scaled_mm`, CUTLASS sm_120) — plus lent au décodage, et deux fois plus
+  d'erreur que l'int8 W8A8 au préfill.
+* **26/09/2026 — pièce 260x (poste5, décision chef) : copie signée du chemin cublas par un xor, AU DÉFAUT
+  (`ACVRAM_I8C_COPIE=xor` ; `int16` = témoin).** q − 128 (uint8 à zéro 128 → int8) en un noyau au lieu de l'aller-retour int16 ;
+  la copie est transitoire depuis la 201, donc payée à chaque appel cublas. Copie xor au bit, gain mesuré −1,98 ms (L=512) et
+  −2,62 ms (L=2047) sur le TTFT b=1 du Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c (ABBA ×4, médianes B toutes sous A), sous le seuil
+  annoncé de 2,5 ms à L=512 : non revendiqué. Prédiction (−3,5 à −5,5 ms) fausse. Contrôles : L=78 −0,6 %, banc chat b=8
+  +0,20 %. `revue/poste5-piece260x-{scelle,verdict}-26-09.md` ; test cassant `tests/test_i8c_copie_260x.py` (une seule opération
+  aten `bitwise_xor` au défaut ; l'ancienne copie le rend rouge).
+## 0.7.0 (26/09/2026)
+
 * **26/09/2026 — pièce 232 b (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut pour la 0.7.0 — la 209 est À LA
   DEMANDE.** Deux protocoles, deux résultats sur le même Qwen3-Coder-30B-A3B-nvfp4 pur à b=8 : la 226 (banc chat 102, invites réelles,
   salve unique de 20 s, 5 + 5) donnait 1 = **+12,8 % / −18,4 % J** ; la 229 (poste3, `banc-llamacpp-16-09.py`, invites réelles, lots
@@ -10,7 +45,6 @@
   du Coder b=8 divergent dès le jeton 6 à 55 selon la séquence (237 b, poste2) ; KL contre HF bf16 en cours. Elle reste
   gagnante sur qkvo-i8c (209 c). Test cassant si le défaut revient à 1 :
   `tests/test_marlin_pile_par_ligne_209.py::test_232_le_facteur_par_ligne_est_a_la_demande_et_0_le_defaut`.
-## 0.7.0 (26/09/2026)
 
 Chaîne du 24 au 26/09, deux faits distincts, chacun avec sa pièce :
 * **parité du pas de décodage contre NInfer** (202, poste1) : Qwen3.8-27B-unsloth-mixte-i8c b=8, pas
