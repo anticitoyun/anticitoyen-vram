@@ -53,6 +53,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL", "bf16", None, "bf16", "bf16 | w4a16 (B1 Triton, NVFP4 dans la tuile) | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes"),
     Variable("PREFILL_INT8", "cublas", ("acvram.kernels", "_PREFILL_INT8"), "bf16",
              "linéaires INT8 au préfill : cublas (DÉFAUT depuis poste7-p2-au-defaut-19-09 : poids symétriques par canal des convertis -qkvo-i8c, A8 par jeton puis torch._int_mm cuBLASLt, M > 16 ; un poids affine par groupes — les classés — garde la déquant bf16, sortie inchangée) | bf16 (témoin : déquant entière + cutlass partout) | a8 (P0 : activation int8 par jeton, W8A8 Triton sur tout poids int8 ; poste7-profil-verdict-18-09)"),
+    Variable("I8C_COPIE", "xor", ("acvram.kernels", "_I8C_COPIE"), None,
+             "pièce 260x (au bit) : copie signée q − 128 du chemin cublas (poids transitoires de la 201) : xor (défaut, un noyau, 2 o/poids) | int16 (témoin : l'aller-retour int16 d'avant)"),
     Variable("COLLE_MOE", "torch", ("acvram.engine.moe", "_COLLE_MOE"), "torch",
              "colle du préfill MoE : torch (argsort + bincount + _tuiles) | triton (P0 : tri + histogramme et grille en deux lancements, mêmes tenseurs)"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),

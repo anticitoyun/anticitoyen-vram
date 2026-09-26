@@ -993,6 +993,13 @@ def seuil_gemv_int8() -> int:
 _PREFILL_INT8 = os.environ.get("ACVRAM_PREFILL_INT8", "cublas")
 if _PREFILL_INT8 not in ("bf16", "a8", "cublas"):
     raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8 | cublas")
+# Pièce 260x (AU BIT) : copie signée q − 128 du chemin cublas par UN xor (q ^ 0x80 relu en int8 : 1 octet lu, 1 écrit) au
+# lieu de l'aller-retour int16 (trois noyaux, ≈ 10 octets de trafic par poids) — la copie est transitoire depuis la 201,
+# donc payée à chaque appel hors portée. Micro-banc 260 : qkv 10240×5120 à n = 624, 472 → 196 µs, sortie identique.
+# int16 = témoin (l'ancien calcul).
+_I8C_COPIE = os.environ.get("ACVRAM_I8C_COPIE", "xor")
+if _I8C_COPIE not in ("xor", "int16"):
+    raise ValueError(f"ACVRAM_I8C_COPIE={_I8C_COPIE!r} : attendu xor | int16")
 
 
 def _i8c_eligible(t: INT8Tensor) -> bool:
@@ -1006,6 +1013,14 @@ def _i8c_eligible(t: INT8Tensor) -> bool:
               and t.zeros.shape[1] == 1 and bool((t.zeros == 128).all()))
         t.__dict__["_i8c"] = ok
     return ok
+
+
+def copie_signee(q: torch.Tensor) -> torch.Tensor:
+    """uint8 à zéro 128 → int8 signé q − 128, au bit : (q ^ 0x80) relu en int8 vaut q − 128 sur les 256 valeurs
+    (tests/test_i8c_copie_260x.py) ; ACVRAM_I8C_COPIE=int16 garde l'ancien calcul (témoin)."""
+    if _I8C_COPIE == "int16":
+        return (q.to(torch.int16) - 128).to(torch.int8).contiguous()
+    return q.contiguous().view(torch.int8).bitwise_xor(-128)
 
 
 def _i8c_poids(t: INT8Tensor):
@@ -1024,7 +1039,7 @@ def _i8c_poids(t: INT8Tensor):
     w = c.get(cle) if c is not None else None
     if w is None:
         CHEMINS_INT8["i8c_fabrique"] += 1
-        w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
+        w = copie_signee(t.qweight)
         if c is not None:
             c[cle] = w
     else:
