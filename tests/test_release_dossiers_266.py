@@ -41,7 +41,7 @@ def _dossier_de(cible: str) -> str:
 
 
 def _couvert(dossier: str, crees: list) -> bool:
-    if dossier in ("", ".", "..") or dossier.startswith("/dev/"):
+    if dossier in ("", ".", "..", "/dev") or dossier.startswith("/dev/"):
         return True
     if not dossier.startswith(("/", "~", "$")) and (RACINE / dossier).is_dir():
         return True                                    # dossier du dépôt : le checkout l'a créé

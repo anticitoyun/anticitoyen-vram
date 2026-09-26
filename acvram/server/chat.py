@@ -14,10 +14,14 @@ import json
 import os
 import sys
 import re
+import threading
 from typing import Any, Optional
 
 __all__ = ["Tokenizer", "load_tokenizer", "render_chat",
            "ProcesseurVision", "charger_processeur_vision", "preparer_images"]
+
+
+_VERROU_GABARIT = threading.Lock()      # 272 : construction paresseuse de l'Environment jinja (voir _render_jinja)
 
 
 class Tokenizer:
@@ -137,16 +141,22 @@ class Tokenizer:
     def _render_jinja(self, messages: list[dict], add_generation_prompt: bool,
                       extra: Optional[dict] = None) -> str:
         if self._env is None:
-            from jinja2 import Environment
-            from jinja2.exceptions import TemplateError
+            # 272 : depuis la 268 (étape 2), le gabarit est rendu dans des fils — deux requêtes de la première rafale
+            # pouvaient voir `_env` publié avant `_templates` et ses globales (AttributeError rattrapé → repli ChatML
+            # silencieux, ou JSON en ensure_ascii). Construit en local, publié en dernier, sous verrou.
+            with _VERROU_GABARIT:
+                if self._env is None:
+                    from jinja2 import Environment
+                    from jinja2.exceptions import TemplateError
 
-            def raise_exception(msg: str) -> None:
-                raise TemplateError(msg)
+                    def raise_exception(msg: str) -> None:
+                        raise TemplateError(msg)
 
-            self._env = Environment(trim_blocks=True, lstrip_blocks=True)
-            self._templates: dict[str, object] = {}
-            self._env.globals["raise_exception"] = raise_exception
-            self._env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
+                    env = Environment(trim_blocks=True, lstrip_blocks=True)
+                    env.globals["raise_exception"] = raise_exception
+                    env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
+                    self._templates: dict[str, object] = {}
+                    self._env = env
         # Le Template COMPILE est mis en cache, pas seulement l'Environment.
         # Mesure du 9/09 sur le gabarit de Qwen2.5 (2507 caracteres) :
         #     from_string (compilation)  3,975 ms

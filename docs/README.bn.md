@@ -127,7 +127,14 @@ git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (নাম `rpmbuild` তৈরি করে, নির্দিষ্ট নয়) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (অথবা `rpmbuild --rebuild *.src.rpm` দিয়ে `.src.rpm` থেকে) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
+
+ইনস্টল করার আগে, ডাউনলোড করা ফাইলটি রিলিজে সংযুক্ত সমষ্টিগুলোর (`SHA256SUMS`, অন্য সব ফাইল উপস্থিত হওয়ার পরে প্রকাশিত) বিপরীতে যাচাই করুন:
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 Pip-এ কোনো প্যাকেজ প্রকাশ করা হয় না (কোনো হুইল তৈরি হয় না): `pip install -e '.[dev]'` সোর্সের একটি ক্লোন থেকে ইনস্টল করে, ঠিক `./install.sh`-এর মতো।
 

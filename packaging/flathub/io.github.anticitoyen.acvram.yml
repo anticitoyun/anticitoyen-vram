@@ -1,9 +1,9 @@
 # Manifeste Flathub d'acvram (console native acvram-gui + lanceur acvram-console) — pièce 236, 26/09/2026.
 # Construit SANS réseau : toutes les roues Python sont des sources `file` (python3-modules.json généré par
-# flatpak-pip-generator dans le SDK ; torch-cu130.json = roues PyTorch cu130 et bibliothèques NVIDIA, voir README.md).
+# sources-pypi.py, roues binaires seulement — 266 d ; torch-cu130.json = roues PyTorch cu130 et bibliothèques NVIDIA, voir README.md).
 # CUDA : le pilote vient de l'extension org.freedesktop.Platform.GL.nvidia-<version> (posée par flatpak d'après le pilote
 # de l'hôte) ; les bibliothèques CUDA côté application (cudart, cublas, cusparse, cufft, curand, nvrtc, nvjitlink) sont
-# celles des roues nvidia-* de PyTorch, sous /app/lib/python3.12/site-packages/nvidia. Les noyaux d'acvram ne se
+# celles des roues nvidia-* de PyTorch, sous /app/lib/python3.14/site-packages/nvidia (Python du runtime : PYTHON_RUNTIME, 266 e). Les noyaux d'acvram ne se
 # compilent PAS dans le bac à sable (pas de nvcc) : ils arrivent PRÉCOMPILÉS (module acvram-noyaux, cache par empreinte).
 id: io.github.anticitoyen.acvram
 runtime: org.gnome.Platform
@@ -22,18 +22,16 @@ finish-args:
   - --filesystem=xdg-config/acvram:create   # ~/.config/acvram/modeles (liste des modèles connus de la console)
   - --filesystem=xdg-cache/acvram:create    # cache des noyaux Triton et des poids déquantifiés
   - --talk-name=org.freedesktop.Notifications
+  - --env=PYTHONPATH=/app/extra/site-packages   # 266 i : torch + fermeture CUDA en extra-data (dépaquetées à l'installation) ; torch y trouve nvidia/*
   - --env=ACVRAM_KERNELS_PRECOMPILES=/app/lib/acvram/noyaux   # noyaux CUDA précompilés (240 : chargés sans nvcc ni ninja)
   - --env=TRITON_CACHE_DIR=/var/cache/acvram/triton    # → xdg-cache/acvram
 cleanup:
+  # 266 h : cudnn, nccl, nvshmem, cusparselt ne se retirent PLUS — libtorch_cuda.so (2.14 cu130) les lie, import torch impossible sans
   - /include
-  - /lib/python3.12/site-packages/nvidia/cudnn        # inutilisé par acvram (attention maison / Triton) : −1,1 Go
-  - /lib/python3.12/site-packages/nvidia/nccl         # une seule carte servie : −0,3 Go
-  - /lib/python3.12/site-packages/nvidia/nvshmem
-  - /lib/python3.12/site-packages/nvidia/cusparselt
   - "*.a"
 modules:
-  - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py)
-  - torch-cu130.json                    # torch 2.14 cu130, triton 3.8, roues nvidia-* (générées par sources-torch.sh)
+  - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py ; 273 : extra vision — transformers, pillow)
+  - torch-cu130.json                    # torch 2.14 cu130 + fermeture CUDA en EXTRA-DATA (sources-torch.sh, 266 i : ≈ 2,9 Go tirés à l'installation)
   - name: acvram-noyaux
     # Noyaux CUDA d'acvram (acvram_kernels.so) compilés HORS bac à sable pour sm_120 (RTX 5090) — et sm_89/sm_86 si publiés — par la
     # CI : `python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0` (241, job-noyaux-precompiles.yml) ; un sous-dossier

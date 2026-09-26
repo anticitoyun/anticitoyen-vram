@@ -127,7 +127,14 @@ git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (ονόματα που παράγονται από το `rpmbuild`, όχι σταθερά) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (ή `rpmbuild --rebuild *.src.rpm` από το `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
+
+Πριν την εγκατάσταση, επαληθεύστε το ληφθέν αρχείο έναντι των αθροισμάτων που συνοδεύουν την έκδοση (`SHA256SUMS`, δημοσιεύεται αφού υπάρχουν όλα τα υπόλοιπα αρχεία):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 Το Pip δεν δημοσιεύεται ως πακέτο (καμία χτισμένη wheel): το `pip install -e '.[dev]'` εγκαθιστά από κλώνο της πηγής, όπως το `./install.sh`.
 

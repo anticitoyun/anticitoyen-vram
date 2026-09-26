@@ -127,7 +127,14 @@ Oppure tramite pacchetto, un file allegato a ogni [release GitHub](https://githu
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nomi generati da `rpmbuild`, non fissi) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (oppure `rpmbuild --rebuild *.src.rpm` a partire dal `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
+
+Prima di installare, verifica il file scaricato rispetto alle somme allegate alla release (`SHA256SUMS`, pubblicata una volta presenti tutti gli altri file):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 Pip non è pubblicato come pacchetto (nessuna wheel compilata): `pip install -e '.[dev]'` installa da un clone del sorgente, come `./install.sh`.
 

@@ -319,7 +319,8 @@ def _ecrire_empreinte(cand: str, so_source: str, src_sha: str, src_hash: str, ar
     shutil.copy2(so_source, os.path.join(cand, "acvram_kernels.so"))
     with open(os.path.join(cand, "empreinte.json"), "w", encoding="utf-8") as fh:
         json.dump({"src_sha": src_sha, "src_hash": src_hash, "archs": sorted(archs),
-                   "torch": torch.__version__, "cuda": str(torch.version.cuda)}, fh, indent=1)
+                   "torch": torch.__version__, "cuda": str(torch.version.cuda),
+                   "python": _abi_python()}, fh, indent=1)          # 266 e : l'ABI CPython qui a compilé le .so
     return cand
 
 
@@ -355,9 +356,18 @@ def compiler_precompile(dossier: str, archs, nvcc_ver=None) -> str:
     return _ecrire_empreinte(os.path.join(dossier, src_sha[:16]), so, src_sha, src_hash, _archs_des_drapeaux(flags_cuda))
 
 
-def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version: str, torch_cuda: str):
-    """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_noyaux_precompiles_240.py)."""
+def _abi_python() -> str:
+    """« cpython-314-x86_64-linux-gnu » : l'ABI CPython courante (SOABI) — un .so compilé sous une autre ne se charge pas."""
+    import sysconfig
+    return str(sysconfig.get_config_var("SOABI") or "")
+
+
+def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version: str, torch_cuda: str, python_abi: str | None = None):
+    """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_noyaux_precompiles_240.py).
+    266 e : l'empreinte porte l'ABI CPython (`python`) ; un .so d'une autre ABI (Flatpak Python 3.14 contre un .so cp312 de la
+    CI) est refusé ici, avec sa raison, au lieu d'échouer à l'import puis de tomber en silence sur la compilation JIT."""
     import json
+    python_abi = python_abi or _abi_python()
     src_sha = hashlib.sha256(src_octets).hexdigest()
     cand = os.path.join(dossier, src_sha[:16])
     man, so = os.path.join(cand, "empreinte.json"), os.path.join(cand, "acvram_kernels.so")
@@ -372,6 +382,8 @@ def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version:
         return None, "empreinte.json : src_sha différent de la source courante (autre version du .cu)"
     if e.get("torch") != torch_version or e.get("cuda") != str(torch_cuda):
         return None, f"précompilé pour torch {e.get('torch')} / CUDA {e.get('cuda')}, ici {torch_version} / {torch_cuda}"
+    if e.get("python") != python_abi:
+        return None, f"précompilé pour l'ABI Python {e.get('python') or 'non renseignée'}, ici {python_abi} (266 e)"
     archs = set(e.get("archs") or [])
     for a, b in caps:
         if not ({f"sm_{a}{b}", f"sm_{a}{b}f", f"sm_{a}{b}a"} & archs):
@@ -993,6 +1005,20 @@ def seuil_gemv_int8() -> int:
 _PREFILL_INT8 = os.environ.get("ACVRAM_PREFILL_INT8", "cublas")
 if _PREFILL_INT8 not in ("bf16", "a8", "cublas"):
     raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8 | cublas")
+# Pièce 260 (opt-in, HORS BIT) : les int8 ré-encodés du fp8 (manifeste « origine: fp8 ») sont exclus du chemin cublas
+# depuis la 139, parce que leur copie signée persistante coûtait 10,6 Go (OOM). La 201 a rendu cette copie transitoire :
+# la raison de l'exclusion est tombée. cublas = W8A8 int8 (A8 par jeton fusionnée, gemm_w8a8) comme les -qkvo-i8c ;
+# bf16 (défaut) = déquant bf16 de la 139.
+_I8C_FP8_PREFILL = os.environ.get("ACVRAM_I8C_FP8_PREFILL", "bf16")
+if _I8C_FP8_PREFILL not in ("bf16", "cublas"):
+    raise ValueError(f"ACVRAM_I8C_FP8_PREFILL={_I8C_FP8_PREFILL!r} : attendu bf16 | cublas")
+# Pièce 260x (AU BIT) : copie signée q − 128 du chemin cublas par UN xor (q ^ 0x80 relu en int8 : 1 octet lu, 1 écrit) au
+# lieu de l'aller-retour int16 (trois noyaux, ≈ 10 octets de trafic par poids) — la copie est transitoire depuis la 201,
+# donc payée à chaque appel hors portée. Micro-banc 260 : qkv 10240×5120 à n = 624, 472 → 196 µs, sortie identique.
+# int16 = témoin (l'ancien calcul).
+_I8C_COPIE = os.environ.get("ACVRAM_I8C_COPIE", "xor")
+if _I8C_COPIE not in ("xor", "int16"):
+    raise ValueError(f"ACVRAM_I8C_COPIE={_I8C_COPIE!r} : attendu xor | int16")
 
 
 def _i8c_eligible(t: INT8Tensor) -> bool:
@@ -1006,6 +1032,14 @@ def _i8c_eligible(t: INT8Tensor) -> bool:
               and t.zeros.shape[1] == 1 and bool((t.zeros == 128).all()))
         t.__dict__["_i8c"] = ok
     return ok
+
+
+def copie_signee(q: torch.Tensor) -> torch.Tensor:
+    """uint8 à zéro 128 → int8 signé q − 128, au bit : (q ^ 0x80) relu en int8 vaut q − 128 sur les 256 valeurs
+    (tests/test_i8c_copie_260x.py) ; ACVRAM_I8C_COPIE=int16 garde l'ancien calcul (témoin)."""
+    if _I8C_COPIE == "int16":
+        return (q.to(torch.int16) - 128).to(torch.int8).contiguous()
+    return q.contiguous().view(torch.int8).bitwise_xor(-128)
 
 
 def _i8c_poids(t: INT8Tensor):
@@ -1024,7 +1058,7 @@ def _i8c_poids(t: INT8Tensor):
     w = c.get(cle) if c is not None else None
     if w is None:
         CHEMINS_INT8["i8c_fabrique"] += 1
-        w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
+        w = copie_signee(t.qweight)
         if c is not None:
             c[cle] = w
     else:

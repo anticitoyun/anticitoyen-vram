@@ -33,6 +33,8 @@ def url_de_la_roue(fichier: str, index: str, sha256: str | None = None, pypi: st
             # UA explicite : download-r2.pytorch.org (CDN des roues) refuse « Python-urllib » (403), pas les autres
             with urllib.request.urlopen(urllib.request.Request(base, headers={"User-Agent": "acvram-sources-torch/266b"}), timeout=60) as r:
                 return url_depuis_index(r.read().decode("utf-8", "replace"), base, fichier, sha256)
-        except (LookupError, OSError) as exc:
+        except (LookupError, OSError, ValueError) as exc:
+            # ValueError = même nom de roue mais autre sha256 sur cet index (triton 3.8.0 existe sur l'index PyTorch ET sur PyPI,
+            # deux fichiers différents ; pip a pris l'un des deux) : on cherche l'index qui porte CE fichier, on ne renonce pas
             erreurs.append(f"{base} : {exc}")
     raise LookupError(" ; ".join(erreurs))

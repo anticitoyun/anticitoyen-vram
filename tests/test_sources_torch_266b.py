@@ -56,3 +56,24 @@ def test_une_roue_absente_ou_une_somme_differente_sont_refusees():
         url_depuis_index(PAGE_PYTORCH, "https://download.pytorch.org/whl/cu130/torch/", "torch-9.9.9-cp312-cp312-manylinux_2_28_x86_64.whl")
     with pytest.raises(ValueError):
         url_depuis_index(PAGE_PYTORCH, "https://download.pytorch.org/whl/cu130/torch/", ROUE, "0" * 64)
+
+
+def test_meme_nom_autre_somme_on_passe_a_l_index_suivant(monkeypatch):
+    """266 i : triton-3.8.0 existe sur l'index PyTorch ET sur PyPI avec deux sha256 ; l'URL retenue est celle dont la somme
+    est celle de la roue téléchargée, pas la première venue (témoin : la première seule → ValueError)."""
+    import roue_url
+    sha_pypi = hashlib.sha256(b"pypi").hexdigest(); sha_torch = hashlib.sha256(b"torch").hexdigest()
+    roue = "triton-3.8.0-cp314-cp314-manylinux_2_28_x86_64.whl"
+    pages = {"https://download.pytorch.org/whl/cu130/triton/": f'<a href="/whl/cu130/{roue}#sha256={sha_torch}">{roue}</a>',
+             "https://pypi.org/simple/triton/": f'<a href="https://files.pythonhosted.org/p/{roue}#sha256={sha_pypi}">{roue}</a>'}
+
+    class _R:
+        def __init__(self, h): self.h = h.encode()
+        def read(self): return self.h
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(roue_url.urllib.request, "urlopen", lambda req, timeout=60: _R(pages[req.full_url]))
+    assert roue_url.url_de_la_roue(roue, "https://download.pytorch.org/whl/cu130", sha_pypi).startswith("https://files.pythonhosted.org/")
+    assert roue_url.url_de_la_roue(roue, "https://download.pytorch.org/whl/cu130", sha_torch).startswith("https://download.pytorch.org/")
+    with pytest.raises(LookupError):
+        roue_url.url_de_la_roue(roue, "https://download.pytorch.org/whl/cu130", "0" * 64)

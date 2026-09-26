@@ -15,7 +15,8 @@ SCRIPT = RACINE / "outils" / "verifier-release.sh"
 V = "0.7.0"
 
 
-def _release_simulee(dossier: pathlib.Path, *, sans_rpm: bool = False, pkgbuild_skip: bool = False, sommes: bool = True) -> None:
+def _release_simulee(dossier: pathlib.Path, *, sans_rpm: bool = False, pkgbuild_skip: bool = False, sommes: bool = True,
+                     ancien_bundle: bool = False) -> None:
     dossier.mkdir(parents=True)
     # .deb réel (dpkg-deb -b d'une arborescence minimale) : --info et --contents doivent le lire
     racine = dossier / "deb-src"; (racine / "DEBIAN").mkdir(parents=True); (racine / "usr" / "bin").mkdir(parents=True)
@@ -38,7 +39,11 @@ def _release_simulee(dossier: pathlib.Path, *, sans_rpm: bool = False, pkgbuild_
     if not sans_rpm:
         (dossier / f"acvram-{V}-1.fc42.noarch.rpm").write_bytes(b"rpm simule")
         (dossier / f"acvram-{V}-1.fc42.src.rpm").write_bytes(b"srpm simule")
-    (dossier / f"acvram-{V}.flatpak").write_bytes(b"flatpak simule")
+    # 266 i : le Flatpak est un .flatpakref (dépôt OSTree gh-pages + extra-data), plus un bundle
+    (dossier / f"acvram-{V}.flatpakref").write_text("[Flatpak Ref]\nName=io.github.anticitoyen.acvram\nBranch=master\n"
+                                                    "Url=https://anticitoyun.github.io/anticitoyen-vram/flatpak\n", encoding="utf-8")
+    if ancien_bundle:
+        (dossier / f"acvram-{V}.flatpak").write_bytes(b"bundle casse de la v0.7.0")
     with zipfile.ZipFile(dossier / f"translations-{V}.zip", "w") as z:
         z.writestr("fr.json", "{}"); z.writestr("en.json", "{}")
     if sommes:                                     # 259 b : SHA256SUMS comme le job `sommes` (sha256sum -- *)
@@ -68,7 +73,7 @@ def test_release_complete_est_tenue(hors_tmp):
     r = _lancer(hors_tmp / "complete")
     assert r.returncode == 0 and "VERDICT: TENU" in r.stdout, r.stdout + r.stderr
     for attendu in ("deb : Package acvram", f"deb : Version {V}", "deb : usr/bin/acvram présent", f"aur : pkgver={V}",
-                    "aur : sha256sums renseigné", "translations : 2 fichiers", "flatpak : acvram-0.7.0.flatpak",
+                    "aur : sha256sums renseigné", "translations : 2 fichiers", "flatpak : acvram-0.7.0.flatpakref",
                     "sha256 : SHA256SUMS vérifié"):
         assert attendu in r.stdout, attendu
     assert "MANQUE" not in r.stdout and "FAUX " not in r.stdout and "SAUTÉ   sha256" not in r.stdout
@@ -103,3 +108,32 @@ def test_release_incomplete_est_fausse(hors_tmp):
 def test_le_script_refuse_tmp():
     r = subprocess.run(["bash", str(SCRIPT), f"v{V}", "--simule", "/tmp/acvram-259"], capture_output=True, text=True)
     assert r.returncode == 64 and "/tmp" in r.stderr
+
+
+@pytest.mark.skipif(subprocess.run(["which", "dpkg-deb"], capture_output=True).returncode != 0, reason="dpkg-deb requis")
+def test_l_ancien_bundle_encore_joint_est_faux(hors_tmp):
+    """Témoin 266 i : le job doit retirer acvram-<V>.flatpak (bundle > 2 Gio, sans extra-data) ; s'il reste, FAUX."""
+    _release_simulee(hors_tmp / "bundle", ancien_bundle=True)
+    r = _lancer(hors_tmp / "bundle")
+    assert r.returncode == 1 and "FAUX    flatpak : l'ancien bundle" in r.stdout, r.stdout
+
+
+def test_259d_un_fichier_sur_disque_hors_release_n_est_pas_juge(hors_tmp):
+    """259 d : le dossier de téléchargement est un cache. Un fichier d'un téléchargement précédent (l'ancien bundle) n'est
+    pas « joint » : ce que la release joint, c'est liste-release.txt. Hors --simule, l'intrus va dans hors-release/."""
+    texte = SCRIPT.read_text(encoding="utf-8")
+    assert 'liste-release.txt' in texte and 'hors-release' in texte
+    assert 'grep -qxF "acvram-${V}.flatpak" "$DOSSIER/liste-release.txt"' in texte, "le bundle se juge sur la liste"
+    assert 'mv -f "$f" "$DOSSIER/hors-release/"' in texte and "rm " not in texte.split("hors-release/")[1][:200]
+    # en --simule le dossier fait foi : le témoin 266 i (bundle présent → FAUX) reste rouge
+    _release_simulee(hors_tmp / "b2", ancien_bundle=True)
+    assert _lancer(hors_tmp / "b2").returncode == 1
+
+
+def test_259d_l_app_deja_installee_est_retiree_avant_l_install():
+    """259 d : --reinstall ne traverse pas les remotes (« already installed » depuis acvram-origin quand le .flatpakref
+    propose acvram) — l'installation dédiée est vidée de l'app avant install --from."""
+    texte = SCRIPT.read_text(encoding="utf-8")
+    i = texte.index('flatpak uninstall --user --noninteractive -y "$APP"')
+    assert i < texte.index('flatpak install --user --noninteractive -y --reinstall --from')
+    assert 'flatpak info --user "$APP" >/dev/null 2>&1 &&' in texte[i - 80:i]

@@ -127,7 +127,14 @@ Vagy csomagból: minden [GitHub-kiadáshoz](https://github.com/anticitoyun/antic
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (a neveket az `rpmbuild` állítja elő, nem rögzítettek) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (vagy `rpmbuild --rebuild *.src.rpm` a `.src.rpm` fájlból) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
+
+Telepítés előtt ellenőrizze a letöltött fájlt a kiadáshoz csatolt összegek alapján (`SHA256SUMS`, az összes többi fájl megléte után kerül közzétételre):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 Pip csomagként nem érhető el (nem készül wheel): a `pip install -e '.[dev]'` egy forrásklónból telepít, akárcsak a `./install.sh`.
 

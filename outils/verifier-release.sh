@@ -7,7 +7,9 @@
 #     outils/verifier-release.sh v0.7.0                       # télécharge (gh) dans ~/.cache/acvram/releases/v0.7.0
 #     outils/verifier-release.sh v0.7.0 --dossier /chemin      # ailleurs (jamais /tmp : un rejeu doit retrouver les fichiers)
 #     outils/verifier-release.sh v0.7.0 --simule /dossier      # release simulée : pas de gh, les fichiers sont déjà là
-#     ... --sans-flatpak                                       # saute l'installation Flatpak (longue : runtime GNOME)
+#     ... --sans-flatpak                                       # saute le bras Flatpak (installation ET doctor)
+#     ... --flatpak-installer                                   # bras Flatpak : installation seule (≈ 3 Go tirés par extra-data), SANS carte
+#     ... --flatpak-doctor                                      # bras Flatpak : doctor seul, installation déjà faite — sous carte.sh
 #
 # Sortie : une ligne par contrôle, `OK` / `MANQUE` / `FAUX` / `SAUTÉ`, puis `VERDICT: TENU` (code 0) ou `FAUX` (1).
 # Ce que ce script NE prouve PAS : que le .deb s'installe (dpkg-deb --info/--contents seulement, pas d'installation),
@@ -22,6 +24,8 @@ while [ $# -gt 0 ]; do
     --dossier) DOSSIER=$2; shift 2 ;;
     --simule) SIMULE=$2; shift 2 ;;
     --sans-flatpak) FLATPAK=0; shift ;;
+    --flatpak-installer) FLATPAK=installer; shift ;;
+    --flatpak-doctor) FLATPAK=doctor; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     v*) TAG=$1; shift ;;
     *) echo "argument inconnu : $1" >&2; exit 64 ;;
@@ -46,6 +50,7 @@ if [ -z "$SIMULE" ]; then
        --jq '"release " + .tagName + (if .isDraft then " (BROUILLON)" else "" end) + " : " + (.assets | length | tostring) + " fichiers (gh)"' \
        || { faux "release $TAG introuvable sur $DEPOT"; echo "VERDICT: FAUX"; exit 1; }
     gh release download "$TAG" --repo "$DEPOT" --dir "$DOSSIER" --clobber || faux "gh release download"
+    gh release view "$TAG" --repo "$DEPOT" --json assets --jq '.assets[].name' > "$DOSSIER/liste-release.txt"
   else
     # sans jeton : api.github.com (60 requêtes/h) et browser_download_url — un jeton ne transite jamais par ici
     python3 - "$DEPOT" "$TAG" "$DOSSIER" <<'PY' || { faux "release $TAG introuvable sur $DEPOT (API publique)"; echo "VERDICT: FAUX"; exit 1; }
@@ -54,6 +59,7 @@ depot, tag, dossier = sys.argv[1:4]
 with urllib.request.urlopen(f"https://api.github.com/repos/{depot}/releases/tags/{tag}", timeout=30) as r:
     d = json.load(r)
 print(f"release {d['tag_name']}{' (BROUILLON)' if d.get('draft') else ''} : {len(d['assets'])} fichiers (API publique)")
+(pathlib.Path(dossier) / "liste-release.txt").write_text("".join(a["name"] + "\n" for a in d["assets"]), encoding="utf-8")
 for a in d["assets"]:
     cible = pathlib.Path(dossier) / a["name"]
     with urllib.request.urlopen(a["browser_download_url"], timeout=600) as r, open(cible, "wb") as f:
@@ -67,10 +73,22 @@ PY
   fi
 fi
 echo "dossier : $DOSSIER"
+# 259 d : le dossier est un cache — un fichier d'un téléchargement PRÉCÉDENT (l'ancien bundle de la v0.7.0, un .deb
+# refait) y reste et se ferait juger comme joint. Ce qui est joint, c'est liste-release.txt ; le reste va dans
+# hors-release/ (déplacé, jamais effacé). En --simule, le dossier fait foi.
+if [ -z "$SIMULE" ] && [ -s "$DOSSIER/liste-release.txt" ]; then
+  for f in "$DOSSIER"/*; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in liste-release.txt|*.log|*.txt) continue ;; esac
+    if ! grep -qxF "$(basename "$f")" "$DOSSIER/liste-release.txt"; then
+      mkdir -p "$DOSSIER/hors-release" && mv -f "$f" "$DOSSIER/hors-release/" && echo "HORS    $(basename "$f") : sur disque, pas dans la release — déplacé dans hors-release/"
+    fi
+  done
+fi
 
 # ---- 2. présence et nom de chaque fichier annoncé par release.yml (un seul de chaque) ---------------------------
 # job deb → acvram_<V>_amd64.deb ; rpm → acvram-<V>-*.noarch.rpm + acvram-<V>-*.src.rpm ; aur → aur-<V>.tar.gz ;
-# flatpak → acvram-<V>.flatpak ; translations → translations-<V>.zip
+# flatpak → acvram-<V>.flatpakref (266 i : dépôt OSTree gh-pages, plus de bundle) ; translations → translations-<V>.zip
 TROUVE=""
 un_seul() {   # un_seul <libellé> <motif glob> → TROUVE = le chemin (vide si absent ou ambigu), une ligne OK/MANQUE/FAUX
   local lib=$1 motif=$2; local -a f=( $DOSSIER/$motif ); TROUVE=""
@@ -82,7 +100,8 @@ un_seul "deb" "acvram_${V}_amd64.deb";          DEB=$TROUVE
 un_seul "rpm" "acvram-${V}-*.noarch.rpm";       RPM=$TROUVE
 un_seul "src.rpm" "acvram-${V}-*.src.rpm";      SRPM=$TROUVE
 un_seul "aur" "aur-${V}.tar.gz";                AUR=$TROUVE
-un_seul "flatpak" "acvram-${V}.flatpak";        FLAT=$TROUVE
+un_seul "flatpak" "acvram-${V}.flatpakref";     FLAT=$TROUVE
+{ [ -n "$SIMULE" ] && [ -e "$DOSSIER/acvram-${V}.flatpak" ] || { [ -s "$DOSSIER/liste-release.txt" ] && grep -qxF "acvram-${V}.flatpak" "$DOSSIER/liste-release.txt"; }; } && faux "flatpak : l'ancien bundle acvram-${V}.flatpak est encore joint (266 i : à retirer, > 2 Gio et sans extra-data)"
 un_seul "translations" "translations-${V}.zip"; TRAD=$TROUVE
 
 # ---- 3. sommes publiées (si release.yml en produit) ; sinon les sommes calculées, pour le registre ---------------
@@ -123,10 +142,15 @@ if [ -n "$AUR" ]; then
   printf '%s\n' "$PB" | grep -q "^sha256sums=('SKIP')" && faux "aur : sha256sums=('SKIP') non renseigné" || ok "aur : sha256sums renseigné"
 fi
 
-# ---- 6. RPM : nom seulement (rpm absent sur ce poste) ; sinon rpm -qip -------------------------------------------
+# ---- 6. RPM : nom seulement (rpm absent sur ce poste, ou release --simule) ; sinon rpm -qip ----------------------
+# Pièce 267c (CI GitHub, `rpm` présent sur le runner mais absent sur le poste de dev) : sous --simule (cette pièce
+# 259, aucune release réelle) les .rpm sont de faux octets, jamais construits par rpmbuild (contrairement au .deb
+# ci-dessus, bâti pour de vrai par dpkg-deb) — `rpm -qip` les rendait légitimement illisibles, uniquement là où
+# `rpm` se trouve installé. Un poste sans `rpm` masquait ce défaut par accident, jamais par conception.
 for r in "$RPM" "$SRPM"; do
   [ -n "$r" ] || continue
-  if command -v rpm >/dev/null; then rpm -qip "$r" >/dev/null 2>&1 && ok "rpm : $(basename "$r") lisible" || faux "rpm : $(basename "$r") illisible"
+  if [ -n "$SIMULE" ]; then saute "rpm : $(basename "$r") — release simulée, nom et taille seulement"
+  elif command -v rpm >/dev/null; then rpm -qip "$r" >/dev/null 2>&1 && ok "rpm : $(basename "$r") lisible" || faux "rpm : $(basename "$r") illisible"
   else saute "rpm : $(basename "$r") — rpm absent, nom et taille seulement"; fi
 done
 
@@ -136,21 +160,33 @@ if [ -n "$TRAD" ]; then
   [ "${N:-0}" -gt 0 ] && ok "translations : $N fichiers" || faux "translations : archive vide ou illisible"
 fi
 
-# ---- 8. Flatpak : installation utilisateur SÉPARÉE, puis acvram doctor dans le bac à sable ------------------------
+# ---- 8. Flatpak : installation par le .flatpakref (dépôt OSTree + extra-data) dans une installation utilisateur SÉPARÉE,
+#         puis acvram doctor dans le bac à sable — séparables (--flatpak-installer sans carte, --flatpak-doctor sous carte.sh)
 if [ -n "$FLAT" ]; then
-  if [ "$FLATPAK" = 0 ]; then saute "flatpak : installation non demandée (--sans-flatpak)"
+  if [ "$FLATPAK" = 0 ]; then saute "flatpak : bras non demandé (--sans-flatpak)"
   elif ! command -v flatpak >/dev/null; then saute "flatpak : commande absente"
   else
     export FLATPAK_USER_DIR="$DOSSIER/flatpak-user"      # jamais ~/.local/share/flatpak : rien sur l'installation de l'utilisateur
     mkdir -p "$FLATPAK_USER_DIR"
-    flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
-    if flatpak install --user --noninteractive -y --bundle "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
-      ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1))"
-      if flatpak run --user --command=acvram "$APP" doctor >"$DOSSIER/flatpak-doctor.txt" 2>&1; then
+    grep -q '^GPGKey=' "$FLAT" && ok "flatpak : dépôt signé (GPGKey dans le .flatpakref)" || saute "flatpak : dépôt NON signé (pas de GPGKey) — --no-gpg-verify"
+    if [ "$FLATPAK" != doctor ]; then
+      flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
+      # --reinstall : un rejeu sur la même installation dédiée ne doit pas rendre FAUX pour « already installed » ;
+      # 259 d : --reinstall ne traverse pas les remotes (l'app posée par l'ancien bundle vient de acvram-origin, le
+      # .flatpakref propose acvram) → on retire d'abord ce qui est installé (installation dédiée : rien de l'utilisateur)
+      flatpak info --user "$APP" >/dev/null 2>&1 && flatpak uninstall --user --noninteractive -y "$APP" >/dev/null 2>&1
+      if flatpak install --user --noninteractive -y --reinstall --from "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
+        ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1)) — extra-data : $(flatpak run --user --command=sh "$APP" -c 'wc -l < /app/extra/apply_extra.ok' 2>/dev/null || echo '?') paquets dépaquetés"
+      else faux "flatpak : installation échouée (flatpak-install.log)"; tail -n5 "$DOSSIER/flatpak-install.log" | sed 's/^/        /'; fi
+    fi
+    if [ "$FLATPAK" != installer ]; then
+      # `flatpak run` garde le cwd de l'appelant ; lancé depuis le dépôt, acvram (_garde_arbre) refuse d'être importé depuis
+      # /app quand le cwd est dans un arbre acvram — le bac à sable se lance depuis le dossier de la release
+      if (cd "$DOSSIER" && flatpak run --user --command=acvram "$APP" doctor) >"$DOSSIER/flatpak-doctor.txt" 2>&1; then
         ok "flatpak : acvram doctor dans le bac à sable (flatpak-doctor.txt)"
-        grep -i -E 'noyau|kernel|précompil|precompil' "$DOSSIER/flatpak-doctor.txt" | head -n5 | sed 's/^/        /'
+        grep -i -E 'noyau|kernel|précompil|precompil|cuda' "$DOSSIER/flatpak-doctor.txt" | head -n6 | sed 's/^/        /'
       else faux "flatpak : acvram doctor a échoué (flatpak-doctor.txt)"; tail -n5 "$DOSSIER/flatpak-doctor.txt" | sed 's/^/        /'; fi
-    else faux "flatpak : installation échouée (flatpak-install.log)"; tail -n5 "$DOSSIER/flatpak-install.log" | sed 's/^/        /'; fi
+    fi
   fi
 fi
 

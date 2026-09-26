@@ -179,7 +179,51 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",   # inchangée (relevée à sec le 26/09)
     ),
+    "0.7.1": (                                                           # 0.7.0 + pièces 260/260x (272 : relues dans regime.py)
+        {                                                                # chaque valeur relue dans regime.py, pièce en commentaire)
+            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",
+            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048", "MLA_GLUE": "2",
+            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
+            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
+            "CPUS": "", "MLA_PREP_GRILLE": "1",
+            "SAMPLER_LENT": "0", "RAPATRIEMENT_FLUX": "0", "ETROITES_FORME": "",
+            "CAPTURE_MEM_MIN_MIO": "1024", "CAPTURE_DELAI_S": "120",
+            "MOE_TENSOR": "1", "MOE_TENSOR_FUSION": "1", "MOE_TENSOR_MIN_T": "8",
+            "GEMV_SPLITK": "1", "MOE_W13": "1", "MAX_GRAPHS": "64", "ATTN_REDUC_DEROULEE": "1",
+            # --- changés ou apparus depuis 0.6.38 ---
+            "GDN_AB": "auto",                                            # α/β GDN fusionnés dès 48 experts — 175/175b
+            "GDN_AB_FLUX": "1",                                          # β‖α sur un second flux pendant qkv‖gate — 194 b2 (au bit)
+            "GDN_QKV_GATE": "1",                                         # pile qkv‖gate 16384 × 5120 — 176
+            "GDN_CONV_FUSEE": "1", "GDN_RES_DIFFERE": "1", "GDN_PORTES_NOYAU": "1",   # GDN : conv fusée, résidu différé, portes noyau
+            "GDN_NORME_FUSEE": "1", "GDN_Z_BF16": "1", "GDN_ETAT_EN_PLACE": "1",       # GDN : norme fusée, z bf16, état en place (au bit)
+            "GDN_PREFILL_LOT": "0",                                      # LOT du préfill GDN : 0 = d'avant (164 étape 0 : levier à requalifier)
+            "NORME_REGISTRES": "1",                                      # rmsnorm en registres (au bit)
+            "ETROIT_CANAL": "1",                                         # étroit int8 K entier par canal (table) — 195 b (décision déléguée)
+            "INT8_TRANCHE": "",                                          # vide = 6 (défaut depuis la 187, au bit ; 16 = témoin d'avant)
+            "INT8_TRANCHE_PREFILL": "",                                  # 187 : découpage à N > 16, vide = d'avant
+            "MARLIN_PAR_LIGNE": "0",                                     # 209 À LA DEMANDE — 232 b : 229 (débit soutenu −15,3 %) contre 226 (salve +12,8 %), écart non expliqué ; la release garde l'ancien comportement
+            "ADMISSION_FENETRE_MS": "5",                                 # fenêtre d'admission du service — 179
+            "TRANCHE_COPIE_MIN": str(2**30),                             # copie int8 transitoire par tranche ≥ 1 Gio — 201 (3)
+            "DEPAQ_PARTAGE": "1",                                        # .so du port Marlin par empreinte des sources — 161
+            "DEPAQUETAGE": "auto",                                       # dépaquetage Marlin → bf16 : cuda (v2) — 147 L3'
+            "PROJ_MARLIN": "1", "PROJ_MARLIN_MIN_M": "2", "PROJ_MARLIN_MIN_NK": "1024",   # projections denses sur la disposition Marlin — 147/155/160
+            "PROJ_MARLIN_MIN_N": "2048", "PROJ_MARLIN_PORTEE": "denses", "PROJ_MARLIN_CAPACITE": "65536", "PROJ_MARLIN_DOUBLES": "",
+            "GEMV_MARLIN_V2": "1", "GEMV_MARLIN_TPB": "0", "GEMV_MARLIN_S": "0",          # GEMV dense Marlin v2 (134/147), TPB et S automatiques
+            "AWQ_TENSOR": "0",                                           # échelle AWQ dans le chemin tensor : opt-in (123 non fusionnée)
+            "PA_GQA": "1",                                               # attention paginée : K/V lus une fois par groupe GQA
+            "MTP_ETAT": "brut",                                          # état MTP brut — 201 (planificateur vision/MTP)
+            "INT8_GEMV_MAX": "80",                                       # seuil GEMV int8 hors portée de partage (inchangé)
+            "INT8_GEMV_MAX_PARTAGE": "16",
+            "I8C_FP8_PREFILL": "bf16",                                   # int8 ré-encodés du fp8 au préfill : bf16 ; cublas À LA DEMANDE — 260
+            "I8C_COPIE": "xor",                                          # copie signée q − 128 par xor, au bit — 260x                               # GEMV→GEMM int8 sous B′ à 16 — 243 (hors bit, KL tenue, +9,70 % servi)
+            # Marges KV (201/212 : `loader._KV_MARGE_MIN` 1 536 Mio, `_KV_MARGE_MIN_GDN` 3 072 Mio) sont des constantes du loader,
+            # pas des variables de régime : gelées par tests/test_marge_graphes_212.py.
+        },
+        "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",   # inchangée (relevée à sec le 26/09)
+    ),
 }
+# 0.7.2 (26/09, pièces 070 b/273) : doctor et paquets seulement — défauts et fin de ligne identiques à la 0.7.1.
+DEFAUTS_PAR_VERSION["0.7.2"] = DEFAUTS_PAR_VERSION["0.7.1"]
 
 
 def _var(nom):

@@ -22,4 +22,7 @@ jobs:
         env:
           ACVRAM_DISABLE_KERNELS: "1"
           ACVRAM_DISABLE_CPU_KERNELS: "1"
+          # Runner partagé à 4 cœurs : la garde de charge du conftest (load1 > nproc/4) refusait la suite
+          # complète avant tout test (26/09, load1 1,4). La CI est la suite finale : dérogation voulue.
+          ACVRAM_TESTS_SOUS_CHARGE: "1"
         run: pytest -q

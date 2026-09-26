@@ -127,7 +127,14 @@ O per paquet, un fitxer adjunt a cada [versió de GitHub](https://github.com/ant
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (noms generats per `rpmbuild`, no fixos) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (o `rpmbuild --rebuild *.src.rpm` des del `.src.rpm`) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
+
+Abans d'instal·lar, verifica el fitxer descarregat contra les sumes adjuntes a la release (`SHA256SUMS`, publicada un cop tots els altres fitxers hi són):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 Pip no es publica com a paquet (no hi ha wheel construïda): `pip install -e '.[dev]'` instal·la des d'un clon del codi font, igual que `./install.sh`.
 

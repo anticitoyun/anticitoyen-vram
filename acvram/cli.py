@@ -15,6 +15,7 @@ import argparse
 import gc
 import json
 import os
+import subprocess
 import sys
 import time
 from typing import Optional
@@ -26,6 +27,17 @@ from typing import Optional
 from . import __version__            # noqa: E402  (source unique de verite)
 
 
+
+# Réglages À LA DEMANDE qui changent la sortie : l'aide de `serve` les nomme avec leur prix mesuré, gain ET qualité.
+_EPILOGUE_SERVE = """\
+réglages à la demande (variables d'environnement, hors défaut, HORS BIT) :
+  ACVRAM_I8C_FP8_PREFILL=cublas   (pièce 260 ; défaut bf16)
+      int8 ré-encodés du fp8 (manifeste « origine: fp8 », ex. Qwen3.8-27B-unsloth-mixte-i8c, 233 tenseurs) servis
+      au préfill en W8A8 int8 (activation int8 par jeton, cuBLASLt) au lieu de la déquant bf16.
+      gain  : préfill par lot 8 × 78 −26,8 % (0,4105 → 0,3005 s), mur par lot −2,4 %.
+      prix  : KL de décodage max 0,215 (9 × le seuil admis), argmax 94,1 % (témoin 99,6 %),
+              PPL wiki-gptq +1,05 % (7,0273 → 7,1013). Non retenu au défaut : le gain au mur ne paie pas la qualité.
+"""
 
 # Variables d'environnement que le code lit REELLEMENT. Le 9/09/2026,
 # `MAXTOK=65536` a ete pose dans l'environnement d'une mesure de perplexite
@@ -257,6 +269,8 @@ VARIABLES_LUES = {
     "ACVRAM_DOUBLE_DISPOSITION_DIAG",
     "ACVRAM_DUMP_MOE",
     "ACVRAM_PREFILL_INT8",
+    "ACVRAM_I8C_FP8_PREFILL",   # pièce 260 : int8 d'origine fp8 au préfill (bf16 défaut | cublas)
+    "ACVRAM_I8C_COPIE",         # pièce 260x : copie signée xor (défaut, au bit) | int16 (témoin)
     "ACVRAM_PREFILL_DEQUANT",
     "ACVRAM_SANS_FUSION_BF16",
     "ACVRAM_SANS_PRECHARGE",
@@ -472,20 +486,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"           {row['device']:<8} {row['format']:<9} -> "
               f"{' > '.join(row['backends'])}")
 
-    # (module importe, paquet pip) : PIL s'importe ainsi mais s'installe « pillow ».
-    # transformers + pillow sont l'extra vision, inclus par defaut par install.sh
-    # et le .deb : leur absence est un ECHEC, pas une alerte (la tour de vision
-    # echoue au chargement sans eux — trou P3 du 21/09).
-    for mod, paquet in (("safetensors", "safetensors"), ("fastapi", "fastapi"),
-                        ("uvicorn", "uvicorn"), ("tokenizers", "tokenizers"),
-                        ("jinja2", "jinja2"), ("transformers", "transformers"),
-                        ("PIL", "pillow")):
-        try:
-            __import__(mod)
-            print(f"  {green('ok')}    {mod}")
-        except ImportError:
-            ok = False
-            print(f"  {red('ECHEC')} {mod} est absent (pip install {paquet})")
+    ok = _doctor_modules() and ok
 
     from .engine.gdn import gdn_available
     if gdn_available():
@@ -500,6 +501,40 @@ def cmd_doctor(args: argparse.Namespace) -> int:
               f"l'etage hote")
     _doctor_eco(cuda_ok=torch.cuda.is_available())
     return 0 if ok else 1
+
+
+# (module importe, paquet pip) : PIL s'importe ainsi mais s'installe « pillow ».
+_MODULES_REQUIS = (("safetensors", "safetensors"), ("fastapi", "fastapi"), ("uvicorn", "uvicorn"),
+                   ("tokenizers", "tokenizers"), ("jinja2", "jinja2"))
+# Extras de pyproject : optionnels, donc une ALERTE et non un ECHEC (273, decision chef du 26/09 — renverse le
+# 21/09 « trou P3 » qui les mettait en ECHEC : l'utilisateur de .deb ou de pip sans multimodal ne doit pas voir un
+# doctor rouge ; un modele multimodal sans vision echoue toujours au chargement, en clair). Le Flatpak embarque vision.
+_EXTRAS = {"vision": (("transformers", "transformers"), ("PIL", "pillow"))}
+
+
+def _doctor_modules() -> bool:
+    """Lignes ok/ECHEC des modules requis, ok/alerte par extra ; False si un REQUIS manque."""
+    ok = True
+    for mod, paquet in _MODULES_REQUIS:
+        try:
+            __import__(mod)
+            print(f"  {green('ok')}    {mod}")
+        except ImportError:
+            ok = False
+            print(f"  {red('ECHEC')} {mod} est absent (pip install {paquet})")
+    for extra, mods in _EXTRAS.items():
+        absents = []
+        for mod, paquet in mods:
+            try:
+                __import__(mod)
+            except ImportError:
+                absents.append(paquet)
+        if absents:
+            print(f"  {yellow('alerte')} {extra} indisponible ({', '.join(absents)} absent) : "
+                  f"pip install 'acvram[{extra}]'")
+        else:
+            print(f"  {green('ok')}    {extra} ({', '.join(m for m, _ in mods)})")
+    return ok
 
 
 def _doctor_eco(cuda_ok: bool) -> None:
@@ -1281,7 +1316,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "09.md). Defaut faux")
     cv.set_defaults(func=cmd_convert)
 
-    sv = sub.add_parser("serve", help="lance le serveur compatible OpenAI")
+    sv = sub.add_parser("serve", help="lance le serveur compatible OpenAI",
+                        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=_EPILOGUE_SERVE)
     sv.add_argument("model", help="repertoire de modele converti")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)

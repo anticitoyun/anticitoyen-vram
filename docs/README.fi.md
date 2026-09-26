@@ -127,7 +127,14 @@ Tai pakettina, jolloin kukin tiedosto on liitetty jokaiseen [GitHub-julkaisuun](
 | Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
 | Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nimet muodostaa `rpmbuild`, eivätkä ne ole kiinteitä) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (tai `rpmbuild --rebuild *.src.rpm` lähtien `.src.rpm`-tiedostosta) |
-| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+| Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
+
+Ennen asennusta, tarkista ladattu tiedosto julkaisuun liitettyjä tarkistussummia vasten (`SHA256SUMS`, julkaistaan kun kaikki muut tiedostot ovat läsnä):
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 Pip-pakettia ei julkaista (valmista wheel-pakettia ei rakenneta): `pip install -e '.[dev]'` asentaa lähdekoodin kloonista, samoin kuin `./install.sh`.
 
