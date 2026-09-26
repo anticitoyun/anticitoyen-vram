@@ -73,7 +73,7 @@ Suunniteltu tietylle koneelle:
 ```
 RTX 5090     32 Gt   ~1790 Gt/s     NVFP4
 RTX 3080 Ti  12 Gt    ~912 Gt/s     INT4
-Isännän DDR5 96 Gt   PCIe:n tai DDR:n rajoittama
+Isännän DDR5   96 Gt   PCIe:n tai DDR:n rajoittama
 ```
 
 ---
@@ -275,7 +275,7 @@ Kaksi näistä mittauksista tehtyä havaintoa muuttivat oletusarvoja:
 
 <a id="resultats"></a>
 
-## Mitatut tulokset (22.9.2026, RTX 5090 400 W:ssa, ≥ 20 s ikkuna energiamittarilla)
+## Mitatut tulokset (22.9.2026, RTX 5090, 400 W:ssa, ≥ 20 s ikkuna energiamittarilla)
 
 Qwen3-Coder-30B-A3B NVFP4:ssä (asiantuntijat) + INT8:ssa (huomio, pää), sama protokolla kaikille moottoreille (`outils/`, yksi kortti, `energie.py`):
 

@@ -66,7 +66,7 @@ Egy konkrét géphez tervezve:
 | számítási mód | FP4 tenzormagok | dekvantálás FP16-ra a kernelben, FP16 tenzormagok |
 | KV gyorsítótár | INT8 | INT8 |
 
-32 GB VRAM 4,5 bit/súly mellett kb. **56 milliárd paramétert** fér el, szemben a BF16 16 milliárdjával. A két kártyán együtt ez nagyjából **78 milliárd rezidens paramétert** jelent, még mielőtt a gazdagép memóriájához nyúlnánk.
+32 GB VRAM 4,5 bit/súly mellett kb. **56 milliárd paramétert** fér el, szemben a BF16-ban elférő 16 milliárddal. A két kártyán együtt ez nagyjából **78 milliárd rezidens paramétert** jelent, még mielőtt a gazdagép memóriájához nyúlnánk.
 
 **A memória hierarchia, nem fal.** Három szint, és a tervező megméri, mibe kerül mindegyik, ahelyett hogy reménykedne, hogy a modell beleférjen:
 
@@ -275,7 +275,7 @@ E mérésekből két megállapítás változtatta meg az alapértelmezett érté
 
 <a id="resultats"></a>
 
-## Mért eredmények (2026.09.22, RTX 5090 400 W-on, ≥ 20 s ablak az energiamérőn)
+## Mért eredmények (2026.09.22, RTX 5090, 400 W-on, ≥ 20 s ablak az energiamérőn)
 
 Qwen3-Coder-30B-A3B NVFP4-ben (szakértők) + INT8-ban (figyelem, fej), ugyanaz a protokoll minden motorra (`outils/`, egy kártya, `energie.py`):
 
