@@ -12,11 +12,14 @@
   jetons répétés.** Ce mécanisme touche TOUT modèle servi avec ngram, dense compris — pas seulement les hybrides
   où le symptôme avait d'abord été mesuré. **Portée : toutes les versions 0.7.x servies avec la spéculation par
   défaut** (`ngram`, seul propositeur actif sans configuration explicite depuis leur sortie). **Défaut désormais
-  `none` pour TOUS les alias** ; `ngram` reste servable sur demande explicite (`--speculative ngram`) — le
-  correctif 277fix de poste5 est inclus, sa qualification reste en cours, avec un avertissement au démarrage qui
-  le dit. Tests cassants : `tests/test_speculation_hybride_283.py` (défaut none sur hybride ET non-hybride,
-  avertissement émis sur toute demande explicite de ngram, jamais sur le défaut ni sur `none` explicite).
-  `revue/poste5-piece277abis-verdict-26-09.md`.
+  `none` pour TOUS les alias** ; `ngram` reste servable sur demande explicite (`--speculative ngram`), avec un
+  avertissement au démarrage qui dit ce qui est VRAI dans les deux cas — que la 277fix de poste5 soit ou non
+  entrée dans cette version (son test Coder n'est pas encore tranché) : « bogue 277 (jetons répétés au passage
+  simple → spéculatif) ; sortie possiblement différente de --speculative none ; qualification en cours ». Tests
+  cassants : `tests/test_speculation_hybride_283.py` (défaut none sur hybride ET non-hybride, avertissement émis
+  sur toute demande explicite de ngram, jamais sur le défaut ni sur `none` explicite) et
+  `tests/test_ngram_pas_defaut_ailleurs_283.py` (audit des autres points d'entrée : `Engine`, CLI, API serveur,
+  GUI — aucun autre défaut ngram trouvé). `revue/poste5-piece277abis-verdict-26-09.md`.
 
 * **26/09/2026 — pièce 269 d (poste6, mesure 276, décision chef) : le guet d'admission est COUPÉ pour les alias
   vision ; inchangé en texte (défaut 1).** La 276 a mesuré le guet hors de son régime : en texte (Qwen3-Coder, b = 2/4/8,
