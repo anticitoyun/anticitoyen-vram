@@ -152,6 +152,11 @@ jobs:
   flatpak:
     needs: noyaux-precompiles
     runs-on: ubuntu-24.04
+    # 266 l : un seul job flatpak à la fois, tous runs confondus — le 26/09 les jobs des v0.7.1 et v0.7.2 poussaient
+    # gh-pages en concurrence, le dernier à finir gagnait le ref master quelle que soit sa version.
+    concurrency:
+      group: flatpak-gh-pages
+      cancel-in-progress: false
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -196,27 +201,7 @@ jobs:
           # 266 c : le répertoire de construction de flatpak-builder était `build` — `--force-clean` l'effaçait, et avec lui
           # build/noyaux (l'artefact des noyaux précompilés, source du module acvram-noyaux) : « Unable to get source file
           # 'build/noyaux' » sur la v0.7.0 relancée. Un répertoire à lui, hors de tout chemin lu par le manifeste.
-          flatpak-builder --user --force-clean --sandbox --repo=repo construction-flatpak io.github.anticitoyen.acvram.yml
-          # 266 i : plus de bundle (> 2 Gio avec la fermeture CUDA, et un bundle ne porte pas les extra-data) — le dépôt OSTree
-          # est publié sur gh-pages sous flatpak/ (seul ce dossier est touché ; précédent : le dépôt APT d'animematrix) et un
-          # .flatpakref (≈ 1 Ko) est joint à la release à sa place. GPG : signé si le secret FLATPAK_GPG_KEY existe, sinon
-          # non signé, dit à voix haute ici et dans la section Installer (--no-gpg-verify).
           V="${TAG#v}"; PAGES="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/flatpak"
-          SIGNE=0
-          if [ -n "${FLATPAK_GPG_KEY:-}" ]; then
-            printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
-            CLE=$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')
-            # le COMMIT doit être signé (pas seulement le résumé) : sans build-sign, « GPG verification enabled, but no signatures found »
-            flatpak build-sign --gpg-sign="$CLE" repo io.github.anticitoyen.acvram
-            flatpak build-update-repo --generate-static-deltas --gpg-sign="$CLE" repo
-            gpg --batch --export "$CLE" | base64 -w0 > cle.b64; SIGNE=1
-          else
-            echo "::warning::FLATPAK_GPG_KEY absent : dépôt Flatpak NON signé (installation avec --no-gpg-verify)"
-            flatpak build-update-repo --generate-static-deltas repo
-          fi
-          { printf '[Flatpak Ref]\nTitle=acvram\nName=io.github.anticitoyen.acvram\nBranch=master\nUrl=%s\n' "$PAGES"
-            printf 'SuggestRemoteName=acvram\nRuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo\nIsRuntime=false\n'
-            [ "$SIGNE" = 1 ] && printf 'GPGKey=%s\n' "$(cat cle.b64)"; } > "acvram-$V.flatpakref"
           # 266 j : le coureur n'a aucune identité git — tout commit (commit-tree compris) porte celle du bot Actions, pour ce
           # commit seulement (pas de git config). Sans elle, commit-tree rendait '' et `git branch gh-pages ''` tombait en 128.
           if ! git fetch origin gh-pages:gh-pages 2>/dev/null; then
@@ -225,11 +210,49 @@ jobs:
             git branch gh-pages "$RACINE"
           fi
           git worktree add pages gh-pages
-          rm -rf pages/flatpak && cp -a repo pages/flatpak && touch pages/.nojekyll
-          git -C pages add -A flatpak .nojekyll
-          # « rien à commettre » (rejeu à dépôt identique) n'est pas une faute ; un commit qui échoue, si.
-          git -C pages diff --cached --quiet || git -C pages -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -q -m "flatpak : dépôt $TAG"
-          git -C pages push origin gh-pages
+          # 266 l : le dépôt servi AMORCE `repo` (les commits et les deltas statiques s'accumulent, plus d'écrasement) et le
+          # ref master ne recule jamais : une release ancienne relancée après une plus récente ne touche pas au dépôt.
+          if packaging/flathub/ref-ne-recule-pas.sh "$V" pages/flatpak/VERSION; then CONSTRUIRE=1; else
+            CONSTRUIRE=0; echo "::warning::gh-pages sert une version plus récente que la $V : dépôt non touché, seul le .flatpakref est joint"; fi
+          if [ "$CONSTRUIRE" = 1 ]; then
+            [ -d pages/flatpak/objects ] && cp -a pages/flatpak repo
+            flatpak-builder --user --force-clean --sandbox --repo=repo construction-flatpak io.github.anticitoyen.acvram.yml
+          fi
+          # 266 i : plus de bundle (> 2 Gio avec la fermeture CUDA, et un bundle ne porte pas les extra-data) — le dépôt OSTree
+          # est publié sur gh-pages sous flatpak/ (seul ce dossier est touché ; précédent : le dépôt APT d'animematrix) et un
+          # .flatpakref (≈ 1 Ko) est joint à la release à sa place. GPG : signé si le secret FLATPAK_GPG_KEY existe, sinon
+          # non signé, dit à voix haute ici et dans la section Installer (--no-gpg-verify).
+          SIGNE=0
+          if [ -n "${FLATPAK_GPG_KEY:-}" ]; then
+            printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
+            CLE=$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')
+            gpg --batch --export "$CLE" | base64 -w0 > cle.b64; SIGNE=1
+            if [ "$CONSTRUIRE" = 1 ]; then
+              # le COMMIT doit être signé (pas seulement le résumé) : sans build-sign, « GPG verification enabled, but no signatures found »
+              flatpak build-sign --gpg-sign="$CLE" repo io.github.anticitoyen.acvram
+              # --prune-depth=1 : le commit précédent reste (son delta vers le nouveau sert la mise à jour), les plus vieux partent —
+              # gh-pages ne doit pas grossir d'un dépôt complet par version (Pages : 1 Gio)
+              flatpak build-update-repo --generate-static-deltas --prune --prune-depth=1 --gpg-sign="$CLE" repo
+            fi
+          else
+            echo "::warning::FLATPAK_GPG_KEY absent : dépôt Flatpak NON signé (installation avec --no-gpg-verify)"
+            [ "$CONSTRUIRE" = 1 ] && flatpak build-update-repo --generate-static-deltas --prune --prune-depth=1 repo
+          fi
+          { printf '[Flatpak Ref]\nTitle=acvram\nName=io.github.anticitoyen.acvram\nBranch=master\nUrl=%s\n' "$PAGES"
+            printf 'SuggestRemoteName=acvram\nRuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo\nIsRuntime=false\n'
+            [ "$SIGNE" = 1 ] && printf 'GPGKey=%s\n' "$(cat cle.b64)"; } > "acvram-$V.flatpakref"
+          if [ "$CONSTRUIRE" = 1 ]; then
+            mkdir -p repo && echo "$V" > repo/VERSION      # la version que sert le ref master, lue par ref-ne-recule-pas.sh
+            rm -rf pages/flatpak && cp -a repo pages/flatpak && touch pages/.nojekyll
+            git -C pages add -A flatpak .nojekyll
+            # 266 l : gh-pages est republiée en UN commit orphelin (commit-tree sans parent, push --force de cette branche
+            # seule) — l'historique OSTree vit dans flatpak/ (deltas, prune-depth), pas dans git : sinon chaque version
+            # ajoute ≈ 100 Mio d'objets à l'historique git et le dépôt GitHub dépasse vite ses limites.
+            ARBRE=$(git -C pages write-tree)
+            NOUVEAU=$(git -C pages -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree -m "flatpak : dépôt $TAG" "$ARBRE")
+            [ -n "$NOUVEAU" ] || { echo "gh-pages : commit-tree n'a rendu aucun sha" >&2; exit 1; }
+            git push --force origin "$NOUVEAU:refs/heads/gh-pages"
+          fi
           gh release delete-asset "$TAG" "acvram-$V.flatpak" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true   # l'ancien bundle cassé (v0.7.0)
           gh release upload "$TAG" "acvram-$V.flatpakref" --clobber --repo "$GITHUB_REPOSITORY"
           flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest io.github.anticitoyen.acvram.yml | tee lint-manifest.txt || true
