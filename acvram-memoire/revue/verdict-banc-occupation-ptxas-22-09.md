@@ -1,0 +1,12 @@
+# banc-etroites-occupation --ptxas (poste1) — ÉCHEC silencieux, cause exacte trouvée à sec — 22/09 (poste2)
+
+* instrument : `outils/gpu/mesure/banc-etroites-occupation.py --ptxas --json`, à sec (`CUDA_VISIBLE_DEVICES=0` sans `carte.sh`, aucun verrou pris — le compilateur voit la carte sans la mesurer)
+* commit : main à jour (`04683f8b`)
+* mesuré : les 12 combinaisons (qkv/o × warps{2,4,8} × stages{2,3}) rendent **toutes** `registres:0, spills:0, shared:0, blocs_par_sm:32` — valeurs identiques et implausibles (aucun GEMM triton ne tient à 0 registre).
+* cause exacte (vérifiée par inspection directe de l'objet compilé, Triton 3.8.0) : `ptxas_des_formes()` lit `k_.cache` (`JITFunction.cache`, ligne ~121) — **cet attribut n'existe plus sur Triton 3.8.0** (`AttributeError` si on l'appelle sans repli ; le `getattr(..., {})` du script avale l'erreur silencieusement, `meta` reste vide, `compile_` reste `None`, tous les `getattr(compile_, "n_regs", 0)` retombent sur leur défaut 0). Le vrai chemin sur cette version : `JITFunction.device_caches[dev_id][0]` est le dict `{signature_str: CompiledKernel}` ; `CompiledKernel.n_regs`, `.n_spills` et `.metadata.shared` existent bien et fonctionnent (le reste du code, une fois `compile_` non-`None`, est correct).
+* **point de contrôle réel obtenu manuellement** (qkv, 4 warps, 2 stages) : `n_regs=139, n_spills=0, shared=12544 o` → `occupation(139, 12544, 4)` = **3 blocs/SM par les registres, 18 par la mémoire partagée → 3 blocs/SM retenus, 12 warps actifs** (registre-bound), très loin du `32 blocs/128 warps` faux rendu par le script cassé.
+* verdict : **ÉCHEC silencieux — cause nommée et localisée précisément** (une ligne à corriger : traversée de `device_caches` au lieu de `cache`). Le point de contrôle manuel confirme que qkv/4w2s est register-bound à 12 warps actifs, cohérent avec l'écart TRT-LLM sur les étroites nommé dans `poste1-ecart-trtllm-22-09.md` §1 (occupation, pas arithmétique).
+* durée : 0 min de carte (compilation seule, pas de mesure)
+
+## Suite
+Une ligne à corriger dans `ptxas_des_formes()` : remplacer la traversée `k_.cache` par `k_.device_caches[dev].values()` (aplatir le dict interne pour obtenir les `CompiledKernel`). Une fois corrigé, les 12 combinaisons donneront de vrais chiffres — je n'ai pas balayé les 12 moi-même (pas mon fichier, correctif d'une ligne à poste1). Je reste disponible pour le balayage warps×étages à la carte rendue par poste3.

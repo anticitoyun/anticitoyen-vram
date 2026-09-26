@@ -1,0 +1,68 @@
+# Pièce 241 — copie documentaire des deux jobs tels qu'ils sont dans .github/workflows/release.yml (qui fait foi ; la garde
+# tests/test_noyaux_precompiles_ci_241.py lit release.yml dès qu'il porte le producteur).
+# Produit build/noyaux (noyaux CUDA précompilés, un sous-dossier par empreinte de source) dans un conteneur CUDA SANS carte,
+# puis construit le Flatpak hors ligne et le lint. La garde tests/test_noyaux_precompiles_ci_241.py vérifie que ce fichier
+# et le manifeste s'accordent avec ce que `python -m acvram.kernels.precompiles` produit.
+  noyaux-precompiles:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.0.1-devel-ubuntu24.04          # nvcc 13.0 (≥ 12.9 : sm_120f, cuda_fp4.h), aucun GPU requis
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python et torch cu130 (la roue que le Flatpak embarque)
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ninja-build git
+          python3 -m venv /opt/venv && . /opt/venv/bin/activate
+          pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.14.0" && pip install ninja
+          pip install --no-deps .
+      - name: Noyaux précompilés (sm_120f, sm_89, sm_86)
+        env:
+          CUDA_HOME: /usr/local/cuda
+        run: |
+          . /opt/venv/bin/activate
+          python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0,8.9,8.6 | tee build/noyaux/precompiles.json
+          test -n "$(find build/noyaux -name acvram_kernels.so)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+
+  flatpak:
+    needs: noyaux-precompiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+      - name: Outils Flatpak et runtime GNOME 51
+        run: |
+          sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder python3-pip
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
+      - name: Sources Python hors ligne (PyPI par flatpak-pip-generator, torch cu130 par sources-torch.sh)
+        run: |
+          pip3 install --user --break-system-packages requirements-parser pyyaml
+          curl -fsSLo pipgen.py https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator.py
+          [ -f packaging/flathub/python3-modules.json ] || python3 pipgen.py --runtime org.gnome.Sdk//51 --output packaging/flathub/python3-modules \
+              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py
+          [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0)
+      - name: Construction hors ligne et lint
+        run: |
+          sed -e 's#path: \.\./\.\.$#path: .#' -e 's#path: \.\./\.\./build/noyaux#path: build/noyaux#' \
+              -e 's#^  - python3-modules.json#  - packaging/flathub/python3-modules.json#' -e 's#^  - torch-cu130.json#  - packaging/flathub/torch-cu130.json#' \
+              packaging/flathub/io.github.anticitoyen.acvram.yml > io.github.anticitoyen.acvram.yml
+          flatpak-builder --user --force-clean --sandbox --repo=repo build io.github.anticitoyen.acvram.yml
+          flatpak build-bundle repo acvram-flathub.flatpak io.github.anticitoyen.acvram
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest io.github.anticitoyen.acvram.yml | tee lint-manifest.txt || true
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo | tee lint-repo.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flathub
+          path: |
+            lint-*.txt
+            acvram-flathub.flatpak
+            packaging/flathub/python3-modules.json
+            packaging/flathub/torch-cu130.json

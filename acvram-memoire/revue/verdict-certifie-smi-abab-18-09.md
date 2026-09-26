@@ -1,0 +1,12 @@
+# Verdict — instrument certifie, ABAB Coder b=1 : ancien chemin (nvidia-smi en sous-processus, `CERT_SMI_TEMOIN=1`) **3,616 ms/pas** contre NVML en processus (poste1 6e00289, défaut) **3,493 ms/pas** → **écart 0,123 ms/pas, dans la bande 0,10-0,14 : TENU** ; GardeSmi compte **35 / 0 / 35 / 0**
+
+instrument : `scratchpad/certifie-smi-18-09/abab.sh` — `certifie-b12-15-09.py` (6e00289 pris de poste1-11) rondes b=1 20 s, A = `CERT_SMI_TEMOIN=1`, B = défaut, ordre A B A B, 12:33-12:39, même fenêtre ; `temoin-p{1,3}.json`, `nvml-p{2,4}.json`
+commit : 4cf5c09 (poste3 = main f9a445e + certifie 6e00289), régime classé, défauts du jour, graphes on, Coder, HYBRID_SLOTS=1
+régime : charge machine de la fenêtre (12:33-12:39) : NON RELEVÉE (l'instrument ne la journalise pas ; à 12:52 le `load average` valait 70,8 avec trois suites pytest de pairs — la comparaison des jumelles tient malgré elle : dispersion des paires 0,3 %, poste7) ; 7 148 pas par passe (4 rondes de 1 787) ; bras A : 35 appels `nvidia-smi` dans la fenêtre (7 148 / 200 = 35,7), étiquetés « exempté témoin » ; bras B : 0 (GardeSmi active, `subprocess.run` remplacé, certifie:61-62 — pas de pgrep)
+scellé (poste7) : A − B attendu 0,10-0,14 ms/pas ; < 0,06 ⇒ autre cause ; > 0,20 ⇒ l'instrument porte plus que le smi ; REGLES §7 : comptes de la garde cités sur les deux bras (A > 0, B = 0)
+mesuré : pas A **3,610 / 3,622** (277,0 / 276,1 t/s, 1,189 / 1,202 J) · B **3,488 / 3,498** (286,7 / 285,9 t/s, 1,171 / 1,179 J) → **A − B = 0,123 ms/pas (3,4 %)**, t/s +9,8, J/jeton −0,021 (−1,7 %) ; paires concordantes à 0,3 %
+verdict : **TENU** — 0,123 dans 0,10-0,14 ; le sous-processus explique à lui seul l'écart prédit (27 ms × 35 / 7 148 = 0,132), et la garde le voit (35) quand il tourne, ne le voit pas (0) quand il ne tourne pas : correctif prouvé des deux côtés ; fusion de 6e00289 dans main possible
+
+## Conséquences
+- Cellule moteur acvram Coder b=1 (certifie, en processus) : **286,3 t/s, 1,175 J/jeton, 3,49 ms/pas** au défaut du jour (rpw=4, xreg=down) — contre 287,1 / 1,185 le 17/09 sous l'ancien instrument (avec biais) : les deux gestes GEMV du jour ont rendu à b=1 ce que le smi coûtait ; l'inventaire (`inventaire-cellules-certifie-18-09`) garde ses étiquettes, la correction 0,135 ms/pas est confirmée à 0,012 près.
+- La cellule du COMPARATIF ne sort pas de certifie (REGLES §3, poste7) : elle vient du harnais égal (`protocole-harnais-egal-coder-18-09`), mesure suivante.

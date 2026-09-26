@@ -1,0 +1,6 @@
+# Protocole — reprise (poste7-pause-18-09) : (1) contrôle `energie.j_par_jeton_10s` (anneau non consommé) contre energie.py ; (2) Qwen3.8 b=12 aux défauts du jour contre la cellule publiée
+
+instrument 1 : `scratchpad/controle-gui10-18-09/{chaine.sh,controle.py}` — serveur Coder 8094 b=12, charge continue 12 fils × 256 jetons ; à t = 20 s (anneau plein) `GET /metrics` (decode_tokens) et `Energie()` ; à t = 30 s deux `GET /metrics` consécutifs (lecteurs concurrents) puis fermeture ; dénominateur = Δ decode_tokens sur mes 10 s ; la valeur serveur couvre ses 10 dernières secondes (alignement ± 1 s de tic).
+scellé 1 (poste7) : |GUI / energie.py − 1| ≤ 0,10 tenu ; second juge : les deux lecteurs rendent la même valeur. Prédiction : écart < 5 % (fenêtres de 10 s décalées d'au plus 1 s sous charge stable), lecteurs identiques.
+instrument 2 : `certifie-b12-15-09.py` (bridé, J/jeton) + `profil-gdn-17-09.py b12` (nu) sur `Qwen3.8-27B-nvfp4-calibA`, régime classé, défauts du jour (rpw=4, xreg=down, rien de posé) ; cellule publiée : bridé 412 t/s 0,97 J, nu 441 (verdict-gemm-dense-fusion-17-09).
+scellé 2 (chef/poste7) : écart bridé < 3 % ⇒ « un profil dense suffit » (insensible aux réglages GEMV experts) ; ≥ 3 % ⇒ sensible, à profiler. Prédiction : < 3 % (le pas Qwen3.8 est dominé par la GEMM dense, 75 %).

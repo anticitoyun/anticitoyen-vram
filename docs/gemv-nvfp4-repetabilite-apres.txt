@@ -1,0 +1,25 @@
+  qkv        930.3 Go/s     22.2 us  (10 jeux x 20 Mio)
+  o          890.8 Go/s     16.6 us  (14 jeux x 14 Mio)
+  gate_up   1046.7 Go/s     76.1 us  (3 jeux x 76 Mio)
+  down       982.7 Go/s     40.5 us  (6 jeux x 38 Mio)
+  --- passage 1
+  qkv        929.7 Go/s     22.2 us  (10 jeux x 20 Mio)
+  o          891.1 Go/s     16.5 us  (14 jeux x 14 Mio)
+  gate_up   1046.7 Go/s     76.1 us  (3 jeux x 76 Mio)
+  down       982.5 Go/s     40.5 us  (6 jeux x 38 Mio)
+  --- passage 2
+  qkv        931.1 Go/s     22.2 us  (10 jeux x 20 Mio)
+  o          890.6 Go/s     16.6 us  (14 jeux x 14 Mio)
+  gate_up   1047.4 Go/s     76.0 us  (3 jeux x 76 Mio)
+  down       983.5 Go/s     40.5 us  (6 jeux x 38 Mio)
+  --- passage 3
+  qkv        930.5 Go/s     22.2 us  (10 jeux x 20 Mio)
+  o          890.7 Go/s     16.6 us  (14 jeux x 14 Mio)
+  gate_up   1047.9 Go/s     76.0 us  (3 jeux x 76 Mio)
+  down       984.1 Go/s     40.5 us  (6 jeux x 38 Mio)
+  --- passage 4
+  qkv        930.9 Go/s     22.2 us  (10 jeux x 20 Mio)
+  o          890.7 Go/s     16.6 us  (14 jeux x 14 Mio)
+  gate_up   1044.5 Go/s     76.2 us  (3 jeux x 76 Mio)
+  down       983.7 Go/s     40.5 us  (6 jeux x 38 Mio)
+  --- passage 5

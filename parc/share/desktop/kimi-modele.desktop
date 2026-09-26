@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Kimi Modèles
+GenericName=Parc de modèles locaux
+Comment=Choisir, charger et mesurer les modèles locaux (vLLM · llama.cpp · TabbyAPI)
+Exec=/usr/bin/kimi-modeles
+Icon=kimi-modele
+Terminal=false
+Categories=Development;
+Keywords=kimi;ia;llm;modele;agent;llama;vllm;
+StartupNotify=true
+StartupWMClass=kimi-modeles
+
