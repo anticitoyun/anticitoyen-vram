@@ -104,10 +104,16 @@ def test_prefill_regime_refuse_les_anciens_noms(monkeypatch):
 def masques_propres():
     from acvram import kernels
     etat = (kernels._EXT, kernels._TRIED, kernels._ERROR, set(backends._MASQUES))
+    # 240 : `regime.masquer` ÉCRIT os.environ (ACVRAM_DISABLE_KERNELS=1, ACVRAM_MOE_MMA=0) et `monkeypatch.delenv` d'une
+    # variable ABSENTE n'enregistre rien à restaurer — la valeur fuyait vers tous les tests suivants du même processus
+    # (test_gemv_marlin::test_splitk_opt_in_sous_processus : sous-processus sans extension, 4 skipped, seulement quand ce
+    # fichier passe avant lui). L'environnement se restaure ici, pas par monkeypatch.
+    environ = dict(os.environ)
     backends._RESOLVED.clear()
     try:
         yield
     finally:
+        os.environ.clear(); os.environ.update(environ)
         kernels._EXT, kernels._TRIED, kernels._ERROR = etat[:3]
         backends._MASQUES.clear(); backends._MASQUES.update(etat[3])
         backends._RESOLVED.clear()
