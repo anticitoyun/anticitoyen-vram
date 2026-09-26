@@ -26,11 +26,12 @@ def _resoudre_factice(fichier, index, sha):
 def test_les_modules_sont_des_roues_avec_sha256(tmp_path):
     for nom in ("numpy-2.3.0-cp312-cp312-manylinux_2_28_x86_64.whl", "tokenizers-0.22.0-cp312-abi3-manylinux_2_17_x86_64.whl",
                 "jinja2-3.1.6-py3-none-any.whl", "torch-2.14.0+cu130-cp312-cp312-manylinux_2_28_x86_64.whl",
-                "nvidia_cublas-13.0.0.19-py3-none-manylinux_2_27_x86_64.whl"):
+                "nvidia_cublas-13.0.0.19-py3-none-manylinux_2_27_x86_64.whl", "nvidia_ml_py-13.590.44-py3-none-any.whl"):
         (tmp_path / nom).write_bytes(nom.encode())
     mods = SP.modules_depuis_roues(str(tmp_path), resoudre=_resoudre_factice)
     noms = [m["name"] for m in mods]
-    assert noms == ["python3-jinja2", "python3-numpy", "python3-tokenizers"], noms   # torch et nvidia-* : servis par torch-cu130.json
+    # torch et nvidia-cublas : servis par torch-cu130.json ; nvidia-ml-py (NVML) n'y est pas et doit rester
+    assert noms == ["python3-jinja2", "python3-numpy", "python3-nvidia-ml-py", "python3-tokenizers"], noms
     for m in mods:
         (src,) = m["sources"]
         assert src["type"] == "file" and src["url"].endswith(".whl") and re.fullmatch(r"[0-9a-f]{64}", src["sha256"])

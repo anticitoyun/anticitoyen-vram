@@ -22,7 +22,8 @@ from roue_url import url_de_la_roue  # noqa: E402
 PYPI = "https://pypi.org/simple"
 PLATEFORMES = ["manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux_2_24_x86_64", "manylinux_2_17_x86_64",
                "manylinux2014_x86_64", "manylinux_2_12_x86_64", "manylinux2010_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64"]
-DEJA_SERVIES = ("torch", "triton", "nvidia_")            # torch-cu130.json (sources-torch.sh)
+DEJA_SERVIES = ("torch", "triton", "nvidia_")            # torch-cu130.json (sources-torch.sh) : torch, triton, roues nvidia-* de CUDA
+GARDEES = ("nvidia_ml_py",)                               # … sauf nvidia-ml-py (NVML pour /metrics), qui n'y est pas
 
 
 def telecharger(exigences: list[str], dossier: str) -> None:
@@ -41,7 +42,7 @@ def modules_depuis_roues(dossier: str, resoudre=url_de_la_roue, index: str = PYP
         if not fichier.endswith(".whl"):
             raise ValueError(f"{fichier} : pas une roue (sdist ?) — --only-binary=:all: devait l'empêcher")
         nom = fichier.split("-")[0]
-        if nom.lower().startswith(DEJA_SERVIES):
+        if nom.lower().startswith(DEJA_SERVIES) and not nom.lower().startswith(GARDEES):
             continue
         sha = hashlib.sha256(open(w, "rb").read()).hexdigest()
         mods.append({"name": "python3-" + nom.replace("_", "-").lower(), "buildsystem": "simple",
