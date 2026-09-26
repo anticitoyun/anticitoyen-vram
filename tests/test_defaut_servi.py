@@ -226,6 +226,8 @@ DEFAUTS_PAR_VERSION = {
 DEFAUTS_PAR_VERSION["0.7.2"] = DEFAUTS_PAR_VERSION["0.7.1"]
 # 0.7.3 (26/09, pièce 269 c) : guet d'admission AU DÉFAUT (mesure 269 b) — seule différence avec la 0.7.2.
 DEFAUTS_PAR_VERSION["0.7.3"] = ({**DEFAUTS_PAR_VERSION["0.7.1"][0], "ADMISSION_GUET": "1"}, DEFAUTS_PAR_VERSION["0.7.1"][1])
+# 0.7.4 (26/09, pièce 269 d) : mêmes défauts — le guet est coupé pour les alias vision dans le code, pas par une variable.
+DEFAUTS_PAR_VERSION["0.7.4"] = DEFAUTS_PAR_VERSION["0.7.3"]
 
 
 def _var(nom):
