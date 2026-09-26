@@ -252,6 +252,7 @@ Deux constats issus de ces mesures ont changé les valeurs par défaut :
 
 * [`REPRISE.md`](REPRISE.md) — **reprendre le projet sur une autre machine**
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — comment les pièces s'assemblent
+* [`docs/CHOIX-FORMAT-GDN.md`](docs/CHOIX-FORMAT-GDN.md) — NVFP4 pur ou attention+GDN en int8 par canal, sur un hybride Gated DeltaNet
 * [`docs/MATERIEL.md`](docs/MATERIEL.md) — régler cette machine précise
 * [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) — **ce qui n'est pas fait**, à lire en premier
 * [`CONVENTIONS.md`](CONVENTIONS.md) — conventions de travail sur le code (langue, style, contrôles avant de pousser)
