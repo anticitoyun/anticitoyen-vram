@@ -23,3 +23,7 @@ par passe dans les deux bras.
 
 Issue nommée (i) du scellé, écrite avant mesure : « gain < 2,5 ms → reste au défaut quand même (au bit, jamais plus lent),
 sans revendication ». Décision à chef (sa règle : 260x FAUSSE → défaut int16).
+
+**DÉCISION DE chef (26/09 07 h)** : le scellé fait foi (issue (i) écrite AVANT la mesure ; la règle « int16 si FAUX » est
+venue après). Verdict FAUX par la lettre, prédiction fausse, écrits tels quels ; **la copie xor RESTE au défaut, sans
+revendication de gain** (au bit, jamais plus lente, 4/4 médianes sous A aux deux longueurs).
