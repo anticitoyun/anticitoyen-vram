@@ -23,12 +23,11 @@ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
 ```
 
 ## Ce qui reste avant une soumission (dans l'ordre)
-1. **Chargement des noyaux précompilés sans nvcc** : `acvram/kernels/__init__.py` passe par `torch.utils.cpp_extension.load` (ninja, nvcc
-   pour les drapeaux d'architecture) ; sans nvcc il retombe sur le chemin de référence, lent. Il faut un chemin « `.so` présent dans
-   `ACVRAM_KERNEL_CACHE` à la bonne empreinte → `torch.ops.load_library` / import direct, sans ninja » (≈ 30 lignes, test à sec qui
-   casse si l'empreinte diffère). Même geste pour le port Marlin (déjà `load_library` depuis la 161).
-2. `tools/noyaux-precompiles.sh` : compile les deux `.so` pour sm_120 (et sm_89/sm_86 si on les publie) et les range sous
-   `build/noyaux/kernels-<empreinte>/`, avec l'empreinte calculée comme `kernels/__init__.py` la calcule.
+1. ~~Chargement des noyaux précompilés sans nvcc~~ — **fait (240)** : `ACVRAM_KERNELS_PRECOMPILES`, `kernels._precompile_utilisable`,
+   `build_info()["precompile"]` ; tests `tests/test_noyaux_precompiles_240.py`.
+2. ~~Produire les .so~~ — **fait (241)** : `python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0,8.6` dans un conteneur
+   CUDA sans carte (`job-noyaux-precompiles.yml`, à coller dans `release.yml`) ; garde : `tests/test_noyaux_precompiles_ci_241.py`.
+   Reste le **port Marlin** (`marlin_port`, .so à part, 161) : même geste, pièce à part.
 3. Générer `python3-modules.json` et `torch-cu130.json`, construire, lint, essayer sur une machine avec le pilote NVIDIA :
    `flatpak run io.github.anticitoyen.acvram` puis `flatpak run --command=acvram io.github.anticitoyen.acvram doctor`.
 4. Écrire aux réviseurs Flathub AVANT la soumission (taille, voir la note `revue/poste6-piece236-flathub-26-09.md`).
