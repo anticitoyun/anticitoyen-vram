@@ -17,7 +17,7 @@ sha256sums=('SKIP')
 install=acvram.install
 
 package() {
-    cd "anticitoyen-vram-$pkgver"
+    cd "anticitoyen-vram-$pkgver" || exit 1
     install -d "$pkgdir/usr/share/acvram" "$pkgdir/usr/bin"
     cp -r acvram pyproject.toml README.md LICENSE "$pkgdir/usr/share/acvram/"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
