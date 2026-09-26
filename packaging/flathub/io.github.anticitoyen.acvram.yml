@@ -22,7 +22,7 @@ finish-args:
   - --filesystem=xdg-config/acvram:create   # ~/.config/acvram/modeles (liste des modèles connus de la console)
   - --filesystem=xdg-cache/acvram:create    # cache des noyaux Triton et des poids déquantifiés
   - --talk-name=org.freedesktop.Notifications
-  - --env=ACVRAM_KERNEL_CACHE=/app/lib/acvram/noyaux   # noyaux CUDA précompilés (pas de nvcc dans le bac à sable)
+  - --env=ACVRAM_KERNELS_PRECOMPILES=/app/lib/acvram/noyaux   # noyaux CUDA précompilés (240 : chargés sans nvcc ni ninja)
   - --env=TRITON_CACHE_DIR=/var/cache/acvram/triton    # → xdg-cache/acvram
 cleanup:
   - /include
@@ -35,8 +35,9 @@ modules:
   - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py)
   - torch-cu130.json                    # torch 2.14 cu130, triton 3.8, roues nvidia-* (générées par sources-torch.sh)
   - name: acvram-noyaux
-    # Noyaux CUDA d'acvram (acvram_kernels.so, port Marlin) compilés HORS bac à sable pour sm_120 (RTX 5090) — et sm_89/sm_86 si
-    # publiés — par la CI (tools/noyaux-precompiles.sh, à écrire par poste3) ; le répertoire porte l'empreinte des sources (kernels/__init__.py).
+    # Noyaux CUDA d'acvram (acvram_kernels.so) compilés HORS bac à sable pour sm_120 (RTX 5090) — et sm_89/sm_86 si publiés — par la
+    # CI : `python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0` (241, job-noyaux-precompiles.yml) ; un sous-dossier
+    # par empreinte de source, relu par kernels._precompile_utilisable (240). Le port Marlin se compile à sec par empreinte (161) : à suivre.
     buildsystem: simple
     build-commands:
       - install -d /app/lib/acvram/noyaux

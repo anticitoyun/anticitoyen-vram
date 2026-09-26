@@ -57,8 +57,11 @@ _MIN_CUDA_FOR_SM120 = (12, 8)
 _MIN_CUDA_FOR_FAMILY = (12, 9)
 
 
-def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
+def _arch_flags(nvcc_ver: tuple[int, int] | None = None, archs_forcees=None) -> list[str]:
     """Émet du code pour exactement les architectures présentes, plus un repli PTX.
+
+    ``archs_forcees`` (ou ``ACVRAM_ARCHS="12.0,8.6"``, pièce 241) : architectures imposées, pour compiler SANS carte
+    (CI des noyaux précompilés du Flatpak, 236/240) — elles remplacent celles des cartes présentes.
 
     Les cibles ``sm_100`` et au-delà sont demandées sous leur forme
     *family-specific* (``sm_120f``) et non générique. Ce n'est pas un détail de
@@ -72,7 +75,10 @@ def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
     famille (sm_121, sm_128...), contrairement au suffixe « a ».
     """
     archs: set[tuple[int, int]] = set()
-    if torch.cuda.is_available():
+    forcees = archs_forcees if archs_forcees is not None else archs_depuis_texte(os.environ.get("ACVRAM_ARCHS", ""))
+    if forcees:
+        archs = set(forcees)
+    elif torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             archs.add(torch.cuda.get_device_capability(i))
     if not archs:
@@ -293,6 +299,62 @@ def noyaux_masques() -> list[str]:
 # Le .so est chargé SANS ninja ni nvcc quand tout concorde : même .cu (au bit : c'est le même binaire qu'une compilation
 # JIT de cette source), même torch/CUDA, architecture de la carte présente, et le .so porte bien l'empreinte de son
 # fichier. Sinon : compilation JIT comme avant (et, si le répertoire avait été demandé explicitement, la raison est dite).
+def archs_depuis_texte(texte: str) -> list:
+    """« 12.0,8.6 » → [(12, 0), (8, 6)] ; vide → [] ; tout autre texte lève (pas de repli silencieux)."""
+    out = []
+    for t in (x.strip() for x in texte.split(",") if x.strip()):
+        m = re.fullmatch(r"(\d+)\.(\d+)", t)
+        if not m:
+            raise ValueError(f"ACVRAM_ARCHS : architecture illisible {t!r} (attendu MAJEUR.MINEUR, ex. 12.0)")
+        out.append((int(m.group(1)), int(m.group(2))))
+    return out
+
+
+def _ecrire_empreinte(cand: str, so_source: str, src_sha: str, src_hash: str, archs) -> str:
+    """Range ``so_source`` sous ``cand/acvram_kernels.so`` avec l'empreinte.json que `_precompile_utilisable` relit
+    (une seule écriture, une seule lecture : la CI et le chargeur ne peuvent pas diverger). Rend ``cand``."""
+    import json
+    import shutil
+    os.makedirs(cand, exist_ok=True)
+    shutil.copy2(so_source, os.path.join(cand, "acvram_kernels.so"))
+    with open(os.path.join(cand, "empreinte.json"), "w", encoding="utf-8") as fh:
+        json.dump({"src_sha": src_sha, "src_hash": src_hash, "archs": sorted(archs),
+                   "torch": torch.__version__, "cuda": str(torch.version.cuda)}, fh, indent=1)
+    return cand
+
+
+def _archs_des_drapeaux(flags) -> list:
+    """« -gencode=arch=compute_120f,code=sm_120f » → « sm_120f » (après le DERNIER « code= »)."""
+    return sorted({f.rsplit("code=", 1)[1] for f in flags if "code=sm_" in f})
+
+
+def compiler_precompile(dossier: str, archs, nvcc_ver=None) -> str:
+    """Pièce 241 : compile le .so pour ``archs`` (ex. [(12, 0)]) SANS carte — conteneur CUDA de la CI — et le range sous
+    ``dossier/<src_sha16>/`` avec son empreinte.json. Même source, mêmes drapeaux qu'une compilation JIT faite sur une
+    carte de cette architecture : l'empreinte que le .so porte est celle que `get_extension` recalculerait. Rend le sous-dossier."""
+    import tempfile
+    from torch.utils.cpp_extension import load
+    _ensure_cuda_home(_MIN_CUDA_FOR_SM120)
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, "acvram_kernels.cu")
+    with open(src, "rb") as fh:
+        octets = fh.read()
+    if b"acvram_src_hash" not in octets:
+        raise RuntimeError("le source ne porte pas le marqueur acvram_src_hash : aucun précompilé ne pourrait être vérifié")
+    flags_cuda = ["-O3", "--use_fast_math", "-lineinfo"] + _arch_flags(nvcc_ver, archs_forcees=list(archs))
+    flags_c = ["-O3"]
+    src_hash = hashlib.sha256(octets + b"\x00FLAGS\x00" + "\x00".join(flags_cuda + flags_c).encode()).hexdigest()[:16]
+    build = tempfile.mkdtemp(prefix="acvram-precompile-")
+    load(name="acvram_kernels", sources=[src], extra_cuda_cflags=flags_cuda + [f"-DACVRAM_SRC_HASH={int(src_hash, 16)}ULL"],
+         extra_cflags=flags_c, build_directory=build, is_python_module=False, verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")))
+    so = os.path.join(build, "acvram_kernels.so")
+    with open(so, "rb") as fh:
+        if int(src_hash, 16).to_bytes(8, "little") not in fh.read():
+            raise RuntimeError(f"{so} ne porte pas l'empreinte {src_hash}")
+    src_sha = hashlib.sha256(octets).hexdigest()
+    return _ecrire_empreinte(os.path.join(dossier, src_sha[:16]), so, src_sha, src_hash, _archs_des_drapeaux(flags_cuda))
+
+
 def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version: str, torch_cuda: str):
     """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_noyaux_precompiles_240.py)."""
     import json
@@ -327,21 +389,13 @@ def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version:
 def ecrire_precompile(dossier: str) -> str:
     """Range le .so de la compilation JIT courante (get_extension() déjà appelée, sans repli) sous
     ``dossier/<src_sha16>/`` avec son empreinte.json ; rend ce sous-dossier. C'est ce que fait la CI pour le Flatpak (236)."""
-    import json
-    import shutil
     if _EXT is None or not _SO_PATH or not _SRC_HASH_ACTUEL or _PRECOMPILE:
         raise RuntimeError("ecrire_precompile : il faut une extension compilée en JIT dans ce processus")
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "acvram_kernels.cu"), "rb") as fh:
         src_sha = hashlib.sha256(fh.read()).hexdigest()
-    cand = os.path.join(dossier, src_sha[:16])
-    os.makedirs(cand, exist_ok=True)
-    shutil.copy2(_SO_PATH, os.path.join(cand, "acvram_kernels.so"))
-    archs = sorted({f.rsplit("code=", 1)[1] for f in _arch_flags() if "code=sm_" in f})   # -gencode=arch=…,code=sm_120f
-    with open(os.path.join(cand, "empreinte.json"), "w", encoding="utf-8") as fh:
-        json.dump({"src_sha": src_sha, "src_hash": _SRC_HASH_ACTUEL, "archs": archs,
-                   "torch": torch.__version__, "cuda": str(torch.version.cuda)}, fh, indent=1)
-    return cand
+    return _ecrire_empreinte(os.path.join(dossier, src_sha[:16]), _SO_PATH, src_sha, _SRC_HASH_ACTUEL,
+                             _archs_des_drapeaux(_arch_flags()))
 
 
 def get_extension():

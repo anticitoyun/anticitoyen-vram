@@ -74,22 +74,76 @@ jobs:
   # Flathub: manifest and module list supplied by poste6 (packaging/flathub/). Job wired the
   # same way as animematrix's (pin the manifest's source to this tag/commit, attach a bundle
   # and the pinned manifest to the release) — filled in once packaging/flathub/*.yml exists.
-  flatpak:
+  # Pièce 241 (poste6) : noyaux CUDA précompilés dans un conteneur sans carte, puis Flatpak hors ligne (packaging/flathub/,
+  # 236/240). Nothing is submitted to Flathub here either: the bundle is attached to the release, the maintainer submits.
+  noyaux-precompiles:
     runs-on: ubuntu-24.04
-    if: false  # flip to true once packaging/flathub/ lands (poste6)
+    container: nvidia/cuda:13.0.1-devel-ubuntu24.04          # nvcc 13.0 (≥ 12.9 : sm_120f, cuda_fp4.h), aucun GPU requis
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      - name: Build Flatpak bundle and pin the Flathub manifest to this tag
+      - name: Python et torch cu130 (la roue que le Flatpak embarque)
         run: |
-          sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder
+          apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ninja-build git
+          python3 -m venv /opt/venv && . /opt/venv/bin/activate
+          pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.14.0" && pip install ninja
+          pip install --no-deps .
+      - name: Noyaux précompilés (sm_120f, sm_89, sm_86)
+        env:
+          CUDA_HOME: /usr/local/cuda
+        run: |
+          . /opt/venv/bin/activate
+          python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0,8.9,8.6 | tee build/noyaux/precompiles.json
+          test -n "$(find build/noyaux -name acvram_kernels.so)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+
+  flatpak:
+    needs: noyaux-precompiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+      - name: Outils Flatpak et runtime GNOME 51
+        run: |
+          sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder python3-pip
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          APP=io.github.anticitoyun.anticitoyen-vram   # confirm with poste6's manifest filename
-          flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
-          flatpak-builder --user --force-clean --sandbox --repo=repo build "packaging/flathub/$APP.yml"
-          flatpak build-bundle repo "acvram-${TAG#v}.flatpak" "$APP"
+          flatpak install --user -y flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
+      - name: Sources Python hors ligne (PyPI par flatpak-pip-generator, torch cu130 par sources-torch.sh)
+        run: |
+          pip3 install --user --break-system-packages requirements-parser pyyaml
+          curl -fsSLo pipgen.py https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator.py
+          [ -f packaging/flathub/python3-modules.json ] || python3 pipgen.py --runtime org.gnome.Sdk//51 --output packaging/flathub/python3-modules \
+              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py
+          [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0)
+      - name: Construction hors ligne et lint
+        run: |
+          sed -e 's#path: \.\./\.\.$#path: .#' -e 's#path: \.\./\.\./build/noyaux#path: build/noyaux#' \
+              -e 's#^  - python3-modules.json#  - packaging/flathub/python3-modules.json#' -e 's#^  - torch-cu130.json#  - packaging/flathub/torch-cu130.json#' \
+              packaging/flathub/io.github.anticitoyen.acvram.yml > io.github.anticitoyen.acvram.yml
+          flatpak-builder --user --force-clean --sandbox --repo=repo build io.github.anticitoyen.acvram.yml
+          flatpak build-bundle repo "acvram-${TAG#v}.flatpak" io.github.anticitoyen.acvram
           gh release upload "$TAG" acvram-*.flatpak --clobber --repo "$GITHUB_REPOSITORY"
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest io.github.anticitoyen.acvram.yml | tee lint-manifest.txt || true
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo | tee lint-repo.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flathub
+          path: |
+            lint-*.txt
+            acvram-*.flatpak
+            packaging/flathub/python3-modules.json
+            packaging/flathub/torch-cu130.json
 
   # Weblate: acvram has no locale/*.json (unlike animematrix) — poste2's 236c extracted the
   # translatable UI strings into packaging/langues/_source.json instead (README.md itself is
