@@ -16,6 +16,12 @@ RACINE = pathlib.Path(__file__).resolve().parent.parent
 REVUE = RACINE / "acvram-memoire" / "revue"
 INDEX = REVUE / "INDEX.md"
 
+# L'instantané public (outils/publier-github.sh) retire acvram-memoire/ : sans ce dossier il n'y a
+# ni notes ni index à garder, et le module entier est sauté (même idiome que test_annotations_specul).
+if not REVUE.is_dir():
+    import pytest
+    pytest.skip("acvram-memoire/revue absent de cet arbre (instantané public)", allow_module_level=True)
+
 # Cliquet : nombre de notes non indexées le 26/09, après la pièce 263 (213-262/25-26-09
 # ajoutées). Baisser ce chiffre est bienvenu (l'indexation d'un passif) ; jamais le monter.
 PLAFOND_NON_INDEXEES = 0
