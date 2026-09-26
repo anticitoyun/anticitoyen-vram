@@ -53,7 +53,16 @@ def test_m_hote_mesure_et_verdict(faux_119b):
     assert r["formes"] == {"w1": [64, 256], "w3": [64, 256], "w2": [256, 64]}
     assert r["exactitude_rel_max"] <= 2 ** -6, r["exactitude_rel_max"]
     assert r["octets_par_expert"] == 3 * (64 * 128 + 64 * 16)
-    assert r["ms_par_expert"]["mediane"] > 0 and r["go_s_effectif"] > 0
+    # Pièce 267c (CI GitHub, runner 4 cœurs) : `go_s_effectif` est un débit ARRONDI à 1
+    # décimale (`round(octets / (med_e·1e-3) / 1e9, 1)`) — sur un modèle jouet minuscule
+    # (27 648 octets) et un processeur lent/virtualisé, le temps mesuré est dominé par le
+    # lancement de l'opération torch (pas par le débit mémoire réel), et le débit calculé,
+    # bien que réel et positif, arrondit à 0,0. La garde qui a du sens porte sur les
+    # quantités NON arrondies : octets_par_expert > 0 (déjà vérifié) et mediane > 0 — leur
+    # positivité implique déjà mathématiquement go_s_effectif > 0 au bit près ; l'exiger
+    # aussi sur le CHAMP ARRONDI n'a jamais rien prouvé de plus, et casse sur du matériel
+    # lent sans qu'aucun calcul ne soit faux.
+    assert r["ms_par_expert"]["mediane"] > 0 and r["go_s_effectif"] >= 0
     assert "INVALIDE" not in r["verdict"]
 
 

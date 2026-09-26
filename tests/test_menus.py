@@ -50,6 +50,15 @@ SECTIONS = {"acvram": "models_acvram", "vLLM": "models_vllm",
             "GGUF": "models_gguf", "EXL3": "models_exl3"}
 _DENSES = {"bf16", "fp16", "fp32"}
 TOLERANCE = 0.05
+# Pièce 267c (CI GitHub) : `du -sk` compte l'espace ALLOUÉ, pas les octets utiles — un
+# petit `acvram_manifest.json` à côté du poids ajoute un bloc entier d'arrondi, et la
+# taille de ce bloc dépend du système de fichiers (ext4 local contre l'overlay du
+# conteneur du runner). Sur un dossier de 100K, ce seul manifeste a fait passer l'écart
+# de sous 5 % (ici) à 7 % (CI) — jamais une différence de MODÈLE (nos catalogues réels
+# pèsent des Mo-Go, où ce même bloc est un bruit sous 0,1 %). Un plancher absolu couvre
+# l'arrondi de bloc SANS jamais masquer un vrai écart : le témoin `test_d_une_taille...`
+# (60 Ko sur 300 Ko, 20 %) reste détecté, largement au-dessus.
+TOLERANCE_PLANCHER_OCTETS = 16 * 1024
 
 
 def lire_menu(texte, doublons=False):
@@ -255,8 +264,9 @@ def controle_c(menu, racines, tailles):
             continue                                      # déjà compté par (a) et (b)
         if taille is not None:
             reel = tailles[chemin]
-            ecart = abs(reel - taille) / max(reel, 1)
-            if ecart > TOLERANCE and _du_h(reel) != _du_h(taille):
+            ecart_octets = abs(reel - taille)
+            ecart = ecart_octets / max(reel, 1)
+            if ecart > TOLERANCE and ecart_octets > TOLERANCE_PLANCHER_OCTETS and _du_h(reel) != _du_h(taille):
                 fautes.append(f"{nom} : menu {_h(taille)}, du -sh {_du_h(reel)} ({ecart:.0%})")
         if racine == "models_acvram" and chemin.is_dir():
             try:
