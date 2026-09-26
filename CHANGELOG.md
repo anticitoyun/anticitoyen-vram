@@ -17,6 +17,9 @@
   `revue/poste6-piece269-*`) ; 270 (poste1, préfill du Coder décomposé, MoE 55 % au solo, levier au bit ≤ 7 ms, clos,
   `revue/poste1-270-decomposition-26-09.md`).
 
+* **26/09/2026 — pièce 209 (Marlin par ligne, poste2, chaîne 237b-c-d) : qualifiée par tâches (237d, McNemar
+  apparié, 4 tâches, n=650) — aucune différence significative, mais borne basse IC95 moyenne 93,4 % < 97 % :
+  reste à la demande.** `revue/poste2-piece237d-verdict-26-09.md`.
 * **26/09/2026 — pièce 260 (poste5, décision chef) : `ACVRAM_I8C_FP8_PREFILL=cublas` À LA DEMANDE, pas au défaut.** Les int8
   ré-encodés du fp8 (manifeste « origine: fp8 », 233 tenseurs du Qwen3.8-27B-unsloth-mixte-i8c) étaient exclus du chemin W8A8
   int8 du préfill depuis la 139 (copie signée persistante, 10,6 Go) ; la 201 a rendu cette copie transitoire, l'opt-in les y
