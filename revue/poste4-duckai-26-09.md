@@ -1065,3 +1065,81 @@ ignore deterministic flag, issue #33985 topk=192 vs 128 dispatch différent ; Te
 jetons), issue #10309 Qwen3+Eagle3 greedy différent, release notes précision EAGLE3 multi-GPU), arXiv
 (« Batch Speculative Decoding Done Right », exact/partial match, 69,8 %→85,0 % en mode déterministe),
 nvidia.com (tutoriel Speculative Decoding with TensorRT-LLM, cohérence de distribution).
+
+---
+
+## Q25 — hybride GDN+attention : GDN et int8 au bit, sortie finale non — suspects attention pleine et GEMM nvfp4 (poste5, 277a-bis)
+
+**Réponse (Luna, 1 avis, exceptionnellement complète et sourcée)** : les deux suspects restants sont EXACTEMENT
+les catégories d'opérateurs visées par les travaux « batch-invariant kernels ». « Récurrence GDN au bit » ne
+garantit PAS une sortie de bout en bout au bit si l'attention ou le GEMM MLP change d'ordre de réduction.
+
+**Distinction utile** : invariant au LOT (résultat inchangé si on ajoute/retire d'autres jetons dans le même
+appel de noyau) ≠ invariant en POSITION (inchangé si la position change dans un appel de taille fixe) ≠
+invariant en FORME (inchangé entre M=1 et M=k+1 — c'est votre cas précis). La plupart des travaux publiés
+traitent la 1re propriété ; votre cas de vérification spéculative sollicite en plus la forme et la
+disposition du cache.
+
+**GEMM (le suspect nvfp4)** : un GEMM cuBLAS/CUTLASS/tensor-core n'est PAS invariant en forme en général —
+`[1,K]@[K,N]` peut différer de `[M,K]@[K,N]` puis sélection d'une ligne, car le noyau change de forme de
+tuile de sortie, d'instruction tensor-core, de split-K ou non, d'ordre d'accumulation. **Thinking Machines
+identifie explicitement split-K, stream-K et le changement d'instruction tensor-core comme sources de
+non-invariance** ; leur solution : UNE SEULE configuration de noyau (y compris stratégie de réduction fixe)
+pour toutes les valeurs de M, même en perdant en performance. **Un GEMM quantifié a des sources
+supplémentaires** : ordre de chargement des échelles, parcours des groupes d'échelles, placement de la
+déquantification, gestion du zéro-point, arrondi de l'épilogue. La bibliothèque Thinking Machines publique
+est étroite (remplace seulement `torch.mm`/`addmm`/`mean`/`log_softmax`) — **PAS une preuve que tout GEMM
+FP8/FP4/Marlin/CUTLASS est invariant**. vLLM a un item de suivi SÉPARÉ pour NVFP4 GEMM/MoE — pas couvert
+automatiquement par le chemin `torch.mm` ordinaire ; une issue vLLM rapporte même que
+`VLLM_BATCH_INVARIANT=1` peut FORCER les modèles NVFP4 sur un chemin d'émulation plutôt que leurs noyaux
+matériels normaux (bogue de support, pas preuve directe d'un écart numérique, mais signe que NVFP4 exige un
+traitement spécifique).
+
+**Attention pleine (l'autre suspect)** : non-invariante quand la réduction sur la dimension KV est
+partitionnée différemment. Coupables principaux : split-KV/FlashDecoding, nombre de splits KV variable,
+tailles de split différentes, **traitement SÉPARÉ du KV en cache et du KV du jeton courant** (le même
+intervalle logique peut donner 5 blocs de réduction au lieu de 4 selon la frontière cache/courant — change
+nécessairement l'ordre de réduction flottant), frontières de bloc softmax différentes. Correctif Thinking
+Machines : mettre à jour le cache KV et la table de pages AVANT le noyau d'attention pour que toute la
+séquence KV logique ait UNE disposition physique cohérente ; **taille de split FIXE** (pas seulement un
+nombre de splits fixe — avec une taille fixe, le nombre de splits peut varier mais l'ordre de réduction de
+chaque split complet reste stable).
+
+**SGLang documente les mêmes solutions par backend** : FlashInfer (`fixed_split_size`, désactiver le split
+KV dynamique), FlashAttention-3 (`num_splits=1`), Triton (taille de split de décodage fixe, troncature du
+préfill par blocs alignée sur la taille de split). Issue de suivi SGLang liste séparément : FlashInfer FA2
+invariant au lot, changement de taille de tuile Triton, support FA3 déterministe, **RMSNorm invariant** (item
+séparé — un autre suspect possible, la RMSNorm bascule aussi entre réduction sur une ligne/plusieurs
+lignes/split selon la taille de lot), quantification FP8/NVFP4 GEMM/MoE invariante, all-reduce déterministe.
+**Chaque opérateur est un problème d'invariance SÉPARÉ — corriger l'un ne corrige pas les autres.**
+
+**vLLM `VLLM_BATCH_INVARIANT=1`** : bêta, route via des alternatives déterministes ; fichiers pertinents
+`vllm/model_executor/layers/batch_invariant.py` (chemin matmul persistant), `.../quantization/fp8.py`
+(chemin batch-invariant FP8), `vllm/v1/attention/` (sélection de backend), `tests/v1/determinism/
+test_batch_invariance.py`, `docs/features/batch_invariance.md`. **Réserve documentée par vLLM lui-même** :
+la garantie porte sur la taille/l'ordre du LOT, PAS une garantie générale couvrant chaque backend entre
+q_len=1 et q_len=k+1, spécialement pour backends de quantification non supportés, noyaux fusionnés
+personnalisés, MoE, GDN/attention linéaire, formes de capture CUDA graph différentes.
+
+**Protocole de localisation décisif recommandé** : comparer les deux exécutions à CHAQUE frontière — projections
+Q/K/V, sortie attention pleine, sortie projection attention, sortie GDN, résidu post-attention, sortie
+RMSNorm, entrée MLP, **sortie GEMM MLP nvfp4**, résidu post-MLP, RMSNorm finale, logits de tête. Pour
+l'attention : forcer la config la plus conservatrice (désactiver le split KV si possible, `num_splits=1`
+FA3, taille de split fixe FlashInfer/Triton, matérialiser/mettre à jour le KV cache AVANT l'attention,
+vérifier que la vérification spéculative utilise la MÊME disposition physique du KV et les mêmes frontières
+de bloc que le décodage, désactiver les changements de frontière du préfill par blocs pendant l'expérience).
+Pour le MLP : forcer M=1 ET M=k+1 à travers LA MÊME implémentation et config de tuile ; si le backend NVFP4
+ne peut pas, déquantifier temporairement et faire tourner un GEMM BF16 commun — si l'écart disparaît, le
+noyau NVFP4 est confirmé coupable.
+
+**Classement de plausibilité pour votre cas (GDN et int8 déjà au bit)** : 1) frontière split-KV/cache-courant
+de l'attention pleine ; 2) sélection de noyau/tuile du GEMM MLP nvfp4 ; 3) changement de tuile
+softmax/réduction de l'attention ; 4) une normalisation ou réduction de résidu cachée ; 5) spécialisation de
+forme CUDA-graph/épilogue fusionné ; 6) échantillonnage/log-softmax, SI l'écart n'apparaît que sur les IDs de
+jetons (pas sur les logits bruts).
+
+**Sources** : thinkingmachines.ai (« Defeating Nondeterminism in LLM Inference »), GitHub
+(thinking-machines-lab/batch_invariant_ops ; vLLM `model_executor/layers/batch_invariant.py`,
+`quantization/fp8.py` ; issue #27059 batch-invariant VLMs ; issue VLLM_BATCH_INVARIANT crashes NVFP4 ; issue
+tracking SGLang déterministe), lmsys.org (« Towards Deterministic Inference in SGLang »), vllm.ai (doc Batch
+Invariance).
