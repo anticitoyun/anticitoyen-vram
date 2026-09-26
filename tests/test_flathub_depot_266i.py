@@ -99,5 +99,5 @@ def test_266j_un_commit_tree_muet_fait_echouer_le_job():
     `|| true` (seul « rien à commettre », diff --cached --quiet, est toléré)."""
     texte = _RELEASE.read_text(encoding="utf-8")
     assert 'RACINE=$(git' in texte and '[ -n "$RACINE" ] ||' in texte and 'git branch gh-pages "$RACINE"' in texte
-    assert not re.search(r"commit -q[^\n]*\|\| true", texte), "un commit gh-pages qui échoue doit faire échouer le job"
-    assert "git -C pages diff --cached --quiet ||" in texte
+    assert not re.search(r"commit(-tree| -q)[^\n]*\|\| true", texte), "un commit gh-pages qui échoue doit faire échouer le job"
+    assert '[ -n "$NOUVEAU" ] ||' in texte, "266 l : le sha du commit orphelin de publication est contrôlé lui aussi"

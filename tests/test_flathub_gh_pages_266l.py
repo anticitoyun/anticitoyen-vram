@@ -37,11 +37,11 @@ def test_266l_le_ref_master_ne_recule_pas_dans_le_job():
     run = _run()
     assert 'packaging/flathub/ref-ne-recule-pas.sh "$V" pages/flatpak/VERSION' in run
     assert 'echo "$V" > repo/VERSION' in run, "la version servie est écrite avec le dépôt"
-    for geste in ("flatpak-builder --user", "flatpak build-sign", "git -C pages push origin gh-pages"):
+    for geste in ("flatpak-builder --user", "flatpak build-sign", 'git push --force origin "$NOUVEAU:refs/heads/gh-pages"'):
         i = run.index(geste)
-        assert 'if [ "$CONSTRUIRE" = 1 ]; then' in run[max(0, i - 700):i], geste + " hors de la garde CONSTRUIRE"
+        assert 'if [ "$CONSTRUIRE" = 1 ]; then' in run[max(0, i - 1300):i], geste + " hors de la garde CONSTRUIRE"
     assert "::warning::gh-pages sert une version plus récente" in run
-    assert 'gh release upload "$TAG" "acvram-$V.flatpakref"' in run.split('git -C pages push origin gh-pages')[1], \
+    assert 'gh release upload "$TAG" "acvram-$V.flatpakref"' in run.split('refs/heads/gh-pages"')[1], \
         "le .flatpakref est joint même quand le dépôt n'est pas touché"
 
 
@@ -62,3 +62,13 @@ def test_266l_ref_ne_recule_pas_sait_dire_construire_et_sauter(tmp_path):
     assert code == 3 and "ne recule pas" in motif and "0.7.2" in motif, (code, motif)
     assert _script("0.7.9", "0.7.10\n", tmp_path)[0] == 3
     assert _script("0.7.2", "n'importe quoi\n", tmp_path)[0] == 0       # VERSION illisible : construire, dit
+
+
+def test_266l_gh_pages_est_un_commit_orphelin_pousse_de_force():
+    """L'historique git de gh-pages ne s'accumule pas (≈ 100 Mio d'objets par version) : un commit-tree SANS parent à
+    chaque publication, poussé --force sur refs/heads/gh-pages seulement ; plus de `git -C pages push origin gh-pages`."""
+    run = _run()
+    ligne = next(l for l in run.splitlines() if "NOUVEAU=$(git -C pages" in l)
+    assert "commit-tree" in ligne and " -p " not in ligne and "github-actions[bot]" in ligne
+    assert 'git push --force origin "$NOUVEAU:refs/heads/gh-pages"' in run
+    assert "git -C pages push origin gh-pages" not in run and "git -C pages commit" not in run

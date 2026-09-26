@@ -245,9 +245,13 @@ jobs:
             mkdir -p repo && echo "$V" > repo/VERSION      # la version que sert le ref master, lue par ref-ne-recule-pas.sh
             rm -rf pages/flatpak && cp -a repo pages/flatpak && touch pages/.nojekyll
             git -C pages add -A flatpak .nojekyll
-            # « rien à commettre » (rejeu à dépôt identique) n'est pas une faute ; un commit qui échoue, si.
-            git -C pages diff --cached --quiet || git -C pages -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -q -m "flatpak : dépôt $TAG"
-            git -C pages push origin gh-pages
+            # 266 l : gh-pages est republiée en UN commit orphelin (commit-tree sans parent, push --force de cette branche
+            # seule) — l'historique OSTree vit dans flatpak/ (deltas, prune-depth), pas dans git : sinon chaque version
+            # ajoute ≈ 100 Mio d'objets à l'historique git et le dépôt GitHub dépasse vite ses limites.
+            ARBRE=$(git -C pages write-tree)
+            NOUVEAU=$(git -C pages -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree -m "flatpak : dépôt $TAG" "$ARBRE")
+            [ -n "$NOUVEAU" ] || { echo "gh-pages : commit-tree n'a rendu aucun sha" >&2; exit 1; }
+            git push --force origin "$NOUVEAU:refs/heads/gh-pages"
           fi
           gh release delete-asset "$TAG" "acvram-$V.flatpak" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true   # l'ancien bundle cassé (v0.7.0)
           gh release upload "$TAG" "acvram-$V.flatpakref" --clobber --repo "$GITHUB_REPOSITORY"
