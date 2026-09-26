@@ -1249,7 +1249,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         tranche est la même qu'avant (mêmes `_build_batch`, même coupe) : au bit ; la déquantification d'une couche
         est faite une fois par vague au lieu d'une fois par tranche (284 : 56 % du préfill du mixte, refaite × 2 b).
         None = non applicable (image, deepstack, tête MTP…) : la boucle d'avant prend la main, inchangée."""
-        if any(seq.images for seq in seqs) or not self.model.tranches_possibles([]):
+        mtp_lue = getattr(self.speculator, "name", None) == "mtp"
+        if any(seq.images for seq in seqs) or not self.model.tranches_possibles([], mtp_lue):
             return None                      # contrôlé AVANT tout `_build_batch` (qui réserve des blocs)
         coupes = []
         for seq in seqs:
@@ -1262,7 +1263,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         vague1 = [(seq, c) for seq, c in zip(seqs, coupes) if c is not None]
         if vague1:
             b1 = [self._build_batch([seq], prefill=True, limite=c) for seq, c in vague1]
-            if not self.model.tranches_possibles(b1):
+            if not self.model.tranches_possibles(b1, mtp_lue):
                 raise RuntimeError("préfill par tranches : un lot de la première vague porte image ou deepstack")
             self.model.forward_tranches(b1)
             for seq, c in vague1:
@@ -1270,7 +1271,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 seq.cached_len = c
                 seq.prefill_len = c
         b2 = [self._build_batch([seq], prefill=True) for seq in seqs]
-        if not self.model.tranches_possibles(b2):
+        if not self.model.tranches_possibles(b2, mtp_lue):
             raise RuntimeError("préfill par tranches : la seconde vague n'est plus applicable après la première")
         logits = self.model.forward_tranches(b2)
         if os.environ.get("ACVRAM_CHRONO_SYNC"):

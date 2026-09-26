@@ -294,11 +294,14 @@ class ACVRamModel(nn.Module):
             _trace_couche("forward", i, layer)
         return [self._sortie(x, None, b) for x, b in zip(xs, batches)]
 
-    def tranches_possibles(self, batches: list) -> bool:
+    def tranches_possibles(self, batches: list, mtp_lue: bool = True) -> bool:
         """Le chemin par tranches ne couvre que ce que `forward` fait sans détour : ni image, ni deepstack, ni
         résidu différé (`prefill_compact("residu")` sur des couches denses), ni synchronisation de diagnostic."""
-        if _SYNC_COUCHES or self.mtp is not None or any(b.images is not None or b.deepstack is not None for b in batches):
-            return False                     # tête MTP : `_sortie` garde l'état caché dans l'ordre des appels
+        # Tête MTP : `_sortie` garde l'état caché dans l'ordre des appels, que seul le proposeur MTP relit
+        # (speculative.py, `_mtp_hidden`/`_mtp_prefill`) — refus seulement s'il est actif (`mtp_lue`).
+        if _SYNC_COUCHES or (self.mtp is not None and mtp_lue) or any(
+                b.images is not None or b.deepstack is not None for b in batches):
+            return False
         return not (kernels.prefill_compact("residu") and all(
             type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
             and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers))
