@@ -34,6 +34,27 @@ Seuil de falsification : si nsys attribue à `qkv`+`gate`+`out_proj` (famille `p
 seule) moins de 60 % du delta µs/pas entre acvram-nvfp4-global et le témoin sans Marlin GDN, la prédiction est
 FAUSSE — chercher ailleurs (glue, dequant hôte, ordonnancement de piles).
 
+## Addendum 26/09 02 h — b=1 capturé, taxonomie fausse sur les GEMV GDN
+
+Prise b=1 (nsys, portée globale, `scratchpad/poste2-p215-25-09/b1/`) : `noyaux_us_pas` 3532,7, famille
+`experts` 1508,6 (43 %), `autres` 638,3 (18 %) — 2ᵉ poste. Défaut trouvé dans `familles-b1.py:12` : motif
+`nvfp4_gemv\b` ne matche pas `nvfp4_gemv_kernel<...>` (le `_` après `gemv` casse la frontière de mot `\b`) → tous
+les GEMV étroits nvfp4 (dont les projections GDN `qkv`/`gate`/`alpha`/`beta_proj`, non nommables par
+`role_marlin`) tombent dans « autres » au lieu de « projections ». `fused_recurrent_gated_delta_rule_fwd_kernel`
+(30×/pas = exactement les 30 couches `linear_attention`, cohérent) y est aussi, à raison — c'est la récurrence,
+pas une projection.
+
+Limite trouvée : le nom de noyau + dimensions de grille (`<256x1x1>`, `<512x1x1>`, `<8x1x1>`…) ne distingue PAS
+`qkv` de `gate` de `alpha`/`beta_proj` — plusieurs projections de tailles différentes partagent le même template
+générique. Attribution fine par poste (les 3 nommés dans la prédiction) impossible sans marquage NVTX par
+couche/projection, absent de l'instrumentation actuelle. Recommandation : soit corriger le regex (poste séparé,
+mineur, 1 ligne) pour au moins sortir ces noyaux d'« autres » vers « projections », soit ajouter des plages NVTX
+nommées dans `gdn.py:_projections` si le partage par poste (qkv vs gate vs alpha/beta vs out) est exigé par le
+chef. Sans ça, le verdict final ne pourra confirmer/infirmer la prédiction qu'au niveau « projections GDN
+globales », pas poste par poste.
+
+b=8 lancé (`ACVRAM_NOM=poste2-p215-b8`), sortie `scratchpad/poste2-p215-25-09/b8/`.
+
 ## Blocage avant prise
 
 `outils/carte-libre.sh` (25/09, avant réservation) : carte 0 occupée par PID 85799, **ni verrou (mesure) ni
