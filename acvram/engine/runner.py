@@ -406,13 +406,15 @@ def _raison_principale_refus(refusees: dict) -> Optional[str]:
     return Counter(refusees.values()).most_common(1)[0][0]
 
 
-def _regime_echelle_awq(model) -> str:
+def _regime_echelle_awq(model, blocs=None) -> str:
     """Porteur de l'échelle AWQ des experts, agrégé sur les couches MoE :
     « gemv(N/M) », « torch(N/M) », « aucune », ou « mixte(...) » quand les
     couches ne s'accordent pas — chaque valeur vient du dernier forward du
     bloc (`MoEBlock._echelle_awq`), jamais d'une variable d'environnement."""
     from .model import MoEBlock
-    vals = [getattr(m, "_echelle_awq", None) for m in model.modules() if isinstance(m, MoEBlock)]
+    if blocs is None:                                  # pièce 268 : regime() passe les MoEBlock déjà collectés
+        blocs = [m for m in model.modules() if isinstance(m, MoEBlock)]
+    vals = [getattr(m, "_echelle_awq", None) for m in blocs]
     vus = [v for v in vals if v is not None]
     if not vus:
         return "?"                                     # aucun forward MoE encore passé
@@ -911,7 +913,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # noyau Marlin, au bit), `torch` (gather + division devant chaque
             # GEMV : 8 lancements et 0,47 ms/pas à b=12), `aucune` (alias sans
             # échelles d'experts). Lu sur les blocs, pas sur une variable.
-            "echelle_awq": _regime_echelle_awq(self.model),
+            "echelle_awq": _regime_echelle_awq(self.model, blocs),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             # pièce 129 : disposition Marlin, bilan du chargement ; 170 : même fragment que l'eval PPL (marlin_bilan_texte)
             "dense": kernels.narrow_regime() + kernels.marlin_bilan_texte(self.model),
