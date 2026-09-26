@@ -1,0 +1,249 @@
+#!/usr/bin/python3
+"""modeles-a-jour — les chemins des menus claude-modele / kimi-modele suivent les modèles.
+
+Les TSV de ~/TSV (acvram-chemins, gguf-chemins, vllm-chemins) portent un chemin
+absolu par alias ; quand un modèle est déplacé (USB → nvme3, nettoyage), l'alias
+reste dans le menu et le lancement échoue au moment où on en a besoin.
+
+  modeles-a-jour               vérifie : rc 0 = tout résout ; rc 1 = au moins un
+                               chemin absent ou relocalisable (imprimés)
+  modeles-a-jour --appliquer   réécrit les chemins relocalisables (sauvegarde
+                               <tsv>.avant-<date>), imprime les absents restants
+
+Un chemin absent se cherche par ses deux derniers composants puis le dernier
+sous les racines connues ; une correspondance unique = relocalisable, zéro =
+ABSENT (modèle effacé ou disque non monté : à décider par l'utilisateur),
+plusieurs = AMBIGU (jamais réécrit).
+
+Colonne ctx (poste7-s2-k48-feu-vert-21-09 § 2b) : la colonne ne porte QUE des
+valeurs servies. À chaque passage (hors du flag --appliquer, qui ne concerne
+que les chemins ci-dessus) le journal de service (JOURNAL_SERVICE, un bloc
+par démarrage introduit par « acvram : service de <alias> ») est relu ; la
+dernière ligne de régime « ctx_tenu=N » (N numérique) de chaque alias devient
+sa colonne, avec sauvegarde datée si elle diffère. Aucune lecture de disque
+modèle, aucun autre TSV touché par cette étape. Le tout SAUTE, sans rien lire
+ni écrire, si le verrou de carte (.qui) n'est pas vide — /tmp/.../<n>.lock.qui
+est tenu par une prise en cours ; « sauté » est alors la seule ligne imprimée.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+# parc.toml (acvram-parc) : racines et TSV du poste
+sys.path.insert(0, "/usr/share/acvram-parc/lib")
+_LIB_LOCALE = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib")
+if os.path.exists(os.path.join(_LIB_LOCALE, "acvram_parc.py")):
+    sys.path.insert(0, _LIB_LOCALE)
+from acvram_parc import charger as _charger_parc  # noqa: E402
+PARC = _charger_parc()
+MAISON = os.path.expanduser("~")
+TSVS = [str(PARC.tsv(k)) for k in ("acvram", "gguf", "vllm")]
+RACINES = [str(r) for r in PARC.racines]
+PROFONDEUR = PARC.profondeur
+QUI = "/tmp/acvram-carte-0.lock.qui"
+JOURNAL_SERVICE = "/tmp/acvram-serveur.log"
+CTX_TSV = str(PARC.tsv("acvram"))
+
+
+def _index():
+    """{nom_de_base: [chemins]} et {"parent/nom": [chemins]} sous les racines."""
+    un, deux = {}, {}
+    for racine in RACINES:
+        if not os.path.isdir(racine):
+            continue
+        base = racine.rstrip("/").count("/")
+        for dossier, sous, fichiers in os.walk(racine):
+            prof = dossier.count("/") - base
+            if prof >= PROFONDEUR:
+                sous[:] = []
+            for nom in sous + fichiers:
+                chemin = os.path.join(dossier, nom)
+                un.setdefault(nom, []).append(chemin)
+                deux.setdefault(os.path.basename(dossier) + "/" + nom, []).append(chemin)
+    return un, deux
+
+
+def _candidats(chemin, un, deux):
+    p = chemin.rstrip("/")
+    cles2 = "/".join(p.split("/")[-2:])
+    c = deux.get(cles2) or un.get(os.path.basename(p)) or []
+    return sorted(set(os.path.realpath(x) for x in c))
+
+
+VISION_TSV = str(PARC.tsv("vision"))
+TYPES_VL = {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe", "gemma3", "gemma4",
+            "llava", "mllama", "internvl", "idefics3"}
+
+
+def _vision(alias, chemin):
+    """(statut, preuve) : « vision » si le MOTEUR servi prend des images (llama.cpp
+    avec mmproj, vLLM avec vision_config) ; « texte-seul » pour un converti acvram
+    issu d'un modèle VL (l'API acvram n'accepte pas d'image) ; None sinon."""
+    import glob
+    import json
+    d = chemin if os.path.isdir(chemin) else os.path.dirname(chemin)
+    if not os.path.isdir(d):
+        return None
+    if glob.glob(os.path.join(d, "*mmproj*")):
+        return ("vision", "mmproj")
+    cj = os.path.join(d, "config.json")
+    try:
+        j = json.load(open(cj))
+    except (OSError, ValueError):
+        return None
+    mt = j.get("model_type", "")
+    arch = " ".join(j.get("architectures", []))
+    vl = ("vision_config" in j or "image_token_id" in j or "ConditionalGeneration" in arch
+          or mt in TYPES_VL or mt.endswith("_text") and mt[:-5] in TYPES_VL | {"qwen3_5", "gemma4_unified", "muse_glimmer"})
+    if not vl:
+        return None
+    if alias.startswith("acvram-"):
+        # acvram sert les images depuis le 20/09 si la conversion a gardé la tour
+        # (tenseurs vision_tower/visual dans l'index des safetensors) ; sinon texte seul
+        idx = glob.glob(os.path.join(d, "*.safetensors.index.json"))
+        tour = False
+        try:
+            if idx:
+                wm = json.load(open(idx[0])).get("weight_map", {})
+                tour = any("vision_tower" in k or ".visual." in k or "embed_vision" in k for k in wm)
+        except (OSError, ValueError):
+            tour = False
+        if tour and "vision_config" in j:
+            return ("vision", f"config.json:{mt} + tour de vision conservée")
+        return ("texte-seul", f"config.json:{mt} (VL converti sans tour, vision non servie)")
+    return ("vision", f"config.json:{mt or arch}")
+
+
+def _usages():
+    """Dérive la colonne « usage » de notes-modeles.tsv et le journal de preuves
+    usage-sources.tsv — APRÈS _ecrire_vision(), dont le tag « vision » dépend.
+    La table n'est jamais écrite à la main : elle se régénère ici. Le dériveur
+    (outils/usages-modeles.py) est un outil du dépôt, absent du paquet parc
+    installé : on l'ignore alors sans échouer, comme les lanceurs pour carte.sh."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "..", "outils", "usages-modeles.py")
+    if os.path.exists(script):
+        subprocess.run([sys.executable, script], check=False)
+
+
+def _ecrire_vision():
+    lignes = []
+    for tsv in TSVS:
+        if not os.path.exists(tsv):
+            continue
+        for ligne in open(tsv, encoding="utf-8"):
+            c = ligne.rstrip("\n").split("\t")
+            if len(c) >= 2 and c[1].startswith("/"):
+                v = _vision(c[0], c[1])
+                if v:
+                    lignes.append(f"{c[0]}\t{v[0]}\t{v[1]}")
+    contenu = "\n".join(sorted(lignes)) + "\n"
+    try:
+        ancien = open(VISION_TSV, encoding="utf-8").read()
+    except OSError:
+        ancien = None
+    if contenu != ancien:
+        open(VISION_TSV, "w", encoding="utf-8").write(contenu)
+        print(f"VISION\t{VISION_TSV}\t{len(lignes)} alias")
+
+
+def _qui_non_vide():
+    try:
+        return bool(open(QUI, encoding="utf-8").read().strip())
+    except OSError:
+        return False
+
+
+def _ctx_tenu_par_alias():
+    # relit JOURNAL_SERVICE au moment de l'appel (jamais en défaut de paramètre :
+    # un module rechargé/monkeypatché pour les tests doit voir la valeur du jour)
+    journal = JOURNAL_SERVICE
+    """{alias: N} — dernière ctx_tenu=N numérique du dernier bloc de service de chaque alias
+    dans le journal (un bloc = tout ce qui suit une ligne « acvram : service de <alias> »,
+    jusqu'au bloc suivant). ctx_tenu=non-verifie / non-chauffe : ignoré (pas une valeur servie)."""
+    try:
+        texte = open(journal, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return {}
+    debut_alias = re.compile(r"acvram : service de (\S+)")
+    bornes = [(m.start(), m.group(1)) for m in debut_alias.finditer(texte)]
+    ctx_tenu = re.compile(r"ctx_tenu=(\d+)\b")
+    resultat = {}
+    for i, (pos, alias) in enumerate(bornes):
+        fin = bornes[i + 1][0] if i + 1 < len(bornes) else len(texte)
+        bloc = texte[pos:fin]
+        vals = ctx_tenu.findall(bloc)
+        if vals:
+            resultat[alias] = int(vals[-1])
+    return resultat
+
+
+def _recopier_ctx_tenu():
+    """Colonne = valeur servie (poste7-s2-k48-feu-vert-21-09 § 2b) ; sauvegarde datée si ça change."""
+    mesures = _ctx_tenu_par_alias()
+    if not mesures or not os.path.exists(CTX_TSV):
+        return
+    lignes = open(CTX_TSV, encoding="utf-8").read().split("\n")
+    neuves, changes = [], 0
+    for ligne in lignes:
+        c = ligne.split("\t")
+        if len(c) >= 3 and c[0] in mesures and c[2] != str(mesures[c[0]]):
+            print(f"CTX_SERVI\t{c[0]}\t{c[2]}\t->\t{mesures[c[0]]}")
+            c[2] = str(mesures[c[0]])
+            changes += 1
+            ligne = "\t".join(c)
+        neuves.append(ligne)
+    if changes:
+        sauvegarde = f"{CTX_TSV}.avant-{time.strftime('%Y%m%d-%H%M%S')}"
+        shutil.copy2(CTX_TSV, sauvegarde)
+        with open(CTX_TSV, "w", encoding="utf-8") as f:
+            f.write("\n".join(neuves))
+        print(f"ECRIT\t{CTX_TSV}\t{changes} colonne(s) ctx recopiée(s) du service\tsauvegarde {sauvegarde}")
+
+
+def main():
+    if _qui_non_vide():
+        print(f"SAUTÉ\t{time.strftime('%Y-%m-%d %H:%M:%S')}\t.qui non vide, aucune lecture des dossiers modèles")
+        return 0
+    appliquer = "--appliquer" in sys.argv[1:]
+    _recopier_ctx_tenu()  # colonne ctx = servie ; toujours fait, jamais gardé par --appliquer
+    un, deux = _index()
+    rc = 0
+    _ecrire_vision()
+    _usages()   # dérive la colonne usage + usage-sources.tsv, après le VISION_TSV
+    for tsv in TSVS:
+        if not os.path.exists(tsv):
+            continue
+        lignes = open(tsv, encoding="utf-8").read().split("\n")
+        neuves, changes = [], 0
+        for ligne in lignes:
+            c = ligne.split("\t")
+            if len(c) < 2 or not c[1].startswith("/") or os.path.exists(c[1]):
+                neuves.append(ligne)
+                continue
+            cand = _candidats(c[1], un, deux)
+            rc = 1
+            if len(cand) == 1:
+                print(f"RELOCALISE\t{c[0]}\t{c[1]}\t->\t{cand[0]}")
+                if appliquer:
+                    c[1] = cand[0]
+                    changes += 1
+            elif not cand:
+                print(f"ABSENT\t{c[0]}\t{c[1]}")
+            else:
+                print(f"AMBIGU\t{c[0]}\t{c[1]}\t" + " | ".join(cand))
+            neuves.append("\t".join(c))
+        if appliquer and changes:
+            sauvegarde = f"{tsv}.avant-{time.strftime('%Y%m%d-%H%M%S')}"
+            shutil.copy2(tsv, sauvegarde)
+            with open(tsv, "w", encoding="utf-8") as f:
+                f.write("\n".join(neuves))
+            print(f"ECRIT\t{tsv}\t{changes} ligne(s)\tsauvegarde {sauvegarde}")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

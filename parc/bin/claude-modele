@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# claude-modele — Claude Code sur n'importe quel modèle du parc local, avec le même menu
+# et les mêmes fichiers que kimi-modele (~/.kimi-code/config.toml, gguf-chemins.tsv,
+# vllm-chemins.tsv, notes-modeles.tsv). Le moteur choisi est démarré si besoin, puis
+# claude est lancé sur son API Anthropic (/v1/messages : llama.cpp, appoint, vLLM).
+# TabbyAPI n'expose pas cette API : non utilisable ici.
+# Usage : claude-modele [alias] [args de claude]
+set -uo pipefail
+# parc.toml (acvram-parc) : chemins, ports, clés et moteurs du poste ; rien n'est codé ici
+PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
+_ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
+set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
+read -r PARC_BIN PARC_TOKENS_TABBY < <(python3 -c "import sys; sys.path.insert(0, '$(dirname "$PARC_LIB_PY")'); from acvram_parc import charger; P = charger(); print(P.bin, P.moteurs.get('tabby', {}).get('tokens') or '-')")
+export PARC_BIN PARC_TOKENS_TABBY
+CONFIG="$PARC_CONFIG"
+CHEMINS="$PARC_GGUF_TSV"
+VCHEMINS="$PARC_VLLM_TSV"
+MCP="$PARC_MCP_CLAUDE"
+c_t=$'\e[1;36m'; c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_t=''; c_d=''; c_v=''; c_r=''; c_0=''; }
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+[ -r "$PARC_SECRETS" ] && . "$PARC_SECRETS"
+CLE_LLAMACPP="${CLE_LLAMACPP:-${PARC_CLE_LLAMACPP:-}}"
+CLE_RAPIDE="${CLE_RAPIDE:-${PARC_CLE_RAPIDE:-}}"
+CLE_VLLM="${CLE_VLLM:-${PARC_CLE_VLLM:-}}"
+CLE_ACVRAM="${CLE_ACVRAM:-${PARC_CLE_ACVRAM:-acvram-local}}"
+
+lister_alias() {
+  [ -x "$PARC_BIN/claude-local" ] && printf 'claude-local\tHuihui-Qwen3.6-35B-A3B-Opus-abl (RTX 5090 · port 8084)\t131072\taucun\t92\t★★★★\tagent Claude local par défaut\n'
+  python3 - "$CONFIG" <<'PY'
+import sys, tomllib, os
+NOTES = {}
+try:
+    for ligne in open(os.environ['PARC_NOTES_TSV']):
+        c = ligne.rstrip('\n').split('\t')
+        if len(c) == 5:
+            NOTES[c[0]] = (c[1], c[2], c[3], c[4])
+except OSError:
+    pass
+VISION = {}
+try:
+    for ligne in open(os.path.join(os.environ['PARC_TSV_DIR'], 'vision-modeles.tsv')):
+        c = ligne.rstrip('\n').split('\t')
+        if len(c) >= 2:
+            VISION[c[0]] = c[1]
+except OSError:
+    pass
+ORDRE = {'acvram': 0, 'vllm': 1, 'rapide': 2, 'llamacpp': 3, 'tabby': 4, 'yals': 5}
+d = tomllib.load(open(sys.argv[1], 'rb'))
+MOTEURS = set(os.environ.get('PARC_MOTEURS', '').split())   # moteurs présents dans parc.toml
+items = [(a, m) for a, m in d.get('models', {}).items()
+         if m.get('provider') in ORDRE and m.get('provider') in MOTEURS]   # 0 moteur = 0 alias
+# tous les moteurs servables, même ordre que la GUI (poste7-menus-cloture-19-09 S4) ;
+# tabby/yals restent listés : le lanceur dit son refus explicite s'il ne les prend pas
+ordre = ORDRE
+items.sort(key=lambda kv: (ordre[kv[1]['provider']], kv[0]))
+for alias, m in items:
+    # fiche absente ou champ vide/« ? » : jamais « ? » (poste7-menus-cloture-19-09 § 1)
+    defaut = ('inconnu', 'non mesuré', 'non mesuré', 'inconnu')
+    refus, tps, qual, usage = (v if v.strip() and v.strip() != '?' else defaut[i]
+                               for i, v in enumerate(NOTES.get(alias, defaut)))
+    v = VISION.get(alias)
+    if v == 'vision':
+        usage = '👁 ' + usage + ' · vision (images)'
+    elif v == 'texte-seul':
+        usage = usage + ' · VL converti, texte seul'
+    print('\t'.join([alias, m.get('model', '?'), str(m.get('max_context_size', '')),
+                     refus, tps, qual, usage]))
+PY
+}
+
+modele_servi() {  # $1 url  $2 clé
+  curl -s -m 3 -H "Authorization: Bearer $2" "$1/v1/models" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null
+}
+modele_charge() {
+  local id=""
+  # seuls les moteurs présents dans parc.toml sont sondés
+  [ -n "${PARC_PORT_LLAMACPP:-}" ] && { id=$(modele_servi "http://127.0.0.1:$PARC_PORT_LLAMACPP" "$CLE_LLAMACPP"); [ -n "$id" ] && { basename "${id%.gguf}"; return; }; }
+  [ -n "${PARC_PORT_VLLM:-}" ] && { id=$(modele_servi "http://127.0.0.1:$PARC_PORT_VLLM" "$CLE_VLLM"); [ -n "$id" ] && { echo "$id"; return; }; }
+  [ -n "${PARC_PORT_RAPIDE:-}" ] && { id=$(modele_servi "http://127.0.0.1:$PARC_PORT_RAPIDE" "$CLE_RAPIDE"); [ -n "$id" ] && basename "${id%.gguf}"; }
+  return 0
+}
+
+lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ args claude]
+  local url="$1" cle="$2" modele="$3" ctx="$4"; shift 4
+  local code
+  code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST "$url/v1/messages" \
+    -H "x-api-key: $cle" -H "Authorization: Bearer $cle" -H 'anthropic-version: 2023-06-01' \
+    -H 'content-type: application/json' \
+    -d "{\"model\":\"$modele\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\".\"}]}")
+  case "$code" in
+    404|405) err "Ce moteur n'expose pas /v1/messages (API Anthropic) — choisir un alias llamacpp-* ou rapide-*."; exit 1 ;;
+    000) err "Moteur injoignable sur $url"; exit 1 ;;
+  esac
+  export ANTHROPIC_BASE_URL="$url" ANTHROPIC_AUTH_TOKEN="$cle"
+  export ANTHROPIC_MODEL="$modele" ANTHROPIC_SMALL_FAST_MODEL="$modele"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$modele" ANTHROPIC_DEFAULT_SONNET_MODEL="$modele" ANTHROPIC_DEFAULT_HAIKU_MODEL="$modele"
+  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
+  # Prompt de démarrage de claude CLI mesuré à sec (22/09, ~12 682 tokens tiktoken cl100k).
+  # Marge ×1.2 pour les variations de session (MCP, outils) + budget réponse minimal.
+  local PROMPT_BASE=15000 MIN_REPONSE=4096
+  if [ -n "$ctx" ] && [ "$ctx" -lt $(( PROMPT_BASE + MIN_REPONSE )) ] 2>/dev/null; then
+    err "alias $modele : contexte $ctx tokens insuffisant (prompt de démarrage ~${PROMPT_BASE}, réponse mini ${MIN_REPONSE} — il faut ≥ $(( PROMPT_BASE + MIN_REPONSE )) tokens)"; exit 1
+  fi
+  [ -n "$ctx" ] && export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx"   # fenêtre réelle du moteur
+  printf '\n%s→ claude sur %s (%s)%s\n\n' "$c_t" "$modele" "$url" "$c_0"
+  # UN SEUL constructeur : --afficher imprime le tableau que l'exec reçoit (poste7 21/09) ;
+  # PARC_EXEC=<programme> le reçoit à la place de claude (test à sec, quatre moteurs).
+  local CMD=("${PARC_CLAUDE/#\~/$HOME}" --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" "$@")
+  if [ "${AFFICHER:-0}" = 1 ]; then   # claude-modele --afficher <alias> : montre sans lancer
+    env | grep -E '^(ANTHROPIC_|DISABLE_|CLAUDE_CODE_)' | sort
+    printf 'commande :'; printf ' %q' "${CMD[@]}"; printf '\n'
+    exit 0
+  fi
+  [ -n "${PARC_EXEC:-}" ] && exec "$PARC_EXEC" "${CMD[@]}"
+  exec "${CMD[@]}"
+}
+
+. "$PARC_LIB"
+choix=""
+AFFICHER=0
+[ "${1:-}" = "--afficher" ] && { AFFICHER=1; shift; }
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then choix="$1"; shift; fi
+if [ -z "$choix" ]; then
+  choix=$(choisir_alias "Claude local — parc de modèles (vLLM · llama.cpp · appoint 3080 Ti)" "$(modele_charge)") || exit 1
+  # parc vide (rc 0, message déjà nommé par choisir_alias) : rien à lancer, sortie propre
+  [ -n "$choix" ] || exit 0
+fi
+
+case "$choix" in
+  claude-local)
+    exec "$PARC_BIN/claude-local" "$@" ;;
+  acvram-*)
+    # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte),
+    # /v1/messages (API Anthropic) expose nativement par le serveur.
+    # claude CLI charge ~19096 jetons au démarrage (PROMPT_BASE=15000 + MIN_REPONSE=4096).
+    CTX_CLIENT_MIN=19096 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    ctx=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f3)
+    ctx_client=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f4)
+    [ -n "$ctx_client" ] && [ "$ctx_client" -gt "${ctx:-0}" ] 2>/dev/null && ctx="$ctx_client"
+    lancer_claude "http://127.0.0.1:${PARC_PORT_ACVRAM:-8090}" "$CLE_ACVRAM" "$choix" "${ctx:-32768}" "$@" ;;
+  tabby-*)
+    err "TabbyAPI n'expose pas l'API Anthropic : choisir un alias llamacpp-*, rapide-*, vllm-* ou acvram-*."; exit 1 ;;
+  yals-*)
+    err "YALS n'expose pas l'API Anthropic (API OpenAI seule, lanceur kimi-yals) : choisir un alias llamacpp-*, rapide-*, vllm-* ou acvram-*."; exit 1 ;;
+  rapide-*)
+    "$PARC_BIN/llamacpp-appoint" || exit 1
+    lancer_claude "http://127.0.0.1:${PARC_PORT_RAPIDE:-8081}" "$CLE_RAPIDE" "$(modele_servi "http://127.0.0.1:${PARC_PORT_RAPIDE:-8081}" "$CLE_RAPIDE")" 65536 "$@" ;;
+  vllm-*)
+    ligne=$(grep "^$choix	" "$VCHEMINS" 2>/dev/null | head -1)
+    [ -n "$ligne" ] || { err "Alias absent de $VCHEMINS : $choix"; exit 1; }
+    dossier=$(printf '%s' "$ligne" | cut -f2); lmax=$(printf '%s' "$ligne" | cut -f3)
+    servi=$(modele_servi "http://127.0.0.1:${PARC_PORT_VLLM:-8000}" "$CLE_VLLM")
+    if [ -n "$servi" ] && [ "$servi" = "$(basename "$dossier")" ]; then
+      printf '%sModèle déjà servi par vLLM.%s\n' "$c_v" "$c_0"
+    else
+      "$PARC_BIN/vllm-serveur" "$dossier" "$lmax" || exit 1
+    fi
+    lancer_claude "http://127.0.0.1:${PARC_PORT_VLLM:-8000}" "$CLE_VLLM" "$(basename "$dossier")" "$lmax" "$@" ;;
+  llamacpp-*)
+    ligne=$(grep "^$choix	" "$CHEMINS" 2>/dev/null | head -1)
+    [ -n "$ligne" ] || { err "Alias absent de $CHEMINS : $choix"; exit 1; }
+    dossier=$(printf '%s' "$ligne" | cut -f2); ctx=$(printf '%s' "$ligne" | cut -f3); gab=$(printf '%s' "$ligne" | cut -f4)
+    case "$gab" in ~/*) gab="$HOME/${gab#\~/}" ;; esac
+    attendu=$(find "$dossier" -maxdepth 1 -name "*.gguf" -size +1M ! -iname "*mmproj*" ! -name "gabarit*" | sort | head -1)
+    servi=$(modele_servi "http://127.0.0.1:${PARC_PORT_LLAMACPP:-8080}" "$CLE_LLAMACPP")
+    if [ -n "$servi" ] && [ "$(basename "${servi%.gguf}")" = "$(basename "${attendu%.gguf}")" ]; then
+      printf '%sModèle déjà servi par llama.cpp.%s\n' "$c_v" "$c_0"
+    else
+      GABARIT="$gab" "$PARC_BIN/llamacpp-serveur" "$dossier" "$ctx" || exit 1
+    fi
+    lancer_claude "http://127.0.0.1:${PARC_PORT_LLAMACPP:-8080}" "$CLE_LLAMACPP" "$(modele_servi "http://127.0.0.1:${PARC_PORT_LLAMACPP:-8080}" "$CLE_LLAMACPP")" "$(cat "${PARC_EXTRA_CTX_ACTUEL:-/dev/null/absent}" 2>/dev/null || echo "$ctx")" "$@" ;;
+  *)
+    err "Alias hors moteurs directs : $choix (attendu : claude-local, acvram-*, llamacpp-*, rapide-*, vllm-*)"; exit 1 ;;
+esac

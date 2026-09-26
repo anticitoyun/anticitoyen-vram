@@ -1,0 +1,16 @@
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=0 regime=seule places=64 latence_prefill=572 ms passes=1 voisines=0 jetons
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=2048 regime=seule places=64 latence_prefill=687 ms passes=2 voisines=0 jetons
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=2048 regime=seule places=64 latence_prefill=679 ms passes=2 voisines=0 jetons
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=0 regime=seule places=64 latence_prefill=525 ms passes=1 voisines=0 jetons
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=0 regime=seule places=64 latence_prefill=525 ms passes=1 voisines=0 jetons
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=2048 regime=seule places=64 latence_prefill=679 ms passes=2 voisines=0 jetons
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=2048 regime=seule places=64 latence_prefill=679 ms passes=2 voisines=0 jetons
+budget	regime	places_graphes	jetons_prefilles	latence_prefill_ms	passes_prefill	jetons_voisines	jetons_s_voisines	joules	jetons_par_kJ	watts	temp_max	bridages	invalidations
+[fini] budget=0 regime=seule places=64 latence_prefill=526 ms passes=1 voisines=0 jetons

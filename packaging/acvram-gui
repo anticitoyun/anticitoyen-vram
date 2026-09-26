@@ -1,0 +1,1082 @@
+#!/usr/bin/python3
+"""acvram-gui — la console acvram dans une fenêtre native, sans navigateur.
+
+POURQUOI UNE FENÊTRE NATIVE ET NON UN ONGLET. La console web dépend d'un
+navigateur ouvert, de ses onglets, de son bloqueur de fenêtres. Une fenêtre à
+soi n'a aucun de ces problèmes, apparaît dans le menu et la barre des tâches
+sous son nom, et se ferme avec la machine.
+
+POURQUOI WEBKIT ET NON DES WIDGETS GTK. La console est du HTML/CSS/JS et
+change souvent ; la refaire en widgets doublerait chaque évolution. WebKit rend
+exactement la même page, dans le même thème rose, avec zéro divergence. La
+fenêtre apporte ce que la page ne peut pas : démarrer et arrêter le serveur,
+choisir le modèle, plein écran, zoom, et une barre d'état qui lit les
+capteurs même quand la page ne le fait pas.
+
+CE QU'IL FAIT AU DÉMARRAGE. Il cherche un serveur acvram déjà en marche (le
+champ `acvram` de /v1/models — /health ne suffit pas, llama-server le porte
+aussi). S'il en trouve un, il l'ouvre. Sinon il propose de choisir un modèle
+dans le parc et démarre `acvram serve` lui-même, dans un sous-processus qu'il
+arrête à la fermeture. Il ne devine jamais le modèle.
+
+Dépendances Debian : python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1,
+python3-psutil (facultatif, pour la barre d'état).
+"""
+from __future__ import annotations
+
+import glob
+import html
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import urllib.request
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("WebKit2", "4.1")
+from gi.repository import GLib, Gtk, WebKit2  # noqa: E402
+
+PORTS = [int(p) for p in os.environ.get("ACVRAM_PORTS", "8000 8081 8080 8765 8766").split()]
+PARC = os.environ.get("ACVRAM_PARC", os.path.expanduser("~/Modeles/models_acvram"))
+def _racine_configuree() -> list[str]:
+    """La même lecture que outils/racine_modeles.py (hors paquet) : ACVRAM_MODELES, ACVRAM_MODELS_DIR, puis
+    ~/.config/acvram/modeles (première ligne non commentée qui existe) — aucun chemin de machine dans le paquet."""
+    for v in ("ACVRAM_MODELES", "ACVRAM_MODELS_DIR"):
+        if os.environ.get(v):
+            return [os.environ[v]]
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "acvram", "modeles")
+    try:
+        with open(conf, encoding="utf-8") as f:
+            return [l.strip() for l in f if l.strip() and not l.startswith("#") and os.path.isdir(l.strip())][:1]
+    except OSError:
+        return []
+
+
+PARCS_CONNUS = [PARC, *_racine_configuree(), os.path.expanduser("~/models_acvram")]
+PORT_DEFAUT = int(os.environ.get("ACVRAM_PORT", "8765"))
+SOUTIEN_URL = "https://buymeacoffee.com/anticitoyen"
+
+
+def version_acvram() -> str:
+    """Version du paquet : le module s'il est importable (venv, .deb), sinon le
+    pyproject.toml du dépôt à côté du script, sinon « ? » — jamais devinée."""
+    try:
+        from acvram import __version__
+        return __version__
+    except Exception:
+        pass
+    import re
+    for cand in (os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "..", "pyproject.toml"),
+                 "/usr/share/acvram/pyproject.toml"):
+        try:
+            m = re.search(r'^version\s*=\s*"([^"]+)"', open(cand, encoding="utf-8").read(), re.M)
+            if m:
+                return m.group(1)
+        except OSError:
+            continue
+    return "?"
+
+# ---- langues ------------------------------------------------------------------
+# Les chaînes sont écrites en français dans le code (source). Les traductions
+# vivent dans langues/<code>.json (à côté du script dans le dépôt, sous
+# /usr/share/acvram/langues dans le paquet) : ajouter une langue = ajouter un
+# fichier, pas une ligne de code. T() rend la traduction de la langue courante,
+# ou la source si la clé manque (jamais une chaîne vide). Choix : menu de la
+# barre, mémorisé dans ~/.config/acvram/langue ; sinon ACVRAM_LANG, sinon la
+# locale (LANG), sinon fr.
+NOMS_LANGUES = {
+    "fr": "Français", "en": "English", "de": "Deutsch", "es": "Español", "it": "Italiano",
+    "eo": "Esperanto", "zh": "中文", "ja": "日本語", "ar": "العربية", "ru": "Русский",
+    "pt": "Português", "nl": "Nederlands", "pl": "Polski", "tr": "Türkçe", "ko": "한국어",
+    "hi": "हिन्दी", "uk": "Українська", "sv": "Svenska", "cs": "Čeština", "ro": "Română",
+    "el": "Ελληνικά", "hu": "Magyar", "fi": "Suomi", "da": "Dansk", "nb": "Norsk",
+    "vi": "Tiếng Việt", "id": "Bahasa Indonesia", "th": "ไทย", "he": "עברית", "fa": "فارسی",
+    "bn": "বাংলা", "ca": "Català",
+}
+LANGUES_RTL = {"ar", "he", "fa", "ur"}
+
+
+def dossiers_langues() -> list[str]:
+    ici = os.path.dirname(os.path.realpath(sys.argv[0]))
+    return [os.path.join(ici, "langues"), os.path.join(ici, "..", "share", "acvram", "langues"),
+            "/usr/share/acvram/langues"]
+
+
+def dossier_galerie() -> str:
+    """packaging/galerie (dépôt) ou /usr/share/acvram/galerie (paquet) : les
+    images de l'auteur (vignettes ≤ 720 px, jpg), servies en file:// — la
+    page est chargée depuis file:///, WebKit l'autorise avec le réglage
+    allow_file_access_from_file_urls posé dans la fenêtre."""
+    ici = os.path.dirname(os.path.realpath(sys.argv[0]))
+    for c in (os.path.join(ici, "galerie"), os.path.join(ici, "..", "share", "acvram", "galerie"),
+              "/usr/share/acvram/galerie"):
+        if os.path.isdir(c):
+            return c
+    return ""
+
+
+def images_galerie() -> list[str]:
+    d = dossier_galerie()
+    if not d:
+        return []
+    return sorted(os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))
+
+
+def html_galerie() -> str:
+    """Grille de vignettes ; un clic ouvre l'image en grand (visionneuse
+    dans la page, flèches ← → et Échap), rien ne sort de la fenêtre."""
+    imgs = images_galerie()
+    if not imgs:
+        return ""
+    vign = "".join(f'<img src="file://{html.escape(c)}" loading="lazy" onclick="galerie({i})" alt="">' for i, c in enumerate(imgs))
+    return f"""<h2>{T("Galerie")}</h2>
+<p class="note">{T("{n} images de l'auteur — cliquer pour agrandir, ← → pour passer, Échap pour fermer.", n=len(imgs))}</p>
+<div class="galerie">{vign}</div>
+<div id="visionneuse" onclick="fermer_galerie()"><img id="vis_img" src="" alt=""><span id="vis_pos"></span></div>"""
+
+
+def logo_data_uri() -> str:
+    """Le logo (packaging/logo-acvram.jpg, ou /usr/share/acvram/) en data URI :
+    la page est chargée depuis file:/// sans base, un chemin relatif ne
+    résout pas. Vide si absent (la page reste servie sans image)."""
+    import base64
+    ici = os.path.dirname(os.path.realpath(sys.argv[0]))
+    for c in (os.path.join(ici, "logo-acvram.jpg"), os.path.join(ici, "..", "share", "acvram", "logo-acvram.jpg"),
+              "/usr/share/acvram/logo-acvram.jpg"):
+        try:
+            with open(c, "rb") as fh:
+                return "data:image/jpeg;base64," + base64.b64encode(fh.read()).decode()
+        except OSError:
+            continue
+    return ""
+
+
+LOGO = logo_data_uri()
+
+# Quatre propositions de mise en page du logo (demande utilisateur, 20/09) :
+# l'utilisateur a choisi « A + B » (20/09) : bandeau en tête ET arrière-plan
+# voilé ; les autres restent dans le menu « Thème », choix mémorisé dans
+# ~/.config/acvram/theme.
+THEMES = {
+    "ab": "A + B · bandeau en tête + arrière-plan voilé (choix utilisateur 20/09)",
+    "bandeau": "A · bandeau en tête (fond uni)",
+    "fond": "B · logo en arrière-plan plein écran, voile sombre",
+    "filigrane": "C · filigrane en bas à droite",
+    "flou": "D · arrière-plan flouté, cartes translucides",
+}
+FICHIER_THEME = os.path.expanduser("~/.config/acvram/theme")
+
+
+def theme_courant() -> str:
+    try:
+        with open(FICHIER_THEME, encoding="utf-8") as fh:
+            t = fh.read().strip()
+        return t if t in THEMES else "ab"
+    except OSError:
+        return "ab"
+
+
+THEME = theme_courant()
+
+
+def css_theme() -> str:
+    """Le CSS propre au thème choisi ; sans logo, rien."""
+    if not LOGO:
+        return ""
+    u = f"url('{LOGO}')"
+    if THEME in ("fond", "ab"):
+        return (f"body{{background:linear-gradient(rgba(18,10,16,.55),rgba(18,10,16,.8)),{u} center/cover fixed no-repeat}}"
+                ".carte{background:rgba(28,16,24,.82);backdrop-filter:blur(2px)}")
+    if THEME == "filigrane":
+        return (f"body::after{{content:'';position:fixed;right:12px;bottom:12px;width:320px;height:213px;"
+                f"background:{u} center/cover no-repeat;opacity:.35;border-radius:12px;pointer-events:none;z-index:0}}"
+                ".carte{position:relative;z-index:1}")
+    if THEME == "flou":
+        return (f"body::before{{content:'';position:fixed;inset:-20px;background:{u} center/cover no-repeat;"
+                "filter:blur(10px) brightness(.55);z-index:-1}}"
+                ".carte{background:rgba(28,16,24,.86)}")
+    return ""   # bandeau : l'image est dans le corps (html_bandeau)
+
+
+def html_bandeau() -> str:
+    if not LOGO or THEME not in ("bandeau", "ab"):
+        return ""
+    return (f'<div style="margin:-28px -28px 16px;height:170px;background:url(\'{LOGO}\') center 30%/cover no-repeat;'
+            'border-bottom:1px solid var(--bord);position:relative">'
+            '<div style="position:absolute;inset:0;background:linear-gradient(rgba(18,10,16,.1),var(--fond))"></div></div>')
+
+
+def changer_theme(nom: str) -> None:
+    global THEME
+    if nom not in THEMES:
+        return
+    THEME = nom
+    os.makedirs(os.path.dirname(FICHIER_THEME), exist_ok=True)
+    with open(FICHIER_THEME, "w", encoding="utf-8") as fh:
+        fh.write(nom)
+
+
+def charger_traductions() -> dict[str, dict[str, str]]:
+    """{code: {source_fr: traduction}} depuis les fichiers trouvés ; fr = source."""
+    out: dict[str, dict[str, str]] = {"fr": {}}
+    for d in dossiers_langues():
+        try:
+            noms = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in noms:
+            if not n.endswith(".json") or n.startswith("_") or n[:-5] in out:
+                continue
+            try:
+                with open(os.path.join(d, n), encoding="utf-8") as f:
+                    out[n[:-5]] = json.load(f)
+            except (OSError, ValueError):
+                continue
+    return out
+
+
+TRADUCTIONS = charger_traductions()
+LANGUES = {c: NOMS_LANGUES.get(c, c) for c in TRADUCTIONS}   # seules les langues présentes
+FICHIER_LANGUE = os.path.expanduser("~/.config/acvram/langue")
+
+
+def langue_initiale() -> str:
+    try:
+        v = open(FICHIER_LANGUE, encoding="utf-8").read().strip()
+        if v in LANGUES:
+            return v
+    except OSError:
+        pass
+    v = os.environ.get("ACVRAM_LANG", "") or os.environ.get("LANG", "")
+    v = v[:2].lower()
+    return v if v in LANGUES else "fr"
+
+
+LANGUE = langue_initiale()
+
+
+def T(s: str, **kw) -> str:
+    """Traduction de la langue courante, source française sinon ; les {clés}
+    sont remplies après traduction, pour que l'ordre des mots reste libre."""
+    r = TRADUCTIONS.get(LANGUE, {}).get(s) or s
+    return r.format(**kw) if kw else r
+
+
+def svg_schema_openwebui() -> str:
+    """Schéma inline (SVG, pas une capture d'écran de la machine) : navigateur → Open WebUI (3000) → acvram (port
+    servi) → modèle sur la carte ; les libellés passent par T() comme le reste de l'onglet."""
+    b, w, a, m = T("Navigateur"), "Open WebUI", "acvram", T("modèle (carte)")
+    port = PORT_DEFAUT
+    def boite(x, titre, sous):
+        return (f'<rect x="{x}" y="22" width="150" height="56" rx="10" fill="var(--carte)" stroke="var(--rose-vif)" stroke-width="1.5"/>'
+                f'<text x="{x + 75}" y="46" text-anchor="middle" font-size="13" font-weight="600" fill="var(--texte)">{titre}</text>'
+                f'<text x="{x + 75}" y="66" text-anchor="middle" font-size="11" fill="var(--texte-2)">{sous}</text>')
+    def fleche(x1, x2, etiquette):
+        return (f'<line x1="{x1}" y1="50" x2="{x2}" y2="50" stroke="var(--rose-vif)" stroke-width="1.5" marker-end="url(#f)"/>'
+                f'<text x="{(x1 + x2) // 2}" y="42" text-anchor="middle" font-size="10" fill="var(--texte-2)">{etiquette}</text>')
+    return ('<svg viewBox="0 0 700 100" width="100%" style="max-width:700px;display:block;margin:8px 0" role="img" '
+            f'aria-label="{b} → Open WebUI → acvram → {m}">'
+            '<defs><marker id="f" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">'
+            '<path d="M0,0 L8,4 L0,8 z" fill="var(--rose-vif)"/></marker></defs>'
+            + boite(10, b, "http://127.0.0.1:3000") + fleche(160, 194, "HTTP")
+            + boite(196, w, T("Réglages → Connexions → OpenAI")) + fleche(346, 380, f"/v1 · {T('clé')} acvram-local")
+            + boite(382, a, f"http://127.0.0.1:{port}/v1") + fleche(532, 566, T("jetons + image"))
+            + boite(568, m, "acvram/acvram 👁") + '</svg>')
+
+
+def dir_html() -> str:
+    return ' dir="rtl"' if LANGUE in LANGUES_RTL else ""
+
+
+# Le thème de la page, repris pour les écrans natifs (accueil, erreurs) afin
+# que rien ne détonne : mêmes nuances, même police.
+CSS = """
+:root{
+/* color-scheme demande au theme GTK de rendre le popup <select> en sombre :
+   sans ca, le menu deroulant des modeles/cartes est blanc sur texte clair,
+   illisible sur un theme systeme clair (18/09, signale par l utilisateur). */
+color-scheme:dark;
+--fond:#120a10;--carte:#1c1018;--bord:#3b1f30;--texte:#fbe4ee;--texte-2:#c98fae;
+--rose-clair:#f9a8d4;--rose-vif:#ec4899;--rose-nuit:#9d174d;--alerte:#fb7185}
+body{margin:0;background:var(--fond);color:var(--texte);font:14px/1.5 system-ui,sans-serif;padding:28px}
+h1{font-size:22px;color:var(--rose-clair);margin:0 0 6px}
+h2{font-size:15px;color:var(--rose-clair);margin:22px 0 8px}
+.carte{background:var(--carte);border:1px solid var(--bord);border-radius:14px;padding:16px 18px;margin:12px 0}
+.note{color:var(--texte-2);font-size:12px}
+select,button{background:var(--carte);color:var(--texte);border:1px solid var(--bord);border-radius:10px;
+padding:8px 12px;font:inherit}
+select{width:100%;margin:8px 0}
+button{cursor:pointer;background:var(--rose-nuit);border-color:var(--rose-vif)}
+button:hover{background:var(--rose-vif)}
+code{color:var(--rose-clair)}
+.ko{color:var(--alerte)}
+.galerie{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:8px 0}
+.galerie img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;cursor:zoom-in;border:1px solid var(--bord)}
+#visionneuse{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:50;align-items:center;justify-content:center;cursor:zoom-out}
+#visionneuse.actif{display:flex}
+#visionneuse img{max-width:96vw;max-height:92vh;border-radius:8px}
+#vis_pos{position:fixed;right:16px;bottom:12px;color:#ddd;font-size:12px}
+.onglets{display:flex;gap:6px;margin:8px 0 4px;border-bottom:1px solid var(--bord)}
+.onglets button{background:transparent;border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;
+color:var(--texte-2);padding:8px 14px}
+.onglets button.actif{background:var(--carte);border-color:var(--bord);color:var(--rose-clair)}
+.onglet{display:none}.onglet.actif{display:block}
+"""
+
+
+def serveur_acvram(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=1) as r:
+            return b'"acvram"' in r.read()
+    except Exception:
+        return False
+
+
+def trouver_serveur() -> int | None:
+    for p in PORTS:
+        if serveur_acvram(p):
+            return p
+    return None
+
+
+def modeles_du_parc() -> list[tuple[str, str]]:
+    """(nom, chemin) pour chaque dossier converti qui porte un manifeste."""
+    vus, out = set(), []
+    for parc in PARCS_CONNUS:
+        for m in sorted(glob.glob(os.path.join(parc, "*", "acvram_manifest.json"))):
+            d = os.path.dirname(m)
+            if d in vus:
+                continue
+            vus.add(d)
+            taille = 0
+            try:
+                for f in os.scandir(d):
+                    if f.is_file():
+                        taille += f.stat().st_size
+            except OSError:
+                pass
+            out.append((f"{os.path.basename(d)}  ({taille / 2**30:.1f} Gio)", d))
+    return out
+
+
+# Toutes les options d'`acvram convert` (aide du 19/09), pilotées par une seule
+# table : la page les affiche, lancer_conversion les traduit en arguments.
+# (drapeau, genre, choix ou espace réservé, aide) — genre : bool | text | choice.
+# Une valeur vide n'émet rien : le CLI garde ses défauts.
+OPTIONS_CONVERT = [
+    ("--profile", "choice", ["", "rig-14900k-5090-3080ti"], "planifie pour un profil déclaré (acvram profiles)"),
+    ("--max-model-len", "text", "ex. 32768", "longueur de contexte planifiée"),
+    ("--max-seqs", "text", "ex. 12", "séquences simultanées que le cache KV doit tenir"),
+    ("--group-size", "text", "128", "taille de groupe de quantification"),
+    ("--format", "text", "nvfp4, int8, bf16…", "impose un seul format de poids partout"),
+    ("--gpus", "text", "auto, all, 0,1", "cartes utilisées (auto : le débit tranche)"),
+    ("--host-exec", "choice", ["", "auto", "stream", "cpu"], "poids en RAM : copiés vers le GPU ou calculés sur place"),
+    ("--host-gb-s", "text", "ex. 80", "bande passante DDR mesurée (acvram bench)"),
+    ("--out", "text", "(défaut : models_acvram/<nom>)", "répertoire de sortie"),
+    ("--no-awq", "bool", None, "arrondi au plus proche, sans mise à l'échelle AWQ"),
+    ("--hadamard", "choice", ["", "auto", "always", "never"], "rotation de Hadamard"),
+    ("--grid", "text", "ex. 21", "finesse de la grille de recherche AWQ"),
+    ("--lm-head-format", "text", "ex. int8", "format de la projection de sortie"),
+    ("--attn-qkvo-int8-canal", "bool", None, "q/k/v/o en int8 symétrique par canal (P2)"),
+    ("--q3n-table", "text", "8 flottants séparés par des virgules", "niveaux q3n du modèle"),
+    ("--force", "bool", None, "convertit même si le modèle ne tient pas"),
+    ("--calib-file", "text", "(défaut : calibration-anglais.txt)", "fichier texte de calibration"),
+    ("--calib-seqs", "text", "", "séquences de calibration"),
+    ("--calib-len", "text", "", "longueur des séquences de calibration"),
+    ("--calib-device", "text", "auto, cpu, cuda:0", "appareil des passes de calibration"),
+    ("--promotion-cout-max", "text", "Mio (0 = aucune)", "prix plafond d'une promotion, en Mio ajoutés"),
+    ("--grille-erreurs", "bool", None, "conserve l'erreur des 21 valeurs de la grille AWQ au manifeste"),
+    ("--bits-budget", "text", "Gio", "budget total de poids : promotions par gain de SNR par octet"),
+    ("--quant-device", "text", "auto, cpu, cuda:0", "appareil de la recherche AWQ et de la quantification"),
+    ("--mixed-precision", "choice", ["", "auto", "off"], "promeut les tenseurs mal quantifiés vers un format plus large"),
+    ("--autoriser-grossissement", "bool", None, "autorise une conversion plus grosse que sa source"),
+    ("--max-promotions", "text", "0,15", "part maximale de tenseurs promus (1.0 : sans borne)"),
+    ("--promotion-classes", "text", "q_proj,k_proj,lm_head", "classes promouvables (vide = toutes)"),
+    ("--snr-floor", "text", "dB (0 = rien)", "SNR sous lequel un tenseur est promu"),
+    ("--mesurer-kld", "bool", None, "publie le KLD couche par couche au manifeste (n'affecte aucune décision)"),
+    ("--alpha-commun-gate-up", "bool", None, "un seul alpha AWQ par paire gate/up (fusion moteur)"),
+    ("--passage-direct", "bool", None, "source déjà NVFP4 : copie ses poids 4 bits tels quels"),
+    ("--hadamard-experts", "bool", None, "tourne les poids d'experts (gate/up/down) en Hadamard"),
+]
+
+
+def _id_option(flag: str) -> str:
+    return "opt_" + flag.lstrip("-").replace("-", "_")
+
+
+def html_options_convert() -> str:
+    """Le bloc repliable « toutes les options » : un champ par entrée de la table."""
+    lignes = []
+    for flag, genre, aide_val, aide in OPTIONS_CONVERT:
+        i = _id_option(flag)
+        t = html.escape(T(aide))
+        if genre == "bool":
+            lignes.append(f'<label title="{t}"><input type="checkbox" id="{i}"> <code>{flag}</code> — {t}</label>')
+        elif genre == "choice":
+            opts = "".join(f'<option value="{html.escape(v)}">{html.escape(v) or "—"}</option>' for v in aide_val)
+            lignes.append(f'<label title="{t}"><code>{flag}</code> <select id="{i}">{opts}</select> — {t}</label>')
+        else:
+            lignes.append(f'<label title="{t}"><code>{flag}</code> <input type="text" id="{i}" placeholder="{html.escape(aide_val)}" style="width:38%"> — {t}</label>')
+    return "<br>\n".join(lignes)
+
+
+def js_options_convert() -> str:
+    """Le fragment JS qui recueille chaque champ dans l'objet envoyé au processus."""
+    parts = []
+    for flag, genre, _, _ in OPTIONS_CONVERT:
+        i = _id_option(flag)
+        if genre == "bool":
+            parts.append(f"'{flag}':document.getElementById('{i}').checked")
+        else:
+            parts.append(f"'{flag}':document.getElementById('{i}').value")
+    return ",".join(parts)
+
+
+
+def mode_eco_demande() -> str:
+    """Le mode éco de config.json (2700 par défaut, décision utilisateur du 19/09)."""
+    try:
+        from acvram import eco
+        return eco.mode_demande()
+    except Exception:
+        return "2700"
+
+
+def options_eco() -> str:
+    m = mode_eco_demande()
+    libelles = {"2700": T("2700 (défaut)"), "2100": T("2100 (éco fort, lots ≥ 8)"), "off": T("off (horloge libre)")}
+    return "".join(f'<option value="{v}"{" selected" if v == m else ""}>{html.escape(l)}</option>' for v, l in libelles.items())
+
+
+def etat_eco_texte() -> str:
+    """Mode demandé (config.json) SANS toucher la carte : `acvram eco etat` lit
+    l'horloge sous une charge légère (0,35 s de matmuls) — interdit sous une
+    fenêtre de mesure d'un pair (verrou carte.sh). La lecture réelle n'a lieu
+    qu'après un changement explicite de mode (bouton), pas au rendu de la page."""
+    try:
+        from acvram import eco
+        return T("config : eco={m} (horloge lue après un changement de mode)", m=eco.mode_demande())
+    except Exception:
+        return ""
+
+
+def etat_eco_carte() -> str:
+    """Horloge réelle par `acvram eco etat` (charge légère) — appelée seulement
+    après une action explicite de l'utilisateur."""
+    try:
+        out = subprocess.run(["acvram", "eco", "etat"], capture_output=True, text=True, timeout=8).stdout
+        return next((l.strip() for l in out.splitlines() if "horloge=" in l), "")
+    except Exception:
+        return ""
+
+
+def proposer_options_convert(source: str) -> tuple[dict, str]:
+    """Propose des options de conversion lues dans le modèle et dans le plan
+    (`acvram plan --json`, sans carte) — jamais devinées : chaque proposition
+    cite ce qui la fonde, et l'utilisateur garde la main sur chaque champ.
+
+    Retour : ({drapeau: valeur}, résumé lisible du plan)."""
+    props: dict = {}
+    raisons: list[str] = []
+    cfg: dict = {}
+    try:
+        with open(os.path.join(source, "config.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except OSError:
+        pass
+    qc = cfg.get("quantization_config") or {}
+    qm = str(qc.get("quant_method", "")).lower()
+    fmt_src = json.dumps(qc).lower()
+    if "nvfp4" in fmt_src or qm == "modelopt":
+        props["--passage-direct"] = True
+        raisons.append(T("source déjà NVFP4 ({qm}) : passage direct, poids de vLLM servis à l'identique", qm=qm or "nvfp4"))
+    try:
+        out = subprocess.run(["acvram", "plan", source, "--json"], capture_output=True, text=True, timeout=300)
+        j = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        j = None
+    if j is None:
+        return props, T("acvram plan a échoué — seules les options lues dans config.json sont proposées")
+    spec, plan = j.get("spec", {}), j.get("plan", {})
+    is_moe = bool(spec.get("is_moe")) or any(l.get("is_moe") for l in plan.get("layers", []))
+    mla = int(spec.get("kv_lora_rank") or 0) > 0
+    if is_moe and not mla:
+        # P2 au défaut (poste7-p2-au-defaut-19-09) : six lignes tenues sur Coder ;
+        # jamais sur MLA (REGLES § 9 : kv_a/q_b jamais int8 par canal).
+        props["--attn-qkvo-int8-canal"] = True
+        raisons.append(T("MoE sans MLA : q/k/v/o en int8 par canal (P2, régime livré 0.6.15)"))
+    elif mla:
+        raisons.append(T("attention MLA : int8 par canal exclu (REGLES § 9)"))
+    gpus = sorted({int(t["device_index"]) for t in plan.get("tiers", []) if str(t.get("name", "")).startswith("cuda")})
+    if gpus:
+        props["--gpus"] = ",".join(str(g) for g in gpus)
+        raisons.append(T("cartes du plan : {g}", g=props["--gpus"]))
+    fmts = [l.get("fmt") for l in plan.get("layers", []) if l.get("fmt")]
+    if fmts and len(set(fmts)) == 1:
+        props["--format"] = fmts[0]
+        raisons.append(T("un seul format dans le plan : {f}", f=fmts[0]))
+    elif fmts:
+        raisons.append(T("formats mêlés dans le plan ({n}) : --format laissé au planificateur", n=", ".join(sorted(set(fmts)))))
+    if plan.get("kv_planned_seqs"):
+        props["--max-seqs"] = str(plan["kv_planned_seqs"])
+    if plan.get("overflowed"):
+        raisons.append(T("le plan DÉBORDE : --force serait nécessaire, non proposé"))
+    resume = T("décodage estimé {d} t/s · prefill {p} j/s · poids {w} Gio · KV {k} jetons",
+               d=plan.get("est_decode_tok_s", "?"), p=plan.get("est_prefill_tok_s", "?"),
+               w=round((plan.get("total_weight_bytes") or 0) / 2**30, 1), k=plan.get("kv_max_tokens", "?"))
+    for w in plan.get("warnings", [])[:4]:
+        raisons.append(str(w))
+    return props, resume + "\n" + "\n".join("· " + x for x in raisons)
+
+
+def page_accueil(erreur: str = "") -> str:
+    opts = "".join(f'<option value="{c}">{n}</option>' for n, c in modeles_du_parc())
+    if not opts:
+        opts = f'<option disabled>{T("aucun modèle converti trouvé — ACVRAM_PARC ?")}</option>'
+    cartes = ""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.total",
+                              "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=3).stdout
+        for l in out.strip().splitlines():
+            i, n, m = [x.strip() for x in l.split(",")]
+            cartes += f'<option value="{i}">{i} · {n} · {int(m) / 1024:.0f} Gio</option>'
+    except Exception:
+        cartes = f'<option value="">{T("nvidia-smi indisponible")}</option>'
+    err = f'<p class="ko">{erreur}</p>' if erreur else ""
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}{css_theme()}</style></head><body>
+{html_bandeau()}
+<h1>acvram</h1>
+<div class="onglets">
+  <button id="ong_serveur" class="actif" onclick="onglet('serveur')">{T("Serveur")}</button>
+  <button id="ong_convertir" onclick="onglet('convertir')">{T("Convertir")}</button>
+  <button id="ong_agent" onclick="onglet('agent')">{T("Agent OS")}</button>
+  <button id="ong_apropos" onclick="onglet('apropos')">{T("À propos")}</button>
+</div>
+<div id="serveur" class="onglet actif">
+<p class="note">{T("Aucun serveur acvram ne répond sur les ports {ports}. Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur répond.", ports=" ".join(map(str, PORTS)))}</p>
+{err}
+<div class="carte">
+  <h2>{T("modèle")}</h2>
+  <select id="modele">{opts}</select>
+  <h2>{T("carte")}</h2>
+  <select id="carte">{cartes}</select>
+  <h2>{T("options")}</h2>
+  <label><input type="checkbox" id="graphes" checked> {T("graphes CUDA")}</label><br>
+  <label>{T("emplacements (slots)")} <input type="number" id="slots" value="4" min="1" max="32" style="width:60px"></label><br>
+  <label>{T("contexte max")} <input type="number" id="ctx" value="8192" min="512" step="512" style="width:90px"></label><br>
+  <label title="{T("verrouille l'horloge de la carte pendant le service (sudo nvidia-smi -lgc) ; 2700 = défaut : même vitesse, −9 à −27 % d'énergie ; off = horloge libre")}">{T("éco d'horloge")}
+    <select id="eco" onchange="eco()">{options_eco()}</select></label>
+  <span class="note" id="eco_etat">{html.escape(etat_eco_texte())}</span>
+  <p><button onclick="lancer()">{T("démarrer le serveur")}</button></p>
+  <p class="note">{T("Le serveur est un sous-processus de cette fenêtre : la fermer l'arrête. Il tourne sous <code>outils/carte.sh</code> quand il est disponible, avec le verrou de la carte choisie.")}</p>
+</div>
+<div class="carte">
+  <h2>{T("modèle déjà en mémoire")}</h2>
+  <p class="note">{T("Un serveur acvram tourne déjà (lancé par une autre session, un autre port) ? Cette fenêtre ne cherche que les ports {ports} au démarrage — donnez le port exact.", ports=" ".join(map(str, PORTS)))}</p>
+  <label>{T("port")} <input type="number" id="port_existant" value="{PORT_DEFAUT}" min="1" max="65535" style="width:90px"></label>
+  <p><button onclick="connecter()">{T("se connecter")}</button></p>
+</div>
+</div>
+<div id="convertir" class="onglet">
+<div class="carte">
+  <h2>{T("convertir un modèle")}</h2>
+  <p class="note">{T("Lance <code>acvram convert</code> sur un répertoire HF (avec <code>config.json</code>) — pas de suggestion de chemin : le répertoire source doit exister.")}</p>
+  <label>{T("répertoire source")} <input type="text" id="conv_source" placeholder="{T("/chemin/vers/le/modele-hf")}" style="width:100%"></label><br>
+  <label>{T("nom de sortie")} <input type="text" id="conv_nom" placeholder="{T("(defaut : nom du repertoire)")}" style="width:60%"></label><br>
+  <label><input type="checkbox" id="conv_essai"> {T("--dry-run (planifie sans convertir)")}</label>
+  <details style="margin-top:8px"><summary>{T("toutes les options")}</summary>
+  <p class="note" style="font-size:11px">{html_options_convert()}</p>
+  </details>
+  <p><button onclick="proposer()">{T("proposer les options")}</button> <button onclick="convertir()">{T("convertir")}</button></p>
+  <pre id="conv_proposition" class="note" style="font-size:11px;white-space:pre-wrap"></pre>
+</div>
+</div>
+<div id="agent" class="onglet">
+<div class="carte">
+  <h2>{T("Faire agir le modèle sur le système")}</h2>
+  <p class="note">{T("acvram ne fait que servir le modèle (API OpenAI, port {port}). Pour discuter avec lui, lui joindre des images ou lui donner des outils, il faut un client : ici Open WebUI, une interface web libre qui parle l'API OpenAI et tourne sur votre machine. Exemple ci-dessous : acvram + Open WebUI sur Ubuntu.", port=PORT_DEFAUT)}</p>
+  {svg_schema_openwebui()}
+  <ol>
+    <li>{T("Servir un modèle : onglet Serveur, port {port}. Pour les images, choisissez un alias marqué 👁 (tour de vision servie) ; pour les outils, un modèle « instruct » récent (Qwen3-Coder, GLM-4.7-Flash…).", port=PORT_DEFAUT)}</li>
+    <li>{T("Installer et lancer Open WebUI (<code>pip install open-webui</code> dans un environnement Python 3.12, puis <code>open-webui serve --port 3000</code>, ou l'image Docker officielle) : il s'ouvre sur <code>http://127.0.0.1:3000</code> ; le premier compte créé est l'administrateur.")}</li>
+    <li>{T("Brancher acvram : Open WebUI → Réglages → Connexions → OpenAI → ajouter une connexion : URL <code>http://127.0.0.1:{port}/v1</code>, clé <code>acvram-local</code> (acvram ne vérifie pas la clé, mais Open WebUI en exige une). Enregistrer : le modèle <code>acvram/acvram</code> apparaît dans le sélecteur de modèles.", port=PORT_DEFAUT)}</li>
+    <li>{T("Discuter : nouvelle conversation, modèle <code>acvram/acvram</code>. Sur un alias 👁, le trombone joint une image (PNG, JPEG, WebP) : Open WebUI l'envoie en <code>image_url</code>, acvram la passe à la tour de vision et la ligne de régime du serveur dit <code>vision=bf16(eager,…)</code> ; sur un alias texte, la requête est refusée nommément (400 « modèle sans tour de vision »), jamais ignorée.")}</li>
+    <li>{T("Outils et agents : Open WebUI porte ses propres outils (recherche, code, fichiers) ; pour un agent système (shell, fichiers), tout agent compatible OpenAI se branche sur la même URL <code>/v1</code> — il tourne sous <b>votre</b> utilisateur, jamais root.")}</li>
+    <li>{T("Vérifier : dans la console acvram, la ligne de régime du serveur et les requêtes <code>/v1/chat/completions</code> qui arrivent d'Open WebUI ; dans Open WebUI, Réglages → Connexions → « Vérifier la connexion » doit répondre.")}</li>
+  </ol>
+  <p class="note">{T("Prudence : un modèle local qui reçoit des outils a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Open WebUI n'écoute que sur 127.0.0.1 par défaut : ne l'exposez pas sans authentification.")}</p>
+</div>
+</div>
+<div id="apropos" class="onglet">
+<div class="carte">
+  <h2>acvram {version_acvram()}</h2>
+  {'<img src="' + LOGO + '" style="width:100%;max-width:640px;border-radius:12px;display:block;margin:8px 0">' if LOGO else ''}
+  <p class="note">{T("Serveur d'inférence pour GPU hétérogènes (NVFP4 + INT4) — le thème du logo se choisit dans le menu « Thème » de la barre.")}</p>
+</div>
+<div class="carte">
+{html_galerie()}
+</div>
+</div>
+<p class="note" style="margin-top:28px">acvram {version_acvram()} · <a href="{SOUTIEN_URL}" target="_blank" style="color:var(--rose-clair)">{T("Soutenir le projet")}</a></p>
+<script>
+const GALERIE=[...document.querySelectorAll('.galerie img')].map(i=>i.src); let vis=-1;
+function galerie(i){{ vis=i; document.getElementById('vis_img').src=GALERIE[i]; document.getElementById('vis_pos').textContent=(i+1)+' / '+GALERIE.length; document.getElementById('visionneuse').classList.add('actif'); }}
+function fermer_galerie(){{ vis=-1; document.getElementById('visionneuse').classList.remove('actif'); }}
+document.addEventListener('keydown', e=>{{ if(vis<0) return; if(e.key==='Escape') fermer_galerie(); else if(e.key==='ArrowRight') galerie((vis+1)%GALERIE.length); else if(e.key==='ArrowLeft') galerie((vis-1+GALERIE.length)%GALERIE.length); }});
+function onglet(n){{
+  for(const o of document.querySelectorAll('.onglet')) o.classList.toggle('actif', o.id===n);
+  for(const b of document.querySelectorAll('.onglets button')) b.classList.toggle('actif', b.id==='ong_'+n);
+}}
+function lancer(){{
+  const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{
+    action:'lancer', modele:m, carte:c, graphes:document.getElementById('graphes').checked,
+    slots:document.getElementById('slots').value, ctx:document.getElementById('ctx').value}}));
+}}
+function eco(){{
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'eco', mode:document.getElementById('eco').value}}));
+}}
+function connecter(){{
+  const p=document.getElementById('port_existant').value;
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'connecter', port:p}}));
+}}
+function proposer(){{
+  const src=document.getElementById('conv_source').value;
+  if(!src){{return;}}
+  document.getElementById('conv_proposition').textContent='…';
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'proposer', source:src}}));
+}}
+function appliquerProposition(props, resume){{
+  for(const [flag,v] of Object.entries(props)){{
+    const e=document.getElementById('opt_'+flag.replace(/^-+/,'').replace(/-/g,'_'));
+    if(!e) continue;
+    if(e.type==='checkbox') e.checked=!!v; else e.value=v;
+  }}
+  document.querySelector('details').open=true;
+  document.getElementById('conv_proposition').textContent=resume;
+}}
+function convertir(){{
+  const src=document.getElementById('conv_source').value;
+  if(!src){{return;}}
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{
+    action:'convertir', source:src, nom:document.getElementById('conv_nom').value,
+    essai:document.getElementById('conv_essai').checked,
+    options:{{{js_options_convert()}}}}}));
+}}
+</script></body></html>"""
+
+
+def page_attente(modele: str) -> str:
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}{css_theme()}</style></head><body>
+{html_bandeau()}<h1>acvram</h1><div class="carte"><h2>{T("chargement de")} <code>{os.path.basename(modele)}</code>…</h2>
+<p class="note" id="j">{T("le journal du serveur défile ci-dessous")}</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
+</body></html>"""
+
+
+def page_conversion(source: str) -> str:
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}{css_theme()}</style></head><body>
+{html_bandeau()}<h1>acvram</h1><div class="carte"><h2>{T("conversion de")} <code>{os.path.basename(source.rstrip("/"))}</code>…</h2>
+<p class="note" id="j">{T("le journal de <code>acvram convert</code> défile ci-dessous")}</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
+</body></html>"""
+
+
+class Fenetre(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="acvram")
+        l, h = (os.environ.get("ACVRAM_GUI_TAILLE", "1280x860").split("x") + ["860"])[:2]
+        self.set_default_size(int(l), int(h))
+        self.set_icon_name("acvram")
+        self.proc: subprocess.Popen | None = None
+        self.port: int | None = None
+
+        boite = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(boite)
+
+        # Barre d'outils native : ce que la page ne peut pas faire seule.
+        barre = Gtk.HeaderBar(show_close_button=True, title="acvram")
+        self.set_titlebar(barre)
+        self.boutons = []
+        # Le logo remplace les boutons zoom (Ctrl +/−/0 restent au clavier).
+        chemin_logo = next((c for c in (os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "logo-acvram.jpg"),
+                                        "/usr/share/acvram/logo-acvram.jpg") if os.path.isfile(c)), None)
+        if chemin_logo:
+            try:
+                from gi.repository import GdkPixbuf
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(chemin_logo, -1, 30, True)
+                img = Gtk.Image.new_from_pixbuf(pb)
+                img.set_tooltip_text("acvram")
+                barre.pack_start(img)
+            except Exception:
+                pass
+        for ico, tip, cb in (("view-refresh", "recharger (F5)", self.recharger),
+                             ("view-fullscreen", "plein écran (F11)", self.plein_ecran),
+                             ("process-stop", "arrêter le serveur lancé ici", self.arreter_serveur)):
+            b = Gtk.Button.new_from_icon_name(ico, Gtk.IconSize.BUTTON)
+            b.set_tooltip_text(T(tip))
+            b.connect("clicked", cb)
+            barre.pack_end(b) if ico == "process-stop" else barre.pack_start(b)
+            self.boutons.append((b, tip))
+        # Langue : menu dans la barre ; le choix est mémorisé et la page
+        # d'accueil (native) est regénérée ; la console servie reste telle
+        # que le serveur la rend.
+        # Thème du logo : quatre propositions, choix mémorisé (~/.config/acvram/theme).
+        self.menu_theme = Gtk.MenuButton()
+        self.menu_theme.set_tooltip_text(T("Thème"))
+        self.menu_theme.set_image(Gtk.Image.new_from_icon_name("preferences-desktop-wallpaper", Gtk.IconSize.BUTTON))
+        m = Gtk.Menu()
+        for code, libelle in THEMES.items():
+            it = Gtk.MenuItem(label=libelle + ("  ✓" if code == THEME else ""))
+            it.connect("activate", lambda _w, c=code: self.changer_theme(c))
+            m.append(it)
+        m.show_all()
+        self.menu_theme.set_popup(m)
+        barre.pack_end(self.menu_theme)
+        self.menu_langue = Gtk.MenuButton()
+        self.menu_langue.set_tooltip_text(T("Langue"))
+        self.menu_langue.add(Gtk.Label(label=LANGUES[LANGUE]))
+        menu = Gtk.Menu()
+        for code, nom in sorted(LANGUES.items(), key=lambda kv: (kv[0] != "fr", kv[1].lower())):
+            item = Gtk.MenuItem(label=nom)
+            item.connect("activate", lambda _i, c=code: self.changer_langue(c))
+            menu.append(item)
+        menu.show_all()
+        self.menu_langue.set_popup(menu)
+        barre.pack_end(self.menu_langue)
+
+        self.web = WebKit2.WebView()
+        reglages = self.web.get_settings()
+        reglages.set_enable_developer_extras(True)
+        reglages.set_enable_javascript(True)
+        reglages.set_allow_file_access_from_file_urls(True)   # galerie : images en file:// depuis une page file:///
+        # Sans ce reglage, une ouverture non declenchee par un geste utilisateur
+        # DIRECT (verifie a sec : un clic simule via JS compte comme tel) est
+        # refusee silencieusement — un vrai clic humain sur "galerie" passe
+        # sans lui, mais le laisser off est un risque non mesure pour rien.
+        reglages.set_javascript_can_open_windows_automatically(True)
+        # Le pont page → Python : la page d'accueil envoie « lancer ».
+        gest = self.web.get_user_content_manager()
+        gest.register_script_message_handler("acvram")
+        gest.connect("script-message-received::acvram", self.message_page)
+        # target="_blank" (le lien « galerie » de la console servie) ne fait
+        # rien dans une WebView embarquee sans ce gestionnaire : WebKitGTK ne
+        # cree pas de fenetre tout seul pour une navigation « nouvelle vue »,
+        # il emet juste ce signal et attend qu'on lui en fournisse une
+        # (18/09, signale par l'utilisateur : « galerie ne fait plus rien »).
+        self.web.connect("create", self.nouvelle_fenetre)
+        boite.pack_start(self.web, True, True, 0)
+
+        self.etat = Gtk.Label(xalign=0)
+        self.etat.set_margin_start(10); self.etat.set_margin_end(10)
+        self.etat.set_margin_top(3); self.etat.set_margin_bottom(3)
+        pied = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        pied.pack_start(self.etat, True, True, 0)
+        version = Gtk.Label(xalign=1)
+        version.set_markup(f'<span size="small" foreground="#c98fae">acvram {version_acvram()}</span>')
+        pied.pack_end(version, False, False, 4)
+        soutien = Gtk.LinkButton.new_with_label(SOUTIEN_URL, T("Soutenir"))
+        self.b_soutien = soutien
+        soutien.set_tooltip_text(SOUTIEN_URL)
+        soutien.set_relief(Gtk.ReliefStyle.NONE)
+        pied.pack_end(soutien, False, False, 0)
+        boite.pack_start(pied, False, False, 0)
+
+        self.connect("key-press-event", self.touche)
+        self.connect("destroy", self.fermer)
+        GLib.timeout_add_seconds(2, self.rafraichir_etat)
+
+        port = trouver_serveur()
+        if port:
+            self.ouvrir(port)
+        else:
+            self.web.load_html(page_accueil(), "file:///")
+
+    # -- langue -------------------------------------------------------------
+    def changer_langue(self, code: str):
+        global LANGUE
+        if code not in LANGUES or code == LANGUE:
+            return
+        LANGUE = code
+        try:
+            os.makedirs(os.path.dirname(FICHIER_LANGUE), exist_ok=True)
+            with open(FICHIER_LANGUE, "w", encoding="utf-8") as f:
+                f.write(code + "\n")
+        except OSError:
+            pass
+        for b, tip in self.boutons:
+            b.set_tooltip_text(T(tip))
+        self.menu_langue.get_child().set_text(LANGUES[code])
+        self.menu_langue.set_tooltip_text(T("Langue"))
+        self.b_soutien.set_label(T("Soutenir"))
+        if self.port is None and self.proc is None:
+            self.web.load_html(page_accueil(), "file:///")
+
+    # -- navigation ---------------------------------------------------------
+    def ouvrir(self, port: int):
+        self.port = port
+        self.web.load_uri(f"http://127.0.0.1:{port}/")
+
+    def recharger(self, *_):
+        self.web.reload()
+
+    def plein_ecran(self, *_):
+        if getattr(self, "_fs", False):
+            self.unfullscreen(); self._fs = False
+        else:
+            self.fullscreen(); self._fs = True
+
+    def changer_theme(self, code: str):
+        changer_theme(code)
+        m = Gtk.Menu()
+        for c, libelle in THEMES.items():
+            it = Gtk.MenuItem(label=libelle + ("  ✓" if c == THEME else ""))
+            it.connect("activate", lambda _w, cc=c: self.changer_theme(cc))
+            m.append(it)
+        m.show_all()
+        self.menu_theme.set_popup(m)
+        # La page d'accueil est native : on la regénère (reload() rejouerait le
+        # même HTML) ; la console servie reste telle quelle.
+        if self.port is None and self.proc is None:
+            self.web.load_html(page_accueil(), "file:///")
+
+    def zoom(self, d: float):
+        self.web.set_zoom_level(max(0.5, min(3.0, self.web.get_zoom_level() + d)))
+
+    def nouvelle_fenetre(self, web_view, navigation_action):
+        """Fournit la fenetre qu'une navigation target="_blank" (ou
+        window.open) demande — sans ca WebKitGTK n'ouvre rien du tout.
+        Une adresse externe (le lien de soutien) part dans le navigateur
+        du systeme : une page publique n'a rien a faire dans la console."""
+        try:
+            uri = navigation_action.get_request().get_uri()
+        except Exception:
+            uri = ""
+        if uri.startswith("http") and "127.0.0.1" not in uri and "localhost" not in uri:
+            from gi.repository import Gdk
+            Gtk.show_uri_on_window(self, uri, Gdk.CURRENT_TIME)
+            return None
+        nouvelle = WebKit2.WebView.new_with_related_view(web_view)
+        fenetre = Gtk.Window(title="acvram")
+        fenetre.set_default_size(1100, 800)
+        fenetre.add(nouvelle)
+        nouvelle.connect("ready-to-show", lambda w: fenetre.show_all())
+        return nouvelle
+
+    def touche(self, _w, ev):
+        from gi.repository import Gdk
+        k = Gdk.keyval_name(ev.keyval)
+        ctrl = ev.state & Gdk.ModifierType.CONTROL_MASK
+        if k == "F5": self.recharger()
+        elif k == "F11": self.plein_ecran()
+        elif ctrl and k in ("plus", "equal", "KP_Add"): self.zoom(0.1)
+        elif ctrl and k in ("minus", "KP_Subtract"): self.zoom(-0.1)
+        elif ctrl and k == "0": self.web.set_zoom_level(1.0)
+        elif ctrl and k == "q": self.close()
+        else: return False
+        return True
+
+    # -- serveur ------------------------------------------------------------
+    def message_page(self, _gest, res):
+        try:
+            d = json.loads(res.get_js_value().to_string())
+        except Exception:
+            return
+        if d.get("action") == "lancer":
+            self.lancer_serveur(d)
+        elif d.get("action") == "connecter":
+            self.connecter_existant(d)
+        elif d.get("action") == "convertir":
+            self.lancer_conversion(d)
+        elif d.get("action") == "proposer":
+            self.proposer_conversion(d)
+        elif d.get("action") == "eco":
+            self.changer_eco(d)
+
+    def connecter_existant(self, d: dict):
+        try:
+            port = int(d["port"])
+        except (KeyError, ValueError):
+            self.web.load_html(page_accueil(T("port invalide.")), "file:///")
+            return
+        if serveur_acvram(port):
+            self.ouvrir(port)
+        else:
+            self.web.load_html(page_accueil(T(
+                "aucun serveur acvram ne répond sur le port {port} (vérifié : /v1/models doit porter le champ « acvram »).",
+                port=port)), "file:///")
+
+    def lancer_serveur(self, d: dict):
+        modele = d["modele"]
+        env = dict(os.environ)
+        if d.get("carte", "") != "":
+            env["CUDA_VISIBLE_DEVICES"] = str(d["carte"])
+            env["ACVRAM_VERROU"] = f"/tmp/acvram-carte-{d['carte']}.lock"
+        env["ACVRAM_NOM"] = "acvram-gui"
+        env["ACVRAM_TYPE"] = "mesure"
+        if not d.get("graphes", True):
+            env["ACVRAM_GRAPHS"] = "0"
+        cmd = ["acvram", "serve", modele, "--port", str(PORT_DEFAUT),
+               "--max-slots", str(d.get("slots", 4)),
+               "--max-model-len", str(d.get("ctx", 8192))]
+        carte_sh = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "..", "share", "acvram", "carte.sh")
+        for cand in (carte_sh, "outils/carte.sh", "/usr/share/acvram/carte.sh"):
+            if os.path.exists(cand):
+                cmd = ["bash", cand] + cmd
+                break
+        self.web.load_html(page_attente(modele), "file:///")
+        try:
+            self.proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True,
+                                         start_new_session=True)
+        except OSError as e:
+            self.web.load_html(page_accueil(T("impossible de lancer acvram : {e}", e=e)), "file:///")
+            return
+        threading.Thread(target=self.suivre_journal, daemon=True).start()
+        GLib.timeout_add_seconds(2, self.attendre_serveur)
+
+    def suivre_journal(self):
+        assert self.proc and self.proc.stdout
+        for ligne in self.proc.stdout:
+            l = json.dumps(ligne.rstrip())
+            GLib.idle_add(self.web.run_javascript,
+                          f"(function(){{var p=document.getElementById('log');if(p){{p.textContent+={l}+'\\n';p.scrollTop=p.scrollHeight;}}}})()",
+                          None, None, None)
+
+    def attendre_serveur(self) -> bool:
+        if self.proc and self.proc.poll() is not None:
+            self.web.load_html(page_accueil(T(
+                "le serveur s'est arrêté (code {code}) — voir le journal ci-dessus", code=self.proc.returncode)), "file:///")
+            self.proc = None
+            return False
+        if serveur_acvram(PORT_DEFAUT):
+            self.ouvrir(PORT_DEFAUT)
+            return False
+        return True
+
+    def changer_eco(self, d: dict):
+        """`acvram eco <mode>` écrit config.json puis applique (même sous un serveur)."""
+        mode = str(d.get("mode", ""))
+        if mode not in ("2700", "2100", "off"):
+            return
+
+        def travail():
+            try:
+                out = subprocess.run(["acvram", "eco", mode], capture_output=True, text=True, timeout=15)
+                msg = (out.stdout + out.stderr).strip().splitlines()
+                texte = msg[-1] if msg else ""
+                if out.returncode != 0:
+                    texte = T("acvram eco {mode} a échoué (code {code}) : {texte}", mode=mode, code=out.returncode, texte=texte)
+            except Exception as e:
+                texte = T("acvram eco {mode} a échoué (code {code}) : {texte}", mode=mode, code="?", texte=e)
+            etat = etat_eco_carte() or texte
+            GLib.idle_add(self.web.run_javascript,
+                          f"(function(){{var e=document.getElementById('eco_etat');if(e)e.textContent={json.dumps(etat)};}})()", None, None, None)
+        threading.Thread(target=travail, daemon=True).start()
+
+    def proposer_conversion(self, d: dict):
+        source = d.get("source", "")
+        if not os.path.isdir(source):
+            self.web.run_javascript(f"appliquerProposition({{}}, {json.dumps(T('répertoire source introuvable : {source}', source=source))})", None, None, None)
+            return
+
+        def travail():
+            props, resume = proposer_options_convert(source)
+            GLib.idle_add(self.web.run_javascript,
+                          f"appliquerProposition({json.dumps(props)}, {json.dumps(resume)})", None, None, None)
+        threading.Thread(target=travail, daemon=True).start()
+
+    def lancer_conversion(self, d: dict):
+        source = d.get("source", "")
+        if not os.path.isdir(source):
+            self.web.load_html(page_accueil(T("répertoire source introuvable : {source}", source=source)), "file:///")
+            return
+        cmd = ["acvram", "convert", source]
+        if d.get("nom"):
+            cmd += ["--name", d["nom"]]
+        if d.get("essai"):
+            cmd += ["--dry-run"]
+        options = d.get("options") or {}
+        for flag, genre, _, _ in OPTIONS_CONVERT:
+            v = options.get(flag)
+            if genre == "bool":
+                if v:
+                    cmd.append(flag)
+            elif v not in (None, ""):
+                cmd += [flag, str(v).strip()]
+        self.web.load_html(page_conversion(source), "file:///")
+        try:
+            self.proc = subprocess.Popen(cmd, env=dict(os.environ), stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True,
+                                         start_new_session=True)
+        except OSError as e:
+            self.web.load_html(page_accueil(T("impossible de lancer acvram convert : {e}", e=e)), "file:///")
+            return
+        threading.Thread(target=self.suivre_journal, daemon=True).start()
+        GLib.timeout_add_seconds(2, self.attendre_conversion)
+
+    def attendre_conversion(self) -> bool:
+        if self.proc is None or self.proc.poll() is None:
+            return True
+        code = self.proc.returncode
+        self.proc = None
+        if code == 0:
+            self.web.load_html(page_accueil(T("conversion terminée — voir models_acvram.")), "file:///")
+        else:
+            self.web.load_html(page_accueil(T("acvram convert a échoué (code {code}) — voir le journal ci-dessus.", code=code)), "file:///")
+        return False
+
+    def arreter_serveur(self, *_):
+        if self.proc and self.proc.poll() is None:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+        self.proc = None
+        self.port = None
+        self.web.load_html(page_accueil(T("serveur arrêté.")), "file:///")
+
+    # -- barre d'état -------------------------------------------------------
+    def rafraichir_etat(self) -> bool:
+        parts = []
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=index,temperature.gpu,power.draw,utilization.gpu,memory.used,memory.total",
+                                  "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2).stdout
+            for l in out.strip().splitlines():
+                i, t, w, u, m, mt = [x.strip() for x in l.split(",")]
+                parts.append(f"GPU{i} {t} °C · {float(w):.0f} W · {u} % · {float(m)/1024:.1f}/{float(mt)/1024:.0f} Gio")
+        except Exception:
+            pass
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            parts.append(f"CPU {psutil.cpu_percent():.0f} % · RAM {(vm.total-vm.available)/2**30:.1f}/{vm.total/2**30:.0f} Gio")
+            temps = psutil.sensors_temperatures()
+            for cle in ("coretemp", "k10temp"):
+                if cle in temps and temps[cle]:
+                    parts.append(f"CPU {temps[cle][0].current:.0f} °C")
+                    break
+        except Exception:
+            pass
+        if self.port:
+            parts.append(T("serveur :{port}", port=self.port))
+        self.etat.set_markup('<span size="small" foreground="#c98fae">' + "   ·   ".join(parts) + "</span>")
+        return True
+
+    def fermer(self, *_):
+        self.arreter_serveur() if self.proc else None
+        Gtk.main_quit()
+
+
+def main():
+    f = Fenetre()
+    f.show_all()
+    signal.signal(signal.SIGINT, lambda *_: Gtk.main_quit())
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

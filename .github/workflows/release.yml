@@ -1,0 +1,300 @@
+name: Release packages
+
+# When a release is published, build the AUR/Copr artefacts and attach them to the
+# GitHub release. Nothing is pushed to AUR, Copr or Flathub here — those accounts belong
+# to the maintainer (pièce 236a); this workflow only produces the files each channel needs.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.7.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  # Pièce 248b : sur le modèle des jobs aur/rpm ci-dessous (construction et
+  # attachement dans le même job) plutôt que celui d'animematrix (.deb attaché
+  # à la main avant publication, ce workflow ne fait que le récupérer) — acvram
+  # n'a pas cette étape manuelle, tools/construire-deb.sh suffit en CI.
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Dépendances du paquet et de son auto-test (--help sans torch)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 python3-venv python3-gi \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1 python3-psutil dpkg-dev
+          # 266 : --ignore-installed — typing_extensions vient d'un paquet Debian sans RECORD, pip ne sait pas le
+          # désinstaller (« Cannot uninstall typing_extensions 4.10.0, RECORD file not found ») ; /usr/bin/python3 est
+          # l'interpréteur que construire-deb.sh teste, un venv ne le servirait pas.
+          sudo pip install --break-system-packages --ignore-installed --quiet numpy safetensors fastapi \
+            "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 nvidia-ml-py
+      - name: Paquet .deb (tools/construire-deb.sh)
+        run: |
+          tools/construire-deb.sh
+          gh release upload "$TAG" acvram_*_amd64.deb --clobber --repo "$GITHUB_REPOSITORY"
+
+  rpm:
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build RPM and source RPM (for Copr)
+        run: |
+          dnf install -y rpm-build python3 gh
+          V="${TAG#v}"
+          mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS
+          # git is missing when checkout runs in this container: the tree has no .git
+          tar --exclude=.git --transform "s,^\.,anticitoyen-vram-$V," \
+            -czf ~/rpmbuild/SOURCES/"anticitoyen-vram-$V.tar.gz" .
+          sed "s/@VERSION@/$V/" packaging/rpm/acvram.spec > ~/rpmbuild/SPECS/acvram.spec
+          rpmbuild -bb ~/rpmbuild/SPECS/acvram.spec
+          rpmbuild -bs ~/rpmbuild/SPECS/acvram.spec
+          gh release upload "$TAG" ~/rpmbuild/RPMS/noarch/*.rpm ~/rpmbuild/SRPMS/*.src.rpm \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+  aur:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: AUR files (PKGBUILD, .SRCINFO, install script)
+        run: |
+          # No CUDA in this container, and none is needed here: acvram's CUDA kernels JIT-compile
+          # at first real use (torch.utils.cpp_extension), not at package-build time — unlike a
+          # project that ships prebuilt .so files. `makepkg` only stages the source tree, so a
+          # plain archlinux:latest image is enough; the runtime `cuda` dependency is declared in
+          # the PKGBUILD (depends=), not exercised in CI.
+          pacman -Syu --noconfirm base-devel git github-cli
+          V="${TAG#v}"
+          useradd -m builder
+          mkdir -p /build/pkg                     # 266 : /build n'existe pas dans archlinux:latest
+          sed "s/@VERSION@/$V/" packaging/aur/PKGBUILD > /build/pkg/PKGBUILD
+          cp packaging/aur/acvram.install /build/pkg/
+          chown -R builder /build/pkg
+          su builder -c "cd /build/pkg && makepkg --nodeps --noconfirm"
+          SUM=$(sha256sum /build/pkg/*-"$V".tar.gz | cut -d' ' -f1)
+          sed -i "s/^sha256sums=('SKIP')/sha256sums=('$SUM')/" /build/pkg/PKGBUILD
+          su builder -c "cd /build/pkg && makepkg --printsrcinfo > .SRCINFO"
+          mkdir -p aur/acvram
+          cp /build/pkg/PKGBUILD /build/pkg/.SRCINFO /build/pkg/acvram.install aur/acvram/
+          tar -C aur -czf "aur-$V.tar.gz" acvram
+          gh release upload "$TAG" "aur-$V.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Flathub: manifest and module list supplied by poste6 (packaging/flathub/). Job wired the
+  # same way as animematrix's (pin the manifest's source to this tag/commit, attach a bundle
+  # and the pinned manifest to the release) — filled in once packaging/flathub/*.yml exists.
+  # Pièce 241 (poste6) : noyaux CUDA précompilés dans un conteneur sans carte, puis Flatpak hors ligne (packaging/flathub/,
+  # 236/240). Nothing is submitted to Flathub here either: the bundle is attached to the release, the maintainer submits.
+  noyaux-precompiles:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.0.1-devel-ubuntu24.04          # nvcc 13.0 (≥ 12.9 : sm_120f, cuda_fp4.h), aucun GPU requis
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      # 266 f (même piège que la 266 b) : PYTHON_RUNTIME est de l'outillage de construction (packaging/flathub/), absent au tag
+      # v0.7.0 → « cat: packaging/flathub/PYTHON_RUNTIME: No such file » (run 36227010415). La source d'acvram reste au tag.
+      # Dans CE conteneur (nvidia/cuda) git n'existe pas au moment du checkout : actions/checkout dépose une archive sans .git
+      # (comme dans le job rpm), donc pas de `git checkout github.sha -- …` possible (run 36227505957) — second checkout de la
+      # ref du workflow dans un sous-dossier, puis copie du seul dossier d'outillage.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: outillage-ref
+      - name: packaging/flathub depuis la ref du workflow (outillage), la source reste au tag
+        run: |
+          rm -rf packaging/flathub && cp -a outillage-ref/packaging/flathub packaging/flathub && rm -rf outillage-ref
+          find packaging/flathub -maxdepth 1 -type f | sed 's/^/  /'
+      - name: Python et torch cu130 (la roue que le Flatpak embarque)
+        run: |
+          # 266 : python3-dev (Python.h, exigé par la compilation de l'extension) ; numpy (torch l'importe, sinon avertissement)
+          # 266 e : le .so est une extension CPython — il ne se charge que sous l'ABI qui l'a compilé : le Python du RUNTIME
+          # (PYTHON_RUNTIME = 3.14, GNOME 51), pas le 3.12 d'Ubuntu 24.04 → deadsnakes. L'empreinte.json porte l'ABI (SOABI)
+          # et le chargeur (kernels._precompile_utilisable) refuse toute autre ABI, à voix haute.
+          PYV=$(cat packaging/flathub/PYTHON_RUNTIME)
+          apt-get update && apt-get install -y --no-install-recommends software-properties-common gpg-agent ninja-build git
+          add-apt-repository -y ppa:deadsnakes/ppa && apt-get update
+          apt-get install -y --no-install-recommends "python$PYV" "python$PYV-dev" "python$PYV-venv"
+          "python$PYV" -m venv /opt/venv && . /opt/venv/bin/activate
+          python -c 'import sys, sysconfig; print("Python", sys.version.split()[0], sysconfig.get_config_var("SOABI"))'
+          pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.14.0" && pip install ninja numpy
+          pip install --no-deps .
+      - name: Noyaux précompilés (sm_120f, sm_89, sm_86)
+        env:
+          CUDA_HOME: /usr/local/cuda
+        run: |
+          . /opt/venv/bin/activate
+          mkdir -p build/noyaux                   # 266 : `tee build/noyaux/…` échouait, le dossier n'existait pas
+          python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0,8.9,8.6 | tee build/noyaux/precompiles.json
+          test -n "$(find build/noyaux -name acvram_kernels.so)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+
+  flatpak:
+    needs: noyaux-precompiles
+    runs-on: ubuntu-24.04
+    # 266 l : un seul job flatpak à la fois, tous runs confondus — le 26/09 les jobs des v0.7.1 et v0.7.2 poussaient
+    # gh-pages en concurrence, le dernier à finir gagnait le ref master quelle que soit sa version.
+    concurrency:
+      group: flatpak-gh-pages
+      cancel-in-progress: false
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0                          # 266 b : l'historique entier, pour extraire packaging/flathub d'une autre ref
+      # 266 b (chef) : la source d'acvram reste AU TAG, mais packaging/flathub/ (manifeste, sources-torch.sh, roue_url.py)
+      # est de l'OUTILLAGE de construction, pas du code livré : il vient de la ref du workflow (github.sha), sinon une
+      # relance de la release v0.7.0 reconstruirait avec le sources-torch.sh cassé du tag. tests/test_release_flatpak_outillage_266b.py.
+      - name: packaging/flathub depuis la ref du workflow (outillage), la source reste au tag
+        run: |
+          git checkout ${{ github.sha }} -- packaging/flathub
+          git status --short packaging/flathub | sed 's/^/  /'
+      - uses: actions/download-artifact@v4
+        with:
+          name: noyaux-precompiles
+          path: build/noyaux
+      - name: Outils Flatpak et runtime GNOME 51
+        run: |
+          sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder python3-pip
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
+      # 266 d : plus de flatpak-pip-generator (sdists → numpy construit par meson, tokenizers/pydantic-core par cargo dans le bac
+      # à sable : « Cannot import 'mesonpy' », v0.7.0) — sources-pypi.py ne prend que des ROUES (--only-binary=:all:), comme torch.
+      - name: Sources Python hors ligne (roues PyPI par sources-pypi.py, torch cu130 par sources-torch.sh)
+        run: |
+          # 266 e : les roues sont celles du Python du RUNTIME (PYTHON_RUNTIME), vérifié ici contre le SDK réel — la v0.7.0
+          # prenait des roues cp312 et le pip 3.14 du bac à sable ne les trouvait pas (« No matching distribution found »)
+          PYV=$(cat packaging/flathub/PYTHON_RUNTIME)
+          SDK=$(flatpak run --command=python3 org.gnome.Sdk//51 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          [ "$PYV" = "$SDK" ] || { echo "PYTHON_RUNTIME=$PYV mais le SDK GNOME 51 porte Python $SDK : mettre PYTHON_RUNTIME à jour"; exit 65; }
+          [ -f packaging/flathub/python3-modules.json ] || (cd packaging/flathub && ./sources-pypi.py --python "$PYV" \
+              numpy safetensors fastapi "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 psutil nvidia-ml-py transformers pillow)   # 273 : extra vision embarqué
+          [ -f packaging/flathub/torch-cu130.json ] || (cd packaging/flathub && ./sources-torch.sh 2.14.0 "$PYV")
+      - name: Construction hors ligne, dépôt gh-pages, .flatpakref, lint
+        env:
+          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+        run: |
+          sed -e 's#path: \.\./\.\.$#path: .#' -e 's#path: \.\./\.\./build/noyaux#path: build/noyaux#' \
+              -e 's#^  - python3-modules.json#  - packaging/flathub/python3-modules.json#' -e 's#^  - torch-cu130.json#  - packaging/flathub/torch-cu130.json#' \
+              packaging/flathub/io.github.anticitoyen.acvram.yml > io.github.anticitoyen.acvram.yml
+          # 266 c : le répertoire de construction de flatpak-builder était `build` — `--force-clean` l'effaçait, et avec lui
+          # build/noyaux (l'artefact des noyaux précompilés, source du module acvram-noyaux) : « Unable to get source file
+          # 'build/noyaux' » sur la v0.7.0 relancée. Un répertoire à lui, hors de tout chemin lu par le manifeste.
+          V="${TAG#v}"; PAGES="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/flatpak"
+          # 266 j : le coureur n'a aucune identité git — tout commit (commit-tree compris) porte celle du bot Actions, pour ce
+          # commit seulement (pas de git config). Sans elle, commit-tree rendait '' et `git branch gh-pages ''` tombait en 128.
+          if ! git fetch origin gh-pages:gh-pages 2>/dev/null; then
+            RACINE=$(git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree -m 'gh-pages' "$(git hash-object -t tree /dev/null)")
+            [ -n "$RACINE" ] || { echo "gh-pages : commit-tree n'a rendu aucun sha" >&2; exit 1; }
+            git branch gh-pages "$RACINE"
+          fi
+          git worktree add pages gh-pages
+          # 266 l : le dépôt servi AMORCE `repo` (les commits et les deltas statiques s'accumulent, plus d'écrasement) et le
+          # ref master ne recule jamais : une release ancienne relancée après une plus récente ne touche pas au dépôt.
+          if packaging/flathub/ref-ne-recule-pas.sh "$V" pages/flatpak/VERSION; then CONSTRUIRE=1; else
+            CONSTRUIRE=0; echo "::warning::gh-pages sert une version plus récente que la $V : dépôt non touché, seul le .flatpakref est joint"; fi
+          if [ "$CONSTRUIRE" = 1 ]; then
+            [ -d pages/flatpak/objects ] && cp -a pages/flatpak repo
+            flatpak-builder --user --force-clean --sandbox --repo=repo construction-flatpak io.github.anticitoyen.acvram.yml
+          fi
+          # 266 i : plus de bundle (> 2 Gio avec la fermeture CUDA, et un bundle ne porte pas les extra-data) — le dépôt OSTree
+          # est publié sur gh-pages sous flatpak/ (seul ce dossier est touché ; précédent : le dépôt APT d'animematrix) et un
+          # .flatpakref (≈ 1 Ko) est joint à la release à sa place. GPG : signé si le secret FLATPAK_GPG_KEY existe, sinon
+          # non signé, dit à voix haute ici et dans la section Installer (--no-gpg-verify).
+          SIGNE=0
+          if [ -n "${FLATPAK_GPG_KEY:-}" ]; then
+            printf '%s' "$FLATPAK_GPG_KEY" | gpg --batch --import
+            CLE=$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1=="sec"{print $5; exit}')
+            gpg --batch --export "$CLE" | base64 -w0 > cle.b64; SIGNE=1
+            if [ "$CONSTRUIRE" = 1 ]; then
+              # le COMMIT doit être signé (pas seulement le résumé) : sans build-sign, « GPG verification enabled, but no signatures found »
+              flatpak build-sign --gpg-sign="$CLE" repo io.github.anticitoyen.acvram
+              # --prune-depth=1 : le commit précédent reste (son delta vers le nouveau sert la mise à jour), les plus vieux partent —
+              # gh-pages ne doit pas grossir d'un dépôt complet par version (Pages : 1 Gio)
+              flatpak build-update-repo --generate-static-deltas --prune --prune-depth=1 --gpg-sign="$CLE" repo
+            fi
+          else
+            echo "::warning::FLATPAK_GPG_KEY absent : dépôt Flatpak NON signé (installation avec --no-gpg-verify)"
+            [ "$CONSTRUIRE" = 1 ] && flatpak build-update-repo --generate-static-deltas --prune --prune-depth=1 repo
+          fi
+          { printf '[Flatpak Ref]\nTitle=acvram\nName=io.github.anticitoyen.acvram\nBranch=master\nUrl=%s\n' "$PAGES"
+            printf 'SuggestRemoteName=acvram\nRuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo\nIsRuntime=false\n'
+            [ "$SIGNE" = 1 ] && printf 'GPGKey=%s\n' "$(cat cle.b64)"; } > "acvram-$V.flatpakref"
+          if [ "$CONSTRUIRE" = 1 ]; then
+            mkdir -p repo && echo "$V" > repo/VERSION      # la version que sert le ref master, lue par ref-ne-recule-pas.sh
+            rm -rf pages/flatpak && cp -a repo pages/flatpak && touch pages/.nojekyll
+            git -C pages add -A flatpak .nojekyll
+            # 266 l : gh-pages est republiée en UN commit orphelin (commit-tree sans parent, push --force de cette branche
+            # seule) — l'historique OSTree vit dans flatpak/ (deltas, prune-depth), pas dans git : sinon chaque version
+            # ajoute ≈ 100 Mio d'objets à l'historique git et le dépôt GitHub dépasse vite ses limites.
+            ARBRE=$(git -C pages write-tree)
+            NOUVEAU=$(git -C pages -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree -m "flatpak : dépôt $TAG" "$ARBRE")
+            [ -n "$NOUVEAU" ] || { echo "gh-pages : commit-tree n'a rendu aucun sha" >&2; exit 1; }
+            git push --force origin "$NOUVEAU:refs/heads/gh-pages"
+          fi
+          gh release delete-asset "$TAG" "acvram-$V.flatpak" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true   # l'ancien bundle cassé (v0.7.0)
+          gh release upload "$TAG" "acvram-$V.flatpakref" --clobber --repo "$GITHUB_REPOSITORY"
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest io.github.anticitoyen.acvram.yml | tee lint-manifest.txt || true
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo | tee lint-repo.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flathub
+          path: |
+            lint-*.txt
+            acvram-*.flatpakref
+            packaging/flathub/python3-modules.json
+            packaging/flathub/torch-cu130.json
+
+  # Weblate: acvram has no locale/*.json (unlike animematrix) — poste2's 236c extracted the
+  # translatable UI strings into packaging/langues/_source.json instead (README.md itself is
+  # excluded: Weblate segments a whole .md poorly, and nothing there could guard the numbers
+  # or HTTP field names inside it — revue/poste2-piece236c-25-09.md).
+  translations:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Translation files (Weblate)
+        run: |
+          V="${TAG#v}"
+          zip -q "translations-$V.zip" packaging/langues/*.json docs/TRADUIRE.md
+          gh release upload "$TAG" "translations-$V.zip" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Pièce 259 b (poste6) : les sommes des fichiers joints, écrites APRÈS tous les jobs qui joignent — un seul
+  # fichier SHA256SUMS (format `sha256sum`, vérifiable par `sha256sum -c`), lu par outils/verifier-release.sh.
+  # `!cancelled()` : si un job a échoué, les sommes des fichiers présents sont quand même publiées ; le fichier
+  # manquant apparaît alors comme MANQUE dans verifier-release.sh, pas comme une somme absente.
+  # tests/test_release_sommes_259b.py : tout job qui joint un fichier est dans `needs` de ce job.
+  sommes:
+    needs: [deb, rpm, aur, flatpak, translations]     # flatpak : le .flatpakref remplace le bundle (266 i), SHA256SUMS refait après
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: SHA256SUMS de tout ce que la release joint
+        run: |
+          mkdir joints && gh release download "$TAG" --dir joints --repo "$GITHUB_REPOSITORY"
+          cd joints && rm -f SHA256SUMS
+          sha256sum -- * > ../SHA256SUMS && cat ../SHA256SUMS
+          gh release upload "$TAG" ../SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
