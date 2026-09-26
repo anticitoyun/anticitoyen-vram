@@ -129,6 +129,8 @@ Aŭ per pako, dosiero alligita al ĉiu [GitHub-eldono](https://github.com/antici
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nomoj generitaj de `rpmbuild`, ne fiksaj) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (aŭ `rpmbuild --rebuild *.src.rpm` el la `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+`.flatpakref` ĉiam instalas la plej lastan publikigitan version de la deponejo.
+
 Antaŭ instalado, kontrolu la elŝutitan dosieron kontraŭ la sumoj aldonitaj al la eldono (`SHA256SUMS`, publikigita post kiam ĉiuj aliaj dosieroj ĉeestas):
 
 ```bash

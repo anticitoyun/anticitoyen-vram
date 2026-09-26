@@ -129,6 +129,8 @@ Sau pe pachet, un fișier atașat fiecărei [versiuni GitHub](https://github.com
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nume generate de `rpmbuild`, nefixe) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (sau `rpmbuild --rebuild *.src.rpm` din `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+Un `.flatpakref` instalează întotdeauna cea mai recentă versiune publicată a depozitului.
+
 Înainte de instalare, verificați fișierul descărcat față de sumele atașate versiunii (`SHA256SUMS`, publicată după ce toate celelalte fișiere sunt prezente):
 
 ```bash

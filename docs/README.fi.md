@@ -129,6 +129,8 @@ Tai pakettina, jolloin kukin tiedosto on liitetty jokaiseen [GitHub-julkaisuun](
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nimet muodostaa `rpmbuild`, eivätkä ne ole kiinteitä) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (tai `rpmbuild --rebuild *.src.rpm` lähtien `.src.rpm`-tiedostosta) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+`.flatpakref`-tiedosto asentaa aina arkiston viimeisimmän julkaistun version.
+
 Ennen asennusta, tarkista ladattu tiedosto julkaisuun liitettyjä tarkistussummia vasten (`SHA256SUMS`, julkaistaan kun kaikki muut tiedostot ovat läsnä):
 
 ```bash

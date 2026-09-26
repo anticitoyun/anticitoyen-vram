@@ -129,6 +129,8 @@ O per paquet, un fitxer adjunt a cada [versió de GitHub](https://github.com/ant
 | Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (noms generats per `rpmbuild`, no fixos) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (o `rpmbuild --rebuild *.src.rpm` des del `.src.rpm`) |
 | Flatpak | `acvram-<version>.flatpakref` | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
 
+Un `.flatpakref` sempre instal·la l'última versió publicada del dipòsit.
+
 Abans d'instal·lar, verifica el fitxer descarregat contra les sumes adjuntes a la release (`SHA256SUMS`, publicada un cop tots els altres fitxers hi són):
 
 ```bash
