@@ -107,15 +107,17 @@ if [ -n "$DEB" ]; then
     case "$VER" in "$V"|"$V-"*) ok "deb : Version $VER" ;; *) faux "deb : Version '$VER' (attendu $V)" ;; esac
     N=$(dpkg-deb --contents "$DEB" 2>/dev/null | wc -l)
     [ "$N" -gt 0 ] && ok "deb : $N entrées (dpkg-deb --contents)" || faux "deb : contenu vide ou illisible"
-    dpkg-deb --contents "$DEB" 2>/dev/null | grep -q 'usr/bin/acvram' && ok "deb : usr/bin/acvram présent" || faux "deb : usr/bin/acvram absent"
+    # 266 b : pas de `grep -q` en aval d'une commande longue sous pipefail — grep -q ferme le tube au premier
+    # succès, dpkg-deb meurt de SIGPIPE et le tube rend faux (« usr/bin/acvram absent » sur la v0.7.0, 274 entrées)
+    if [ "$(dpkg-deb --contents "$DEB" 2>/dev/null | grep -c 'usr/bin/acvram')" -gt 0 ]; then ok "deb : usr/bin/acvram présent"; else faux "deb : usr/bin/acvram absent"; fi
   else saute "deb : dpkg-deb absent"; fi
 fi
 
 # ---- 5. AUR : PKGBUILD + .SRCINFO, version et somme renseignées ----------------------------------------------
 if [ -n "$AUR" ]; then
   L=$(tar tzf "$AUR" 2>/dev/null)
-  printf '%s\n' "$L" | grep -qx 'acvram/PKGBUILD' && printf '%s\n' "$L" | grep -qx 'acvram/.SRCINFO' \
-    && ok "aur : acvram/PKGBUILD et acvram/.SRCINFO" || faux "aur : PKGBUILD ou .SRCINFO absent de l'archive"
+  if [ "$(printf '%s\n' "$L" | grep -cx 'acvram/PKGBUILD')" -gt 0 ] && [ "$(printf '%s\n' "$L" | grep -cx 'acvram/.SRCINFO')" -gt 0 ]; then
+    ok "aur : acvram/PKGBUILD et acvram/.SRCINFO"; else faux "aur : PKGBUILD ou .SRCINFO absent de l'archive"; fi
   PB=$(tar xzf "$AUR" -O acvram/PKGBUILD 2>/dev/null)
   printf '%s\n' "$PB" | grep -q "^pkgver=$V\$" && ok "aur : pkgver=$V" || faux "aur : pkgver ≠ $V"
   printf '%s\n' "$PB" | grep -q "^sha256sums=('SKIP')" && faux "aur : sha256sums=('SKIP') non renseigné" || ok "aur : sha256sums renseigné"
