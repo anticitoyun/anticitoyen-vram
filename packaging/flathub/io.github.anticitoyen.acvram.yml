@@ -3,7 +3,7 @@
 # sources-pypi.py, roues binaires seulement — 266 d ; torch-cu130.json = roues PyTorch cu130 et bibliothèques NVIDIA, voir README.md).
 # CUDA : le pilote vient de l'extension org.freedesktop.Platform.GL.nvidia-<version> (posée par flatpak d'après le pilote
 # de l'hôte) ; les bibliothèques CUDA côté application (cudart, cublas, cusparse, cufft, curand, nvrtc, nvjitlink) sont
-# celles des roues nvidia-* de PyTorch, sous /app/lib/python3.12/site-packages/nvidia. Les noyaux d'acvram ne se
+# celles des roues nvidia-* de PyTorch, sous /app/lib/python3.14/site-packages/nvidia (Python du runtime : PYTHON_RUNTIME, 266 e). Les noyaux d'acvram ne se
 # compilent PAS dans le bac à sable (pas de nvcc) : ils arrivent PRÉCOMPILÉS (module acvram-noyaux, cache par empreinte).
 id: io.github.anticitoyen.acvram
 runtime: org.gnome.Platform
@@ -26,10 +26,10 @@ finish-args:
   - --env=TRITON_CACHE_DIR=/var/cache/acvram/triton    # → xdg-cache/acvram
 cleanup:
   - /include
-  - /lib/python3.12/site-packages/nvidia/cudnn        # inutilisé par acvram (attention maison / Triton) : −1,1 Go
-  - /lib/python3.12/site-packages/nvidia/nccl         # une seule carte servie : −0,3 Go
-  - /lib/python3.12/site-packages/nvidia/nvshmem
-  - /lib/python3.12/site-packages/nvidia/cusparselt
+  - /lib/python3.14/site-packages/nvidia/cudnn        # inutilisé par acvram (attention maison / Triton) : −1,1 Go
+  - /lib/python3.14/site-packages/nvidia/nccl         # une seule carte servie : −0,3 Go
+  - /lib/python3.14/site-packages/nvidia/nvshmem
+  - /lib/python3.14/site-packages/nvidia/cusparselt
   - "*.a"
 modules:
   - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py)

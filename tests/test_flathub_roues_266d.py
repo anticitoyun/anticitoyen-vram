@@ -49,7 +49,7 @@ def test_un_sdist_est_refuse(tmp_path):
 def test_le_telechargement_exige_des_roues(monkeypatch):
     vu = {}
     monkeypatch.setattr(SP.subprocess, "check_call", lambda cmd: vu.setdefault("cmd", cmd))
-    SP.telecharger(["numpy", "uvicorn[standard]"], "/nulle-part")
+    SP.telecharger(["numpy", "uvicorn[standard]"], "/nulle-part", "3.14")
     cmd = vu["cmd"]
     assert "--only-binary=:all:" in cmd and "--python-version" in cmd and "--platform" in cmd and cmd[-2:] == ["numpy", "uvicorn[standard]"]
     assert "--no-binary" not in " ".join(cmd) and "--no-deps" not in cmd, "les dépendances transitives doivent être résolues, en roues"
