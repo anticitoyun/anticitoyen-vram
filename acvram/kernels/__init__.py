@@ -337,7 +337,7 @@ def ecrire_precompile(dossier: str) -> str:
     cand = os.path.join(dossier, src_sha[:16])
     os.makedirs(cand, exist_ok=True)
     shutil.copy2(_SO_PATH, os.path.join(cand, "acvram_kernels.so"))
-    archs = sorted({f.split("code=")[1] for f in _arch_flags() if "code=sm_" in f})
+    archs = sorted({f.rsplit("code=", 1)[1] for f in _arch_flags() if "code=sm_" in f})   # -gencode=arch=…,code=sm_120f
     with open(os.path.join(cand, "empreinte.json"), "w", encoding="utf-8") as fh:
         json.dump({"src_sha": src_sha, "src_hash": _SRC_HASH_ACTUEL, "archs": archs,
                    "torch": torch.__version__, "cuda": str(torch.version.cuda)}, fh, indent=1)
