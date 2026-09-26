@@ -267,6 +267,7 @@ Dua temuan dari pengukuran ini mengubah nilai-nilai bawaan:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **melanjutkan proyek di mesin lain** (bahasa Prancis) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | bagaimana bagian-bagian saling terpasang |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 murni atau attention+GDN dalam int8 per kanal, pada hibrida Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | menyetel mesin spesifik ini |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **apa yang belum dikerjakan**, baca ini dahulu |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | konvensi kerja pada kode (bahasa, gaya, pemeriksaan sebelum push) |

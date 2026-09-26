@@ -267,6 +267,7 @@ Dwa wnioski z tych pomiarów zmieniły wartości domyślne:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **wznowienie projektu na innej maszynie** (po francusku) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | jak łączą się elementy |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | czyste NVFP4 albo attention+GDN w int8 na kanał, na hybrydzie Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | dostrojenie tej konkretnej maszyny |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **co jeszcze nie jest zrobione**, przeczytać w pierwszej kolejności |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | konwencje pracy nad kodem (język, styl, kontrole przed wypchnięciem) |

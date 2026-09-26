@@ -267,6 +267,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **在另一台机器上接手本项目**（法文） |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | 各个部分如何组合在一起 |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | 纯 NVFP4 或按通道 int8 的 attention+GDN，基于 Gated DeltaNet 混合架构 |
 | [`docs/MATERIEL.md`](MATERIEL.md) | 针对这台特定机器的调校 |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **尚未完成的工作**，请先阅读 |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | 代码的工作约定（语言、风格、推送前的检查） |

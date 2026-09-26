@@ -267,6 +267,7 @@ Due riscontri da queste misure hanno cambiato i valori di default:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **riprendere il progetto su un'altra macchina** (francese) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | come le parti si assemblano |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 puro oppure attention+GDN in int8 per canale, su un ibrido Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | configurare questa macchina precisa |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **ciò che non è ancora fatto**, da leggere per primo |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | convenzioni di lavoro sul codice (lingua, stile, controlli prima del push) |

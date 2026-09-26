@@ -269,6 +269,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **استئناف المشروع على جهاز آخر** (بالفرنسية) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | كيف تترابط الأجزاء |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | NVFP4 نقي أو الانتباه+GDN بصيغة int8 لكل قناة، على هجين Gated DeltaNet |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ضبط هذا الجهاز بعينه |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **ما لم يُنجز بعد**، اقرأه أولًا |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | أعراف العمل على الشيفرة (اللغة، والأسلوب، والفحوص قبل الدفع) |

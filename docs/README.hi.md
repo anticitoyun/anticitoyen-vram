@@ -267,6 +267,7 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **किसी दूसरी मशीन पर परियोजना फिर से शुरू करना** (फ़्रेंच में) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | हिस्से आपस में कैसे जुड़ते हैं |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | शुद्ध NVFP4 या प्रति-चैनल int8 में attention+GDN, एक Gated DeltaNet हाइब्रिड पर |
 | [`docs/MATERIEL.md`](MATERIEL.md) | इस विशेष मशीन को ट्यून करना |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **क्या अभी पूरा नहीं हुआ है**, इसे सबसे पहले पढ़ें |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | कोड पर काम करने की परिपाटियाँ (भाषा, शैली, पुश करने से पहले की जाँचें) |

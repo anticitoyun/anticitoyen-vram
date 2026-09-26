@@ -267,6 +267,7 @@ E mérésekből két megállapítás változtatta meg az alapértelmezett érté
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **a projekt folytatása egy másik gépen** (franciául) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | hogyan illeszkednek össze a darabok |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | tiszta NVFP4 vagy attention+GDN csatornánkénti int8-ban, egy Gated DeltaNet hibriden |
 | [`docs/MATERIEL.md`](MATERIEL.md) | ennek a konkrét gépnek a beállítása |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **ami még nincs kész**, ezt olvasd el először |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | a kódon való munka konvenciói (nyelv, stílus, ellenőrzések push előtt) |

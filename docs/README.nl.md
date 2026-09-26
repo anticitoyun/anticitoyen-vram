@@ -267,6 +267,7 @@ Twee vaststellingen uit deze metingen hebben de standaardwaarden veranderd:
 |---|---|
 | [`REPRISE.md`](../REPRISE.md) | **het project op een andere machine hervatten** (Frans) |
 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | hoe de onderdelen samenkomen |
+| [`docs/CHOIX-FORMAT-GDN.md`](CHOIX-FORMAT-GDN.md) | puur NVFP4 of attention+GDN in int8 per kanaal, op een Gated DeltaNet-hybride |
 | [`docs/MATERIEL.md`](MATERIEL.md) | deze specifieke machine afstellen |
 | [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **wat nog niet gedaan is**, lees dit eerst |
 | [`CONVENTIONS.md`](../CONVENTIONS.md) | werkconventies voor de code (taal, stijl, controles voor het pushen) |
