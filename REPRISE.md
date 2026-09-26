@@ -313,6 +313,23 @@ chacune ferme une classe d'incident réellement observée ce jour-là.
   purge `CLAUDE*`/`ANTHROPIC*`/`ACVRAM_SESSION` hérités avant de lancer `claude` (une
   relance depuis une session désactivait les transcripts). **Appliquée le 26/09** à
   `~/.local/bin/session-acvram` (chef, sauvegarde `.avant-26-09`).
+* **Une version sort par `outils/sortir-version.sh vX.Y.Z`, jamais à la main** (pièce
+  281/282, poste3 1bd8f719f, `tests/test_sortir_version_281.py`) : codifie la sortie que
+  chef faisait manuellement — tag annoté + push GitLab, `outils/publier-github.sh
+  --pousser` sous `outils/carte.sh`, `gh release create` (notes lues depuis
+  `docs/notes/release-vX.Y.Z-github.md`, qui doit exister AVANT d'appeler le script),
+  attente du run GitHub Actions « Release packages » (`gh run watch`, espacé — jamais une
+  boucle serrée), puis `outils/verifier-release.sh`. `--simule` trace chaque commande sans
+  rien pousser ni créer de tag ; le jeton GitHub est lu comme dans `publier-github.sh`
+  (coffre, entrée `github-anticitoyun`), jamais affiché ni journalisé. La vérification de
+  propreté ignore les fichiers NON suivis (`git status --porcelain --untracked-files=no`) :
+  un `scratchpad/<pièce>/` d'un autre membre, sur `main`, est l'état normal du dépôt et ne
+  bloque pas une sortie — seul du contenu SUIVI modifié le fait (282, trouvé en rejouant le
+  script `--simule` sur la vraie `main`, qui refusait à tort sur des dossiers scratch d'un
+  autre poste). Codes de refus : `64` usage/version malformée, `65` main sale ou version de
+  `pyproject.toml` différente, `66` notes GitHub absentes, `67` le tag existe déjà, `68`
+  `publier-github.sh` a échoué, `69` `gh release create` ou jeton absent, `70` le run a
+  échoué ou n'est jamais apparu, `71` `verifier-release.sh` a signalé un défaut.
 
 ## 11. Terminé — définition (20/09/2026, `revue/poste7-tests-rapides-cloture-20-09`, mot pour mot)
 

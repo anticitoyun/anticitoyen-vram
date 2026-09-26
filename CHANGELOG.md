@@ -1,5 +1,45 @@
 # Journal des changements
 
+## 0.7.4 (26/09/2026)
+
+### Correctif de sûreté
+
+* **26/09/2026 — pièce 283 (poste5 277a-bis puis 277fix, poste5-277 9fdea0a23 ; élargie sur ordre chef ; poste3) :
+  `--speculative ngram` n'est plus le défaut, pour AUCUN alias.** La 277a-bis avait d'abord trouvé un BOGUE DE
+  VÉRIFICATION sur le mixte-i8c (Qwen3.8, GDN, hybride) : sur 5 invites testées, 4 ont émis un jeton spéculatif que
+  le modèle place **13 à 24 logits sous son premier choix** (ε 5,42 à 13,54, écart de logit 13,1 à 24,1). **Cause
+  trouvée par poste5 : le pipeline de décodage n'était pas vidé au passage du décodage simple au spéculatif —
+  jetons répétés.** Ce mécanisme touche TOUT modèle servi avec ngram, dense compris — pas seulement les hybrides
+  où le symptôme avait d'abord été mesuré. **Portée : toutes les versions 0.7.x servies avec la spéculation par
+  défaut** (`ngram`, seul propositeur actif sans configuration explicite depuis leur sortie). **Défaut désormais
+  `none` pour TOUS les alias** ; `ngram` reste servable sur demande explicite (`--speculative ngram`), avec un
+  avertissement au démarrage qui dit ce qui est VRAI dans les deux cas — que la 277fix de poste5 soit ou non
+  entrée dans cette version (son test Coder n'est pas encore tranché) : « bogue 277 (jetons répétés au passage
+  simple → spéculatif) ; sortie possiblement différente de --speculative none ; qualification en cours ». Tests
+  cassants : `tests/test_speculation_hybride_283.py` (défaut none sur hybride ET non-hybride, avertissement émis
+  sur toute demande explicite de ngram, jamais sur le défaut ni sur `none` explicite) et
+  `tests/test_ngram_pas_defaut_ailleurs_283.py` (audit des autres points d'entrée : `Engine`, CLI, API serveur,
+  GUI — aucun autre défaut ngram trouvé). `revue/poste5-piece277abis-verdict-26-09.md`.
+
+* **26/09/2026 — pièce 269 d (poste6, mesure 276, décision chef) : le guet d'admission est COUPÉ pour les alias
+  vision ; inchangé en texte (défaut 1).** La 276 a mesuré le guet hors de son régime : en texte (Qwen3-Coder, b = 2/4/8,
+  ABBA par point) aucun coût — mur et TTFT p50 B = A ± 1 ms, 14/14 tours à un pas chez B (A : 14, 11, 11), 0 tour de
+  l'issue nommée sur 42 ; **avec images** (Qwen3-VL-2B-Instruct-bf16-vision, b = 4, une image 448×448 par requête) la
+  préparation d'image d'une requête entrée (`preparer_images`, 16-34 ms) dépasse toujours la fenêtre de 5 ms : le fil
+  attendait le plafond de 20 ms à chaque tour (12/14) pour un pas groupé qui n'en rend que 8 — **mur +10,2 ms, TTFT p50
+  +9,6 ms (104,5 → 114,0), p95 +25 ms (113 → 138)**. `EngineService.guet_actif()` = guet ET pas `vision_servie()` ; test
+  cassant `test_269d_alias_vision_le_guet_est_coupe` ; opt-out `ACVRAM_ADMISSION_GUET=0` inchangé. **Non couvert : un
+  alias vision servant du texte seul (guet coupé pour lui aussi), plusieurs images par requête, b = 12 avec images, 2e
+  modèle (274).** `revue/poste6-piece276-{a-sec,verdict}-26-09.md`.
+
+### Paquets
+
+* **26/09/2026 — pièce 266 m : le Flatpak se construit de nouveau.** La 0.7.3 n'a pas de `.flatpakref` :
+  le dépôt OSTree amorcé depuis la branche gh-pages perdait ses dossiers vides (git ne les garde pas), et
+  `flatpak build-update-repo` échouait sur `opendir(refs/remotes)`. Les dossiers `refs/remotes`, `refs/mirrors`,
+  `tmp` et `state` sont recréés avant la mise à jour, avec un `.keep`. Témoin local : copie brute → code 1, copie
+  recréée → code 0. Garde `test_266m`.
+
 ## 0.7.3 (26/09/2026)
 
 * **26/09/2026 — pièce 269 c (poste6, décision chef sur la mesure 269 b) : le guet d'admission est AU DÉFAUT
