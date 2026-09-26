@@ -41,12 +41,25 @@ def test_tranches_egalent_la_fenetre_entiere(converted):
         nll_ref = torch.nn.functional.cross_entropy(ref, targets, reduction="none")
         batch2 = _batch(chunk, (len(chunk) + BLOCK_SIZE - 1) // BLOCK_SIZE + 1)
         h = model(batch2, return_hidden=True)
+        # Pièce 267 (CI GitHub, runner CPU, `device_override="cpu"` ci-dessus force
+        # d'ailleurs TOUJOURS ce test sur processeur, carte ou pas) : atol=1e-6
+        # était franchi de ~2,6e-6 — valeur observée en CI 60,894676542969 contre
+        # la référence 60,894673955078 (même calcul, même modèle jouet). Cause :
+        # la tête entière (un seul appel) et la tête par tranches (plusieurs
+        # appels plus petits) n'accumulent pas les produits matriciels dans le
+        # même ordre en fp32 — le BLAS processeur choisit son propre découpage,
+        # contrairement à la carte où l'ordre des accumulations est fixe pour
+        # une même forme. 1e-5 couvre l'écart observé (2,6e-6) avec de la marge,
+        # sans s'approcher d'une vraie divergence de chemin (le témoin cassant
+        # plus bas diverge de ≥ 1e-3). CONDITIONNÉ au device réellement utilisé,
+        # jamais élargi à l'aveugle si ce test tournait un jour aussi sur carte.
+        atol = 1e-5 if h.device.type == "cpu" else 1e-6
         for tranche in (1, 7, 16, 256):
             nll = _pertes_par_tranches(model, h, targets, 0, tranche)
             assert nll.shape == nll_ref.shape
-            assert torch.allclose(nll, nll_ref, rtol=0, atol=1e-6), (tranche, (nll - nll_ref).abs().max())
+            assert torch.allclose(nll, nll_ref, rtol=0, atol=atol), (tranche, (nll - nll_ref).abs().max())
         nll3 = _pertes_par_tranches(model, h, targets, 3, 16)               # first_new respecté
-        assert torch.allclose(nll3, nll_ref[3:], rtol=0, atol=1e-6)
+        assert torch.allclose(nll3, nll_ref[3:], rtol=0, atol=atol)
         # témoin cassant : la même tête sur des positions décalées d'un cran
         faux = torch.nn.functional.cross_entropy(model._logits_finaux(model._tete(h[1:])).float()[:-1], targets[:-1], reduction="none")
         assert not torch.allclose(faux, nll_ref[:-1], atol=1e-3)

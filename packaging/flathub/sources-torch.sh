@@ -10,9 +10,11 @@ D=$(mktemp -d)
 python3 -m pip download --no-deps --only-binary=:all: --python-version 3.12 --platform manylinux_2_28_x86_64 \
     --index-url "$INDEX" -d "$D" "torch==$V" triton
 # les roues nvidia-* exigées par cette roue torch (Requires-Dist), résolues sur le même index puis PyPI
-python3 - "$D" "$INDEX" <<'PY'
+python3 - "$D" "$INDEX" "$(cd "$(dirname "$0")" && pwd)" <<'PY'
 import glob, json, os, re, subprocess, sys, zipfile, hashlib
 d, index = sys.argv[1], sys.argv[2]
+sys.path.insert(0, sys.argv[3])              # packaging/flathub : roue_url.py
+from roue_url import url_de_la_roue
 torch = glob.glob(os.path.join(d, "torch-*.whl"))[0]
 with zipfile.ZipFile(torch) as z:
     meta = next(n for n in z.namelist() if n.endswith("METADATA"))
@@ -25,10 +27,9 @@ mods = []
 for w in sorted(glob.glob(os.path.join(d, "*.whl"))):
     nom = os.path.basename(w).split("-")[0]
     sha = hashlib.sha256(open(w, "rb").read()).hexdigest()
-    url = subprocess.check_output([sys.executable, "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "--python-version", "3.12",
-                                   "--platform", "manylinux_2_28_x86_64", "--index-url", index, "--extra-index-url", "https://pypi.org/simple",
-                                   "--dry-run", "--report", "-", nom + ("==" + os.path.basename(w).split("-")[1])], text=True)
-    url = json.loads(url)["install"][0]["download_info"]["url"]
+    # 266 b : l'URL vient de l'index (PEP 503, roue_url.py) — l'ancien appel passait à `pip download` une option
+    # qu'il n'a pas (elle n'existe que pour `pip install`) : job flatpak de la v0.7.0 rouge, étape « sources Python »
+    url = url_de_la_roue(os.path.basename(w), index, sha)
     mods.append({"name": "python3-" + nom, "buildsystem": "simple",
                  "build-commands": [f"pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${{PWD}}\" --prefix=${{FLATPAK_DEST}} --no-deps \"{nom}\" --no-build-isolation"],
                  "sources": [{"type": "file", "url": url, "sha256": sha}]})
