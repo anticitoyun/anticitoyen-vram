@@ -53,8 +53,10 @@ def roue_compatible(fichier: str, version: str) -> bool:
     py_ok = any(x == xy or x in ("py3", "py2.py3") or _au_plus(x, "py3") for x in py.split("."))
     abi_ok = any(a in (xy, "none") for a in abis)   # jamais cpXYt (sans GIL)
     return py_ok and abi_ok
-PLATEFORMES = ["manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux_2_24_x86_64", "manylinux_2_17_x86_64",
-               "manylinux2014_x86_64", "manylinux_2_12_x86_64", "manylinux2010_x86_64", "manylinux_2_5_x86_64", "manylinux1_x86_64"]
+# pip n'accepte que les étiquettes de plateforme DONNÉES (aucune descente automatique manylinux_2_28 → 2_25) : la roue
+# nvidia_cuda_cupti-13.0.85-py3-none-manylinux_2_25_x86_64.whl restait introuvable avec 2_28/2_27/2_17 seules (266 h).
+# Toutes les glibc de 2.5 à 2.28 (le runtime GNOME 51 est en 2.4x) + les alias historiques.
+PLATEFORMES = [f"manylinux_2_{k}_x86_64" for k in range(28, 4, -1)] + ["manylinux2014_x86_64", "manylinux2010_x86_64", "manylinux1_x86_64"]
 DEJA_SERVIES = ("torch", "triton", "nvidia_")            # torch-cu130.json (sources-torch.sh) : torch, triton, roues nvidia-* de CUDA
 GARDEES = ("nvidia_ml_py",)                               # … sauf nvidia-ml-py (NVML pour /metrics), qui n'y est pas
 

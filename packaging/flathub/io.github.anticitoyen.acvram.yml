@@ -25,11 +25,8 @@ finish-args:
   - --env=ACVRAM_KERNELS_PRECOMPILES=/app/lib/acvram/noyaux   # noyaux CUDA précompilés (240 : chargés sans nvcc ni ninja)
   - --env=TRITON_CACHE_DIR=/var/cache/acvram/triton    # → xdg-cache/acvram
 cleanup:
+  # 266 h : cudnn, nccl, nvshmem, cusparselt ne se retirent PLUS — libtorch_cuda.so (2.14 cu130) les lie, import torch impossible sans
   - /include
-  - /lib/python3.14/site-packages/nvidia/cudnn        # inutilisé par acvram (attention maison / Triton) : −1,1 Go
-  - /lib/python3.14/site-packages/nvidia/nccl         # une seule carte servie : −0,3 Go
-  - /lib/python3.14/site-packages/nvidia/nvshmem
-  - /lib/python3.14/site-packages/nvidia/cusparselt
   - "*.a"
 modules:
   - python3-modules.json                # dépendances PyPI (numpy, safetensors, fastapi, uvicorn, pydantic, pyyaml, tokenizers, huggingface-hub, jinja2, psutil, nvidia-ml-py)
