@@ -116,3 +116,18 @@ Une première prise 071 avec le bras Flatpak avait démarré (2,8 Go tirés) : a
 
 Fichiers : `~/.cache/acvram/releases/v0.7.2/{verif-072.log,flatpak-doctor.txt}`, `~/.cache/acvram/releases/v0.7.1/verif-071-sans-flatpak.log`,
 `scratchpad/poste6-p07{1,2}-26-09/`.
+
+## 6. 266 m — premier run de la 266 l (v0.7.3, 36243027577) : rouge, cause lue, témoin local
+
+Job flatpak rouge à 13:05:34Z, après build-export et l'import GPG : `Updating appstream branch` → `error: Listing refs:
+opendir(refs/remotes): No such file or directory` → exit 1 (journal du chef, 1 530 lignes). Cause : l'amorçage 266 l copie
+`pages/flatpak` (un clone git de gh-pages) dans `repo`, et **git ne garde pas les dossiers vides** — `refs/remotes`,
+`refs/mirrors`, `tmp`, `state` manquent au dépôt OSTree republié. gh-pages est restée à la 0.7.2 (6fe7d2de2), rien de
+poussé, la 0.7.3 n'a pas de Flatpak servi tant que le job n'est pas rejoué.
+
+Témoin local (26/09, clone git de gh-pages v0.7.2, `flatpak build-update-repo --generate-static-deltas`) :
+copie brute → la même erreur, code 1 ; copie + `mkdir -p refs/remotes refs/mirrors tmp state` → « Generating static
+deltas / Updating summary », code 0 ; idem avec un `.keep` dans chacun → code 0. `ostree init` n'a pas pu être essayé
+(binaire absent du poste). Correctif 266 m (`release.yml`) : les quatre dossiers recréés juste après la copie, et des
+`.keep` posés à la publication pour que gh-pages les conserve ; garde `test_266m_…` dans `tests/test_flathub_gh_pages_266l.py`.
+Leçon : **un dépôt OSTree qui transite par git perd ses dossiers vides** — tout amorçage depuis git les recrée.

@@ -215,7 +215,10 @@ jobs:
           if packaging/flathub/ref-ne-recule-pas.sh "$V" pages/flatpak/VERSION; then CONSTRUIRE=1; else
             CONSTRUIRE=0; echo "::warning::gh-pages sert une version plus récente que la $V : dépôt non touché, seul le .flatpakref est joint"; fi
           if [ "$CONSTRUIRE" = 1 ]; then
-            [ -d pages/flatpak/objects ] && cp -a pages/flatpak repo
+            # 266 m : git ne garde pas les dossiers vides — le dépôt copié depuis gh-pages n'a plus refs/remotes, refs/mirrors,
+            # tmp ni state, et build-update-repo tombe (« Listing refs: opendir(refs/remotes): No such file », run 36243027577).
+            # Recréés ici (témoin local : la copie brute tombe, la copie + mkdir passe) ; des .keep les gardent sur gh-pages.
+            if [ -d pages/flatpak/objects ]; then cp -a pages/flatpak repo && mkdir -p repo/refs/remotes repo/refs/mirrors repo/tmp repo/state; fi
             flatpak-builder --user --force-clean --sandbox --repo=repo construction-flatpak io.github.anticitoyen.acvram.yml
           fi
           # 266 i : plus de bundle (> 2 Gio avec la fermeture CUDA, et un bundle ne porte pas les extra-data) — le dépôt OSTree
@@ -244,6 +247,7 @@ jobs:
           if [ "$CONSTRUIRE" = 1 ]; then
             mkdir -p repo && echo "$V" > repo/VERSION      # la version que sert le ref master, lue par ref-ne-recule-pas.sh
             rm -rf pages/flatpak && cp -a repo pages/flatpak && touch pages/.nojekyll
+            for d in refs/remotes refs/mirrors tmp state; do mkdir -p "pages/flatpak/$d" && touch "pages/flatpak/$d/.keep"; done   # 266 m
             git -C pages add -A flatpak .nojekyll
             # 266 l : gh-pages est republiée en UN commit orphelin (commit-tree sans parent, push --force de cette branche
             # seule) — l'historique OSTree vit dans flatpak/ (deltas, prune-depth), pas dans git : sinon chaque version
