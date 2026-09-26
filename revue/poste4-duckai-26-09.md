@@ -716,3 +716,55 @@ H100 ; FLA issue #640 GDN precision triton3.5/H20 ; vLLM issue GDN_ATTN batch-in
 `vllm.model_executor.layers.fla.ops.chunk` ; vLLM/FlashInfer issue #3329 hang préfill groupé ; SGLang RFC
 #28511 précision GDN/KDA ; SGLang-JAX issue #1416 préfill GDN ; SGLang issue Qwen3.5 multi-item scoring),
 vllm.ai (doc API varlen GDN).
+
+---
+
+## Q19 — 233 tenseurs W8A8 FP8 (e4m3, échelles canal × jeton) : int8 par canal → FP8 natif SM120, quel critère d'acceptation si la KL actuelle ne tient pas ?
+
+**3 avis convergents (Gemma 4, Luna, gpt-oss)** : la pratique s'est déplacée des métriques de distribution
+(KL brute) vers des métriques de comportement/tâche — la KL seule ne suffit pas et n'est PAS le critère de
+release dans l'écosystème vLLM/llm-compressor/Red Hat. Le seuil « ≥ 99 % de récupération » est une
+convention de rapport très répandue, PAS une norme industrielle formelle unique.
+
+**Hiérarchie des critères observés en pratique** :
+1. **Benchmarks de tâches (le vrai gate de production)** : MMLU, GSM8K, ARC-Challenge, HellaSwag,
+   Winogrande, via `lm-evaluation-harness`. Chiffres exacts publiés par Red Hat/llm-compressor pour un
+   Llama 3.1 70B W8A8 : MMLU 83,88→83,65 (99,7 % récup.), MMLU CoT 85,74→85,41 (99,6 %), ARC-C
+   93,26→93,26 (100,0 %), GSM8K 93,10→93,25 (100,2 %), HellaSwag 86,40→86,28 (99,9 %), Winogrande
+   85,00→85,00 (100,0 %), **moyenne 83,89→83,96 (100,2 %)**.
+2. **Taux de récupération moyen** (score quantifié / score référence × 100), PAS une exigence de ≥ 99 %
+   tâche par tâche — l'étude Red Hat « Give Me BF16 or Give Me Death? » (>500 000 évaluations, famille
+   Llama 3.1) trouve **99,75 % moyen en 8-bit**, **99,36 % en W4A16**, mais un pire cas à **≈ 96,88 %**
+   (TruthfulQA, W4A16 8B) — une moyenne à 99 % peut cacher un échec spécifique à une tâche (ex. AIME25
+   à ≈ 86 % sur une carte modèle Red Hat NVFP4/FP8, malgré GSM8K à 99,76 %).
+3. **Perplexité (PPL)** : filtre rapide/diagnostic (change les échelles ont-elles saturé, un noyau a-t-il
+   dérivé), PAS un gate de production suffisant seul — reconnu explicitement insuffisant pour
+   l'instruction-following/sécurité (Red Hat, arXiv llama.cpp eval paper).
+4. **Accord top-1/logits** : outil de régression et de localisation de bug, pas de seuil universel reconnu.
+
+**Seuils KL trouvés (utiles pour vous, qui partez d'un critère KL)** : deux cartes modèles
+compressed-tensors distinctes citées par Luna donnent des seuils DIFFÉRENTS et non canoniques — l'une
+`KL < 0,005` + MMLU ≥ 99,7 % + RULER@128k ≥ 99 % ; l'autre `KL < 0,014` + MMLU ≥ 99 % + RULER@128k ≥ 97 %.
+Un papier (« Statistically-Lossless Quantization ») propose `KL ≤ 0,01` comme prédicteur théorique de
+« task-lossless », avec un score EAR (chevauchement top-10) ≥ 0,99 comme critère complémentaire. **Ce sont
+des seuils définis par leurs auteurs pour LEUR recette, pas des standards vLLM/industrie.**
+
+**vLLM en pratique** : la doc FP8 traite l'évaluation comme une étape séparée après quantification/service
+— quantifier, servir, `lm_eval` (ex. GSM8K sur 250 échantillons, score 0,768 ± 0,0268), comparer au modèle
+original SOUS LES MÊMES réglages (tokenizer, template, few-shot, échantillonnage, **BOS-token** — un
+mismatch d'évaluation peut se faire passer pour une régression de quantification). Aucun seuil universel
+imposé dans la doc elle-même.
+
+**Recommandation pour notre cas (233 tenseurs W8A8→FP8 natif)** : ne pas chercher un seuil KL de
+remplacement unique et théorique. Remplacer/compléter le critère KL par : (a) PPL sur corpus de référence
+comme filtre rapide (proche BF16, pas un seuil absolu isolé) ; (b) recovery moyen ≥ 99 % sur un panel de
+tâches (MMLU + GSM8K minimum, HellaSwag/ARC-C si possible) via lm-eval, **jamais une moyenne seule** — noter
+aussi le pire score par tâche (le cas TruthfulQA/AIME25 montre qu'une moyenne à 99 % peut masquer un score
+à 87-96 % sur une tâche spécifique) ; (c) vérifier BOS-token et réglages identiques entre les deux bras
+avant de conclure à une régression.
+
+**Sources** : Red Hat (« Optimize a model with LLM Compressor », doc FP8 llm-compressor, exemples Llama
+3.1 70B W8A8), arXiv (« Give Me BF16 or Give Me Death? », Statistically-Lossless Quantization, papier
+d'évaluation llama.cpp), Oracle Cloud (blog FP8 dynamique, recovery Llama 3.3-70B), GMI Cloud (blog
+FP8/FP4), NVIDIA (blog Transformer Engine/Blackwell, MXFP8 vs BF16), vllm.ai (doc FP8, doc KV-cache FP8
+état de l'art), Hugging Face (cartes modèles compressed-tensors, carte Red Hat NVFP4/FP8 GSM8K/AIME25).
