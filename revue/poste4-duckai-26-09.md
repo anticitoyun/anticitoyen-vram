@@ -1243,3 +1243,91 @@ d'état hôte optimiste mal faite) avant d'investir dans un contrôleur d'hysté
 `python/sglang/srt/speculative/adaptive_spec_params.py` ; sglang-jax issue #927 ngram overlap désactivé),
 lmsys.org (SGLang v0.4 Zero-Overhead Batch Scheduler), vllm.ai (doc Speculative Decoding, doc
 `vllm.config.scheduler`).
+
+## Q27 — Regroupement du préfill pour modèles hybrides GDN/Mamba (chef, veille pièce 274, pour poste1 284)
+
+**Contexte posé** : préfill mixte sans gain de lot, TTFT 0,48 → 5,4 s de b=1 à b=12. Question à Luna (GPT-5.6,
+un seul avis pour cette question — pas de second modèle interrogé faute de temps, à signaler à chef/poste1
+si un second avis est voulu) : chunked prefill sur l'état récurrent, restrictions de mélange préfill/décodage,
+stockage de l'état SSM par requête.
+
+**Chunked prefill — vLLM** : `vllm/v1/attention/backends/mamba_attn.py`,
+`BaseMambaAttentionMetadataBuilder._compute_chunk_metadata/_build_chunk_metadata_tensors/_prefill_cpu_metadata`.
+Un chunk Mamba ne contient les jetons que d'UNE SEULE requête (contrainte documentée dans le code), état
+récupérable seulement aux frontières `chunk_size` (tenseurs `cu_chunk_seqlens`, `seq_idx`,
+`last_chunk_indices`). Différent de l'attention classique, qui peut aplatir plusieurs requêtes dans un même
+`cu_seqlens`. Mode `--mamba-cache-mode align` : état disponible seulement aux frontières de bloc/chunk alignées,
+pas au grain du jeton (doc LMCache hybride, GDN non supporté en mode `all`). Conséquence signalée : la taille
+d'état Mamba peut forcer une taille de bloc d'attention PARTAGÉE plus grande que l'optimum du noyau d'attention
+seul.
+
+**Chunked prefill — SGLang** : `hybrid_linear_attn_backend.py`, `linear/gdn_backend.py`,
+`linear/kernels/gdn_flashinfer.py`, `mem_cache/mamba_radix_cache.py`. Feuille de route SGLang elle-même liste
+comme limitations actuelles : stockage d'état tous les k pas / aux points de branchement, stockage d'état
+intermédiaire GDN/Mamba, tailles de page > 1, ordonnancement en chevauchement pour hybrides (non sourcé plus
+précisément que la liste de roadmap — Luna cite "GitHub" sans numéro exact ici). Une proposition récente définit
+`mamba_cache_chunk_size = max(FLA_CHUNK_SIZE, page_size)` — l'état a bien sa propre granularité de chunk,
+distincte du pagage de l'attention.
+
+**Mélange préfill/décodage — vLLM** : PAS d'interdiction générale, mais les lignes doivent être classées et
+réordonnées (`GPUModelRunner.calculate_reorder_batch_threshold`, `reorder_batch_to_split_decodes_and_prefills`,
+`Mamba2AttentionMetadataBuilder.build`). Un bogue réel cité (vLLM, numéro d'issue non précisé par Luna au-delà
+de la description) : si le seuil de réordonnancement global est abaissé par un autre backend, des lignes de
+décodage peuvent traverser les noyaux de préfill Mamba, qui n'écrivent que le créneau d'état ORDINAIRE —
+faute de correction pour le spéculatif (créneaux dédiés requis) → corruption, pas juste perte de perf.
+`cu_chunk_seqlens`-style groupement confirmé, mais restreint : un chunk ne traverse jamais deux requêtes.
+
+**Mélange préfill/décodage — SGLang** : chemin mixte explicite (`ScheduleBatch.prepare_for_extend`,
+`Scheduler.get_new_batch_prefill`, `mix_with_running`, `ScheduleBatch.merge_batch`). Bogue cité en détail par
+Luna (issue SGLang, numéro non précisé au-delà du contenu) : `merge_batch()` effaçait `mamba_track_indices`,
+`mamba_track_mask`, `mamba_track_seqlens`, empêchant `_track_mamba_state_extend` de tourner sur le lot mixte
+alors que le créneau d'état était déjà réservé → corruption de sortie ET dégradation de latence substantielle
+rapportées. Défaut d'UNE version, pas preuve d'un défaut universel actuel.
+
+**Stockage de l'état récurrent par requête — vLLM** : V0 (ancien) : tenseur par séquence active × couche,
+dimensionné sur `max_num_seqs` — pas analogue à un cache KV paginé. V1 : allocateur hybride unifié
+(`vllm/v1/kv_cache_interface.py`, `vllm/v1/core/kv_cache_manager.py`) qui groupe les couches par type et
+présente des vues différentes sur une mémoire physique partagée ; pour un groupe Mamba, l'entrée contient
+l'état récurrent (conv + SSM temporel), pas du K/V par jeton. Answer explicite à la question posée (« pool
+dédié analogue au gestionnaire de blocs KV ? ») : **oui en fonction, pas forcément en allocateur totalement
+indépendant** — l'état Mamba peut partager l'allocation physique sous-jacente avec les groupes d'attention
+(padding/alignement pour compatibilité). Note importante de Luna : le travail de service désagrégé P/D cité
+couvre Mamba2 en premier et liste GDN comme limité/roadmap — ne pas supposer que Qwen3.5/GDN suit exactement
+le même mécanisme de transfert d'état que Mamba2 seulement parce que les deux sont "hybrides SSM".
+
+**Stockage — SGLang** : allocateur séparé et plus visible : `HybridReqToTokenPool` (association
+requête→créneau d'état Mamba), `HybridLinearKVPool` (mappage couche linéaire→tenseurs d'état), `MambaRadixCache`
+(instantanés d'état réutilisables pour le partage de préfixe). Différence clé avec le KV classique : un hit
+radix-cache sur un état Mamba force une COPIE dans une nouvelle région (la requête en cours modifiera son état
+en place — partager le même tenseur entre deux requêtes actives créerait une interférence), alors qu'une page
+KV peut simplement être référencée. Tenseurs de suivi du mélange préfill/décodage : `mamba_track_indices`,
+`mamba_track_mask`, `mamba_track_seqlens`, `mamba_next_track_idx`, `mamba_last_track_seqlen`.
+
+**Lecture de votre symptôme (0,48→5,4 s, b=1→12), explicitement qualifiée par Luna d'INFÉRENCE non sourcée par
+le code, pas de diagnostic direct** : combinaison plausible de (a) budget de jetons du planificateur consommé
+par le préfill croissant, (b) chunks Mamba non aplatissables entre requêtes → chaîne récurrente + métadonnées
+de créneau par requête, (c) mélange préfill/décodage empruntant un chemin de noyau moins favorable
+(classification de ligne + gestion d'index d'état), (d) état mis à jour EN PLACE limitant le batching/
+checkpointing arbitraire, (e) alignement de bloc/chunk large imposé par la taille d'état pouvant sur-calculer,
+(f) recouvrement de lancements de noyaux (préfill attention, préfill GDN, écritures d'état, copies d'état,
+décodage) dominant le débit. Mesures recommandées par Luna pour isoler la cause chez vous : préfill pur b=1..N,
+décodage pur b=1..N, mixte à jetons de décodage fixes, mixte à budget de jetons total fixe ; instrumenter
+`num_prefills`, `num_decode_tokens`, jetons réellement planifiés, taille de chunk Mamba/GDN, taille de bloc
+d'attention, nombre de lancements forward, nombre de lancements de copie/scatter d'état, si les lignes
+préfill/décodage ont été réordonnées/scindées.
+
+**Non sourcé / à vérifier** : les numéros exacts d'issue GitHub vLLM et SGLang cités ci-dessus n'ont pas été
+donnés précisément par Luna dans le texte récupéré (citations `<citation src="N">` sans résolution du numéro
+réel affiché) — à retrouver soi-même si une pièce en dépend. La liste de limitations de la roadmap SGLang
+(état tous les k pas, page_size>1, etc.) n'est pas attachée à un numéro de PR/issue précis dans la réponse.
+Le mécanisme de transfert d'état désagrégé P/D pour GDN spécifiquement (vs Mamba2) est signalé par Luna
+lui-même comme non confirmé.
+
+**Sources** : GitHub vLLM (`vllm/v1/attention/backends/mamba_attn.py`, `vllm/v1/kv_cache_interface.py`,
+`vllm/v1/core/kv_cache_manager.py`, `GPUModelRunner.calculate_reorder_batch_threshold`,
+`reorder_batch_to_split_decodes_and_prefills`, `Mamba2AttentionMetadataBuilder.build`, doc hybride P/D
+désagrégé), GitHub SGLang (`hybrid_linear_attn_backend.py`, `linear/gdn_backend.py`,
+`linear/kernels/gdn_flashinfer.py`, `mem_cache/mamba_radix_cache.py`, `managers/schedule_batch.py`,
+`HybridReqToTokenPool`, `HybridLinearKVPool`), doc LMCache (mode `--mamba-cache-mode align`), pytorch.org (doc
+hybride vLLM) — numéros d'issue/PR précis non résolus dans la réponse récupérée, cf. paragraphe « non sourcé »
+ci-dessus.
