@@ -552,3 +552,107 @@ débit nominal) — publier `débit naturel vs débit répété` + ΔH et ΔCV, 
 **Sources** : arXiv (« RepetitionCurse », mesure directe Qwen3-30B-A3B), nvidia.com (routage MoE et
 distribution sémantique du corpus), vllm.ai (`vllm bench serve` datasets), GitHub (issue #4133 « random
 n'est pas random »).
+
+---
+
+# Lot 4 (26/09, chef/poste5 — question 16, suite de Q(19) d'poste1 sur le préfill GDN groupé)
+
+## Q16 — chunk_gated_delta_rule accepte-t-il cu_seqlens pour grouper le préfill GDN en un seul appel ?
+
+**Réponse directe et positive, code réel cité pour fla, vLLM ET SGLang — répond exactement au problème
+d'poste1 (Q19 du lot 1 : préfill GDN qui boucle par séquence, ~1,6 ms/couche/séquence, ~600 ms Python).**
+
+**fla** (`fla/ops/gated_delta_rule/chunk.py`, réel) : `chunk_gated_delta_rule(q,k,v,g,beta,...,
+initial_state=None, output_final_state=False, cu_seqlens=None, cu_seqlens_cpu=None, chunk_indices=None)`
+— `cu_seqlens` PROPAGÉ aux trois étapes internes (`chunk_local_cumsum`, `chunk_gated_delta_rule_fwd_intra`,
+`chunk_gated_delta_rule_fwd_h`). C'est une récurrence CHUNKWISE réinitialisée à chaque frontière indiquée
+par `cu_seqlens` (pas une seule récurrence continue qui déborderait d'une séquence à l'autre) — **au bit
+du par-séquence par construction**, contrairement à ce que craignait notre question initiale (Q4 du lot 1,
+« réfuterait : varlen fla non au bit du par-séquence »).
+
+**État par séquence** : `initial_state` de forme `[N, HV, K, V]` (N = nombre de séquences, PAS déduit de
+B mais de `len(cu_seqlens)-1`), `output_final_state=True` rend un `final_state` de même forme — un état
+par séquence en entrée ET en sortie, indexé par position dans `cu_seqlens` (`initial_state[i]` ↔ tokens
+`[cu_seqlens[i]:cu_seqlens[i+1]]`). Pour un vrai préfill sans préfixe, `initial_state` est nul ; pour un
+extend après préfixe déjà en cache, état distinct par requête fourni.
+
+**vLLM V1 récent (`vllm/v1/attention/backends/gdn_attn.py`, réel)** : le prefill Qwen3-Next/Qwen3.5 N'EST
+PAS bouclé par séquence — `_build_chunk_metadata` + `prepare_chunk_indices(prefill_query_start_loc_cpu,
+FLA_CHUNK_SIZE)` construisent les métadonnées varlen, `prefill_query_start_loc` = l'équivalent vLLM de
+`cu_seqlens`. Champs distincts : `prefill_state_indices` (emplacement de l'état récurrent par requête),
+`prefill_has_initial_state` (reprise depuis un préfixe en cache). `qwen3_next.py` appelle le chemin chunké
+avec ces métadonnées. **Mélange prefill/decode géré séparément** : les decodes passent par le noyau
+récurrent single-step, les prefills restants par le chemin chunké varlen — le rebasage de
+`prefill_query_start_loc` exclut les tokens decode sans reboucler par séquence.
+
+**SGLang** : le chemin CUDA récent suit le même modèle groupé (support `chunk_gated_delta_rule` ajouté
+pour Qwen3-Next, notes de release citées). **Exception notée** : SGLang-JAX historique utilisait un
+`lax.scan` séquentiel PAR TOKEN (`ragged_gated_delta_rule_ref`) même avec cu_seqlens propagé pour
+réinitialiser aux frontières — un ticket d'optimisation SGLang-JAX propose de le remplacer par une forme
+chunkwise. Cette exception ne concerne PAS le chemin CUDA principal.
+
+**Conclusion pratique pour acvram** : l'implémentation efficace est `8 appels de projections groupées →
+1 construction de cu_seqlens/chunk_indices → 1 appel Python à chunk_gated_delta_rule (plusieurs kernels
+CUDA internes) → 8 états finaux indépendants` — PAS `8 × N_couches appels Python GDN`. Le support existe
+déjà dans fla (dont acvram dépend, cf. `.venv/lib/.../fla/ops/gated_delta_rule/chunk.py` vu en session) ;
+vLLM et SGLang CUDA l'exploitent tous les deux. **À vérifier** : notre `fla` vendored a-t-il bien
+`cu_seqlens` dans sa signature `chunk_gated_delta_rule` (probable, même paquet), et notre `couches.py`
+utilise-t-il actuellement cette voie ou la boucle Python par séquence qu'poste1 a mesurée ?
+
+**Sources** : GitHub (code réel `fla/ops/gated_delta_rule/chunk.py`, `fla/ops/kda/chunk_fwd.py`,
+`vllm/v1/attention/backends/gdn_attn.py`, issue vLLM Qwen3.5/Qwen3-Next GDN, ticket SGLang-JAX
+optimisation), newreleases.io (notes de release SGLang v0.5.8, support Qwen3-Next GDN).
+
+## Q17 — FP8 natif vs int8 par canal sur RTX 5090 (SM120) : le conseil vLLM « FP8 sur CC≥10.0 » tient-il ?
+
+**Découverte critique (Luna, bugs GitHub réels)** : le conseil générique de vLLM (« FP8 plutôt qu'INT8 sur
+compute capability ≥10.0 », cité en Q14) **ne s'applique PAS forcément à notre carte** — plusieurs chemins
+FP8 de vLLM et SGLang REJETTENT explicitement SM120 en pratique :
+
+* **vLLM CUTLASS MoE FP8** : `cutlass_group_gemm_supported()` contient littéralement
+  `if cuda_device_capability < 90 or cuda_device_capability >= 110: return False` — **120 tombe dans la
+  zone rejetée** ; sources compilées `grouped_mm_c3x_sm90.cu`/`grouped_mm_c3x_sm100.cu` mais **aucune
+  `grouped_mm_c3x_sm120.cu`**. Erreur runtime documentée et citée : `No compiled cutlass_scaled_mm for
+  CUDA device capability: 120. Required capability: 90 or 100`.
+* **SGLang FP8 blockwise** : ticket RTX 5090 réel, SGLang 0.5.3/CUDA 12.8/PyTorch 2.8.0, erreur `No
+  implemented fp8_blockwise_scaled_mm for current compute capability: 120` — un ticket dédié confirme
+  explicitement le format non supporté sur RTX 5090/RTX PRO 6000 à cette date.
+* **GEMM groupé MoE FP8 pur** : un rapport plus récent indique un repli sur des tactiques SM89 (faute de
+  noyaux TMA FP8 natifs SM120), alors que **NVFP4 a une couverture SM120 plus avancée** — cohérent avec
+  notre propre choix historique du NVFP4 comme format principal.
+
+**Réponse théorique/matérielle (pas garantie logicielle)** : SM120 possède bien des instructions MMA FP8
+natives (`mma.sync.aligned.kind::f8f6f4`, `mxf8f6f4.block_scale`, documentées CUTLASS), mais **le débit
+FP8 non block-scaled SM120 est comparable à Ada, PAS au ×2 annoncé pour SM100/B200** (`tcgen05.mma`) — ne
+pas transposer les chiffres B200 à la RTX 5090. SM120 ne supporte que le layout TN, cluster figé à 1×1×1
+(pas de multicast GeForce). `sm_120`/`sm_120a` = même puce, `a` = fonctionnalités compilateur
+supplémentaires, pas une puce différente.
+
+**Décodage n=1-8** : FP8 et INT8 transfèrent ~1 octet/élément chacun — **gain de bande passante brute
+quasi nul**, ne pas présumer un avantage FP8 sans benchmark de nos formes exactes ; un INT8 par canal bien
+optimisé peut être aussi rapide ou plus rapide. **Préfill n=64-128** : un GEMM FP8 natif A PLUS DE
+CHANCES d'être meilleur (M plus grand amortit lancement/remplit les tensor cores), mais pas garanti —
+dépend du mode de scaling (bloc/tensor-wide vs notre par-canal, qui ne correspond pas forcément au
+scaling matériel optimisé).
+
+**Point le plus important pour nous (chaîne FP8→int8)** : nos tenseurs int8 viennent d'une
+déquantification+requantification FP8→int8 par canal — **chemin jugé sous-optimal** par Luna face à
+utiliser directement `FP8 E4M3 + échelles d'origine → GEMM FP8 natif` (évite la perte de précision et le
+travail de préparation de la requantification) — **mais uniquement SI un vrai noyau FP8 SM120 existe pour
+notre chemin exact** (dense scaled_mm ≠ MoE grouped GEMM, niveaux de support différents).
+
+**Protocole de mesure recommandé** : 4 variantes (FP8 natif échelles d'origine / INT8 par canal actuel /
+FP8 sur poids reconvertis depuis l'int8 pour isoler le noyau / chaîne complète FP8 originale vs FP8→INT8)
+à M=1,2,4,8 (decode) et M=64,128 (préfill), vérifier `smsp__inst_executed_pipe_tensor` (Nsight Compute) et
+**le kernel RÉELLEMENT lancé, pas seulement le nom du backend** (une build `TORCH_CUDA_ARCH_LIST="12.0"`
+ne crée pas magiquement les kernels manquants si le fichier de dispatch n'a pas de spécialisation SM120).
+
+**Retenu pour acvram** : ne pas migrer vers FP8 sur la seule foi du conseil générique vLLM — vérifier
+D'ABORD si notre chemin exact (dense vs MoE groupé) a un kernel FP8 SM120 compilé et fonctionnel avant
+toute mesure comparative ; le risque concret est de mesurer un FALLBACK (SM89 ou erreur) en pensant tester
+du FP8 natif Blackwell.
+
+**Sources** : nvidia.com (docs CUTLASS SM120/SM100 GEMMs, discussion SM120/SM120a, ldmatrix sm120),
+GitHub (issues réelles : CUTLASS MoE backend unavailable SM_120, Blackwell SM120 FP8 MoE fails GLM-4.7,
+SM89 tactics fail SM120 pure FP8 MoE, SGLang 0.5.3 ne peut pas lancer FP8 sur RTX 5090, feature request
+FP8 blockwise SM120), nvidia.com (SGLang Release 26.02 notes).
