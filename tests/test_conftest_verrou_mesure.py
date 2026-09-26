@@ -39,9 +39,28 @@ def test_pytest_configure_refuse_sous_faux_verrou_mesure(tmp_path, monkeypatch):
         conftest.pytest_configure(None)
 
 
-def test_acvram_tests_pendant_mesure_force_le_passage(tmp_path, monkeypatch):
+def test_acvram_tests_pendant_mesure_seul_hors_prise_est_refuse(tmp_path, monkeypatch):
+    """Pièce 246 (chef, 3e contournement en trois jours) : le test qui casse
+    sur la version d'avant — la seule variable, SANS être sous cette prise
+    (ACVRAM_CARTE_TENUE absent ou différent), ne doit plus passer."""
     _ecrire_verrou(tmp_path)
     monkeypatch.setenv("ACVRAM_VERROU_GLOB", str(tmp_path / "acvram-carte-*.lock"))
+    monkeypatch.setenv("ACVRAM_TESTS_PENDANT_MESURE", "1")
+    monkeypatch.delenv("ACVRAM_CARTE_TENUE", raising=False)
+    monkeypatch.setenv("ACVRAM_TESTS_SANS_VERROU", "1")   # ne pas prendre le vrai flock ensuite
+    monkeypatch.setenv("ACVRAM_TESTS_SOUS_CHARGE", "1")   # ne pas dépendre de la charge réelle ici
+    with pytest.raises(pytest.UsageError, match="TYPE=mesure"):
+        conftest.pytest_configure(None)
+
+
+def test_acvram_tests_pendant_mesure_sous_prise_est_accepte(tmp_path, monkeypatch):
+    """Pièce 246 : sous la prise en question (`ACVRAM_CARTE_TENUE` = le pid du
+    `.qui`, comme carte.sh l'exporte à ses descendants) — accepté, avec ou
+    sans la variable (déjà exempté par `_verrou_tenu_en_mesure`)."""
+    pid_prise = os.getpid()
+    _ecrire_verrou(tmp_path, pid=pid_prise)
+    monkeypatch.setenv("ACVRAM_VERROU_GLOB", str(tmp_path / "acvram-carte-*.lock"))
+    monkeypatch.setenv("ACVRAM_CARTE_TENUE", str(pid_prise))
     monkeypatch.setenv("ACVRAM_TESTS_PENDANT_MESURE", "1")
     monkeypatch.setenv("ACVRAM_TESTS_SANS_VERROU", "1")   # ne pas prendre le vrai flock ensuite
     monkeypatch.setenv("ACVRAM_TESTS_SOUS_CHARGE", "1")   # ne pas dépendre de la charge réelle ici
