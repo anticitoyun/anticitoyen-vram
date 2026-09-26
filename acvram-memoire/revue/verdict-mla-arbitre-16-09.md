@@ -1,0 +1,17 @@
+# Verdict — arbitre prefill : sur main ce71723, boucle et défaut (MLA_BATCH=1) sont aussi proches l'un que l'autre du prefill → main SAIN par cet arbitre ; erratum sur `verdict-mla-sonde` (le zérotage visait un slot inutilisé)
+
+- **instrument** : `arbitre-prefill-mla-16-09.py` — le PREFILL (chemin paginé, celui de la PPL 1,0018) rejoue prompt (128) + k jetons greedy d'un bras et émet le logit de la position suivante, comparé au logit que le DÉCODAGE de ce bras avait émis à k (ties `-logits.pt`), k ∈ {1, 2, 4, 8, 16, 32, 63}, 12 séquences ; deux arithmétiques MoE : W4A4 (`MOE_DECODE_MMA=1`) puis **W4A16 partout** (nouveau régime GLM de poste7) ; sorties `scratchpad/sonde-main-16-09/`
+- **commit** : arbre travail/poste3 (`acvram/` = **main ce71723**), régime du duel, graphes actifs pour les ties, eager pour l'arbitre
+- **régime** : `-k48`, b=12 ; ties sur invites synthétiques (jetons pseudo-aléatoires : distributions plates, marges top-1/top-2 de 0 à 0,4 — un instrument qui bascule au moindre bruit)
+- **scellé** (poste7) : main touché → erratum du duel ; main sain → le défaut n'est que dans mla1-3
+- **mesuré** : **position 0 : boucle = défaut au bit** (les deux lisent le prefill) ; à jetons égaux, position 1 : |Δlogit| 0,1-0,9 (échelle 130) ; arbitre W4A4 : boucle top-1 76/84, |Δ| médian 2,14 ; défaut 76/84, 1,84 ; **arbitre W4A16 : boucle 83/84, |Δ| médian 1,06 (p90 3,4) ; défaut 81/84, 1,13 (p90 3,1)** ; cos médian 1,000000 partout ; 5/12 séquences sans aucune divergence sur 64 jetons en W4A16
+- **verdict** : **main sain par cet arbitre** — le défaut du duel est aussi proche du prefill que la boucle, l'écart boucle/défaut (≤ 0,9 à jetons égaux) est de l'ordre de l'écart décodage/prefill lui-même (≈ 1) ; les « top-1 53 % » de `verdict-mla-sonde` mesuraient des trajectoires greedy qui bifurquent sur des quasi-égalités d'invites synthétiques, pas une attention fausse. **Erratum** : la sonde de zérotage de 4a130e0 zérotait `DecoderBlock.statics` — **un seul slot par bloc, len 511, celui du warm-up** ; les 12 séquences vivent dans le magasin d'états, pas là : la conclusion « le chemin batché ne lit pas le cache » et l'hypothèse « ptrs capturés » sont **retirées**
+
+## 1. Ce qui reste ouvert, dans l'ordre
+1. **fp8 identique au bit à bf16** (PPL 3 tranches, ties) sur poste4 f4607c2 : toujours inexpliqué — le fp8 s'applique-t-il au magasin d'états ou seulement au slot statique du warm-up ? C'est la question à poser au code (`_nouveau_static` contre le magasin), poste4.
+2. **Boucle vs batché sur poste4** (top-1 53 %, `verdict-mla-sonde` § 2) : à refaire avec cet arbitre (W4A16, prefill juge), 5 min — les ties seuls ne jugent pas une équivalence de décodage sur des invites synthétiques ; la règle : **prompt réel ≥ 128 jetons, arbitre prefill, écart comparé à l'écart boucle/prefill**.
+3. Le +0,21 % de PPL boucle/batché (8,0175 / 8,0003) : du même ordre que l'écart décodage/prefill ; pas un défaut établi.
+4. Duel : le ×4,08 tient (régime W4A16 prefill / décodage MMA=1 mesuré ; le passage GLM à `MOE_DECODE_MMA=0` est un choix de qualité, pas une invalidation).
+
+## 2. Règle que je retiens (et propose pour REGLES §3)
+Une équivalence de chemin de décodage se juge **contre le prefill du même texte** (référence validée par PPL), à arithmétique MoE égale, sur un prompt réel ; ni contre un autre chemin de décodage, ni par des trajectoires greedy. Et une sonde qui zérote doit d'abord prouver qu'elle zérote ce que le chemin lit (un bras qui DOIT changer).

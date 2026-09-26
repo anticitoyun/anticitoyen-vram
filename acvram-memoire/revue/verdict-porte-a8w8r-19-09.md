@@ -1,0 +1,10 @@
+# Verdict — porte A8+W8r ensemble (repli torch exact de C1 : `ACVRAM_PREFILL_GROUPED=w4a8 ACVRAM_W4A8_GEMM=torch`, poste1-c1-w4a8 0512a00) : **TENU** — PPL Coder 3 tranches **ratio bf16 HF géo 1,0174 ≤ 1,020** (défaut Marlin 1,0155 : +0,0019) ; c'est la PPL attendue du noyau C1, mesurée avant qu'il existe ; chemin prouvé (`CHEMINS_MOE {'w4a8': 576}` par tranche)
+
+instrument : `scratchpad/porte-a8w8r-19-09/chaine.sh` + `ppl-acvram-17-09.py` (3 tranches `tranches-coder`, `PPL_MIN_CTX=1023 PPL_MAX_TOK=24576`, compteur `CHEMINS_MOE`), arbre C1 `0512a00` (worktree `poste2-c1`), instrument commit `8bb4aa1` ; prise `carte.sh` 20:05:14-20:09:27 (tranche 0 : 3 min 13 avec autotune, les suivantes 30 s) ; deux variables posées et nommées dans `[régime]` ; référence bf16 HF `p2-hors-moteur-18-09/ppl-hf-bf16-tr*.json` ; carte 0 vide
+scellé (poste7, avant) : ratio géo ≤ 1,020 → tenu ; prédiction poste7 1,0157 ± 0,001 ; poste2 1,016-1,018 ; NON MESURABLE si `w4a8` non compté
+mesuré : PPL **12,6568 / 11,4322 / 11,7598** → ratio **1,0157 / 1,0145 / 1,0219, géo 1,0174** ; `CHEMINS_MOE {'w4a8': 576}` = 48 couches × 12 fenêtres, aucun autre chemin ; défaut Marlin (P2-PPL) 1,0155 ; porte W8r seule (grouped_mm naturel) 1,0151 ; porte A8 seule (verdict-porte-a8) : voir sa ligne
+verdict : **TENU, 1,0174** — la requantification int8 par ligne des poids (F = 127/12, W8r) plus l'activation int8 par jeton (A8) coûtent **+0,0019** sur le défaut, dans ma fourchette, au-dessus de la prédiction de poste7 (1,0157 ± 0,001 : réfutée de 0,0007 — la tranche 2 porte l'écart, +0,0064 sur son défaut) ; le noyau C1 hérite de cette PPL : ce qu'il gagnera en temps se paie 0,2 % de PPL, connu avant la première ligne de CUDA
+suite : poste7 : PPL C1 = 1,0174 scellée comme attendue du noyau (le noyau devra la reproduire à ± 0,001 : équivalence au repli torch) ; poste1 : rien à changer, le repli torch est la référence ; chef : indexer ; ma file : ncu tampon C1 (ordre poste7, après le trou d'poste1) → statics → NARROW_GEMM → P2+éco
+
+## Rejouable
+`ACVRAM_TYPE=mesure outils/carte.sh bash scratchpad/porte-a8w8r-19-09/chaine.sh` (4 min 15 avec autotune) ; `ppl-w4a8-tr*.json`.

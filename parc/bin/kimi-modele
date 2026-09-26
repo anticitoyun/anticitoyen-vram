@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# kimi-modele — lanceur unifié kimi : UN menu, trois moteurs directs.
+#   llamacpp-*  → llama.cpp (GGUF)       http://127.0.0.1:8080/v1
+#   vllm-*      → vLLM (AWQ/FP8/BF16)    http://127.0.0.1:8000/v1
+#   tabby-*     → TabbyAPI (EXL2/EXL3)   http://127.0.0.1:5000/v1
+# Usage : kimi-modele [alias] [arguments kimi...]
+set -uo pipefail
+
+# parc.toml (acvram-parc) : chemins, ports, clés et moteurs du poste ; rien n'est codé ici
+PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
+_ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
+set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
+read -r PARC_BIN PARC_TOKENS_TABBY < <(python3 -c "import sys; sys.path.insert(0, '$(dirname "$PARC_LIB_PY")'); from acvram_parc import charger; P = charger(); print(P.bin, P.moteurs.get('tabby', {}).get('tokens') or '-')")
+export PARC_BIN PARC_TOKENS_TABBY
+CONFIG="$PARC_CONFIG"
+KIMI="${PARC_KIMI/#\~/$HOME}"
+CHEMINS="$PARC_GGUF_TSV"
+VCHEMINS="$PARC_VLLM_TSV"
+[ -r "$PARC_SECRETS" ] && . "$PARC_SECRETS"
+
+c_t=$'\e[1;36m'; c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_t=''; c_d=''; c_v=''; c_r=''; c_0=''; }
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+
+# --- alias des trois moteurs directs, 7 colonnes tabulées ---------------------
+lister_alias() {
+  python3 - "$CONFIG" <<'PY'
+import sys, tomllib, os
+NOTES = {}
+try:
+    for ligne in open(os.environ['PARC_NOTES_TSV']):
+        c = ligne.rstrip('\n').split('\t')
+        if len(c) == 5:
+            NOTES[c[0]] = (c[1], c[2], c[3], c[4])
+except OSError:
+    pass
+VISION = {}
+try:
+    for ligne in open(os.path.join(os.environ['PARC_TSV_DIR'], 'vision-modeles.tsv')):
+        c = ligne.rstrip('\n').split('\t')
+        if len(c) >= 2:
+            VISION[c[0]] = c[1]
+except OSError:
+    pass
+ORDRE = {'acvram': 0, 'vllm': 1, 'rapide': 2, 'llamacpp': 3, 'tabby': 4, 'yals': 5}
+d = tomllib.load(open(sys.argv[1], 'rb'))
+MOTEURS = set(os.environ.get('PARC_MOTEURS', '').split())   # moteurs présents dans parc.toml
+items = [(a, m) for a, m in d.get('models', {}).items()
+         if m.get('provider') in ORDRE and m.get('provider') in MOTEURS]   # 0 moteur = 0 alias
+# tous les moteurs servables, même ordre que la GUI (poste7-menus-cloture-19-09 S4) ;
+# tabby/yals restent listés : le lanceur dit son refus explicite s'il ne les prend pas
+ordre = ORDRE
+items.sort(key=lambda kv: (ordre[kv[1]['provider']], kv[0]))
+for alias, m in items:
+    # fiche absente ou champ vide/« ? » : jamais « ? » (poste7-menus-cloture-19-09 § 1)
+    defaut = ('inconnu', 'non mesuré', 'non mesuré', 'inconnu')
+    refus, tps, qual, usage = (v if v.strip() and v.strip() != '?' else defaut[i]
+                               for i, v in enumerate(NOTES.get(alias, defaut)))
+    v = VISION.get(alias)
+    if v == 'vision':
+        usage = '👁 ' + usage + ' · vision (images)'
+    elif v == 'texte-seul':
+        usage = usage + ' · VL converti, texte seul'
+    print('\t'.join([alias, m.get('model', '?'), str(m.get('max_context_size', '')),
+                     refus, tps, qual, usage]))
+PY
+}
+
+# point vert du menu : modèle servi par le gros moteur actif, sinon l'appoint
+modele_charge() {
+  local id=""
+  # seuls les moteurs présents dans parc.toml sont sondés
+  [ -n "${PARC_PORT_LLAMACPP:-}" ] && id=$(curl -s -m 1 -H "Authorization: Bearer ${CLE_LLAMACPP:-${PARC_CLE_LLAMACPP:-}}" \
+    "http://127.0.0.1:$PARC_PORT_LLAMACPP/v1/models" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)
+  [ -n "$id" ] && { basename "${id%.gguf}"; return; }
+  [ -n "${PARC_PORT_VLLM:-}" ] && id=$(curl -s -m 1 -H "Authorization: Bearer ${CLE_VLLM:-${PARC_CLE_VLLM:-}}" \
+    "http://127.0.0.1:$PARC_PORT_VLLM/v1/models" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)
+  [ -n "$id" ] && { echo "$id"; return; }
+  [ -n "${PARC_PORT_TABBY:-}" ] && id=$(curl -s -m 1 -H "Authorization: Bearer ${CLE_TABBY:-$(awk '/^api_key:/{print $2}' "$PARC_TOKENS_TABBY" 2>/dev/null)}" \
+    "http://127.0.0.1:$PARC_PORT_TABBY/v1/model" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+  [ -n "$id" ] && { echo "$id"; return; }
+  [ -n "${PARC_PORT_RAPIDE:-}" ] && id=$(curl -s -m 1 -H "Authorization: Bearer ${CLE_RAPIDE:-${PARC_CLE_RAPIDE:-}}" \
+    "http://127.0.0.1:$PARC_PORT_RAPIDE/v1/models" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)
+  [ -n "$id" ] && basename "${id%.gguf}"
+}
+
+. "$PARC_LIB"
+
+# --- programme principal ------------------------------------------------------
+choix=""
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+  choix="$1"; shift
+fi
+if [ -z "$choix" ]; then
+  choix=$(choisir_alias "Modèles locaux (vLLM · llama.cpp · TabbyAPI · appoint 3080 Ti)" "$(modele_charge)") || exit 1
+  # parc vide (rc 0, message déjà nommé par choisir_alias) : rien à lancer, sortie propre
+  [ -n "$choix" ] || exit 0
+fi
+
+# mode Auto dès le démarrage, sauf en mode prompt (-p) où kimi le refuse
+AUTO=(--auto)
+for arg in "$@"; do
+  case "$arg" in -p|--prompt|--output-format) AUTO=(); break;; esac
+done
+
+case "$choix" in
+  acvram-*)
+    # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte)
+    # kimi charge ~65536 jetons de contexte MCP ; le serveur doit adapter CTX en conséquence.
+    CTX_CLIENT_MIN=65536 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
+    exec "$KIMI" "${AUTO[@]}" -m "$choix" "$@"
+    ;;
+  tabby-*)
+    exec "$PARC_BIN/kimi-tabby" "$choix" "$@"
+    ;;
+  yals-*)
+    exec "$PARC_BIN/kimi-yals" "$choix" "$@"
+    ;;
+  rapide-*)
+    "$PARC_BIN/llamacpp-appoint" || exit 1
+    printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
+    exec "$KIMI" "${AUTO[@]}" -m "$choix" "$@"
+    ;;
+  vllm-*)
+    # chaque alias vLLM nomme SON dossier et SON contexte de service : sans cette
+    # table, le lanceur servait son modèle par défaut et kimi interrogeait ensuite
+    # un modèle absent du serveur (404 au premier message).
+    ligne=$(grep "^$choix	" "$VCHEMINS" 2>/dev/null | head -1)
+    [ -n "$ligne" ] || { err "Alias absent de $VCHEMINS : $choix"; exit 1; }
+    dossier=$(printf '%s' "$ligne" | cut -f2)
+    lmax=$(printf '%s' "$ligne" | cut -f3)
+    [ -r "$PARC_SECRETS" ] && . "$PARC_SECRETS"
+    servi=$(curl -s -m 3 -H "Authorization: Bearer ${CLE_VLLM:-${PARC_CLE_VLLM:-}}" \
+      "http://127.0.0.1:${PARC_PORT_VLLM:-8000}/v1/models" 2>/dev/null \
+      | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)
+    if [ -n "$servi" ] && [ "$servi" = "$(basename "$dossier")" ]; then
+      printf '%sModèle déjà servi par vLLM.%s\n' "$c_v" "$c_0"
+    else
+      "$PARC_BIN/vllm-serveur" "$dossier" "$lmax" || exit 1
+    fi
+    printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
+    exec "$KIMI" "${AUTO[@]}" -m "$choix" "$@"
+    ;;
+  llamacpp-*)
+    ligne=$(grep "^$choix	" "$CHEMINS" 2>/dev/null | head -1)
+    [ -n "$ligne" ] || { err "Alias absent de $CHEMINS : $choix"; exit 1; }
+    dossier=$(printf '%s' "$ligne" | cut -f2)
+    ctx=$(printf '%s' "$ligne" | cut -f3)
+    # 4e colonne facultative : gabarit de chat de remplacement, quand le gabarit
+    # embarqué dans le GGUF ne correspond pas à ce que le modèle sait produire
+    gab=$(printf '%s' "$ligne" | cut -f4)
+    case "$gab" in ~/*) gab="$HOME/${gab#\~/}" ;; esac
+    # le mmproj d'un modèle multimodal est un .gguf lui aussi : ne pas le servir
+    attendu=$(find "$dossier" -maxdepth 1 -name "*.gguf" -size +1M ! -iname "*mmproj*" ! -name "gabarit*" | sort | head -1)
+    [ -r "$PARC_SECRETS" ] && . "$PARC_SECRETS"
+    servi=$(curl -s -m 3 -H "Authorization: Bearer ${CLE_LLAMACPP:-${PARC_CLE_LLAMACPP:-}}" \
+      "http://127.0.0.1:${PARC_PORT_LLAMACPP:-8080}/v1/models" 2>/dev/null \
+      | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)
+    if [ -n "$servi" ] && [ "$(basename "${servi%.gguf}")" = "$(basename "${attendu%.gguf}")" ]; then
+      printf '%sModèle déjà servi par llama.cpp.%s\n' "$c_v" "$c_0"
+    else
+      GABARIT="$gab" "$PARC_BIN/llamacpp-serveur" "$dossier" "$ctx" || exit 1
+    fi
+    printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
+    exec "$KIMI" "${AUTO[@]}" -m "$choix" "$@"
+    ;;
+  *)
+    err "Alias hors moteurs directs : $choix (attendu : acvram-*, vllm-*, rapide-*, llamacpp-*, tabby-*, yals-*)"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,529 @@
+#!/usr/bin/python3
+"""parc-installer — installe ou met à jour le parc de modèles d'un utilisateur.
+
+Contrôles qui peuvent rendre faux (poste7-deb-parc-portable-20-09 § 3) :
+  1. matériel   nvidia-smi → GPU ; compute_cap < 12.0 : classe acvram RETIRÉE (NVFP4 = sm_120) ; aucun GPU : llama.cpp CPU seul
+  2. moteurs    présent (chemin, version) / absent ; port pris → port libre suivant, écrit dans parc.toml et [providers.*]
+  3. racines    findmnt + balayage ≤ profondeur (nice, ionice idle, 60 s par disque, reste compté) ; l'utilisateur confirme
+  4. génération alias <moteur>-<nom>-<format>, ctx depuis config.json ou l'en-tête GGUF, notes « non mesuré » / « inconnu »
+  5. idempotent fusion : ajoutés, ABSENT marqués, notes conservées ; deux passages = fichiers identiques
+  6. rc ≠ 0     un alias qui ne résout pas, un balayage tronqué en --auto, un moteur présent qui ne répond pas est dit « arrêté »
+
+Usage : parc-installer [--auto] [--racine DIR ...] [--sans-balayage] [--importer parc.tar] [--exporter parc.tar] [--verifier]
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+for _d in (Path("/usr/share/acvram-parc/lib"), Path(__file__).resolve().parent.parent / "lib"):
+    if (_d / "acvram_parc.py").exists() and str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
+from acvram_parc import CONFIG_DEFAUT, MOTEURS_CONNUS, ORDRE_MOTEUR, charger  # noqa: E402
+
+PARTAGE = Path("/usr/share/acvram-parc")
+FICHE_ABSENTE = ["inconnu", "non mesuré", "non mesuré", "inconnu"]
+TYPES_VL = {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe", "gemma3", "gemma4", "gemma4_unified",
+            "llava", "mllama", "pixtral", "idefics3", "smolvlm", "internvl_chat", "minicpmv", "paligemma"}
+BUDGET_DISQUE_S = 60.0
+DATE = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def dire(*a):
+    print(*a, flush=True)
+
+
+# ─── 1. matériel ────────────────────────────────────────────────────────────
+def gpus() -> list[dict]:
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,compute_cap", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for l in r.stdout.splitlines():
+        p = [x.strip() for x in l.split(",")]
+        if len(p) == 3:
+            try:
+                out.append({"nom": p[0], "vram_mo": int(float(p[1])), "cc": float(p[2])})
+            except ValueError:
+                pass
+    return out
+
+
+# ─── 2. moteurs ─────────────────────────────────────────────────────────────
+def _version(cmd: list[str]) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return (r.stdout or r.stderr).strip().splitlines()[0][:60] if (r.stdout or r.stderr).strip() else ""
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return ""
+
+
+PREFIXES_OUTILS = [os.path.expanduser(x) for x in os.environ.get("PARC_PREFIXES_OUTILS", "/opt:~").split(":") if x]
+
+
+def _premier(motifs: list[str]) -> str:
+    """Premier chemin existant parmi des motifs relatifs aux préfixes usuels (/opt, ~ ; PARC_PREFIXES_OUTILS pour les tests)."""
+    for pref in PREFIXES_OUTILS:
+        for m in motifs:
+            for c in sorted(Path(pref).glob(m)):
+                if c.exists():
+                    return str(c)
+    return ""
+
+
+def detecter_moteurs(ancien) -> dict[str, dict]:
+    """clé → {present, chemin, version, ...} ; les valeurs d'un parc.toml existant priment sur la détection."""
+    m: dict[str, dict] = {}
+    # acvram : le paquet Debian
+    r = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "acvram"], capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        m["acvram"] = {"present": True, "chemin": "/usr/bin/acvram", "version": r.stdout.strip()}
+    ll = shutil.which("llama-server") or _premier(["*/llama*/bin/llama-server", ".local/bin/llama-server"])
+    if ll:
+        m["llamacpp"] = {"present": True, "chemin": ll, "version": _version([ll, "--version"])}
+    vl = shutil.which("vllm") or _premier(["*/vllm*/bin/vllm", ".venv*/bin/vllm"])
+    if vl:
+        m["vllm"] = {"present": True, "chemin": vl, "version": _version([vl, "--version"])}
+    tb = _premier(["*/TabbyAPI/main.py", "*/tabbyAPI/main.py"])
+    if tb:
+        m["tabby"] = {"present": True, "chemin": tb, "tokens": str(Path(tb).parent / "api_tokens.yml")}
+    ya = shutil.which("yals") or _premier(["*/YALS/yals", "*/YALS/YALS"])
+    if ya:
+        m["yals"] = {"present": True, "chemin": ya}
+    ja = shutil.which("jan") or _premier([".local/share/Jan/*/jan", "Jan/jan", "Applications/Jan*.AppImage"])
+    if ja:
+        m["jan"] = {"present": True, "chemin": ja}
+    # valeurs déjà connues (parc.toml existant) : elles priment
+    for cle, anc in ancien.moteurs.items():
+        m.setdefault(cle, {"present": True})
+        for k, v in anc.items():
+            if v not in ("", None):
+                m[cle][k] = v
+    return m
+
+
+def port_libre(voulu: int, occupe_par_moi: bool) -> int:
+    def pris(p: int) -> bool:
+        with socket.socket() as s:
+            s.settimeout(0.2)
+            return s.connect_ex(("127.0.0.1", p)) == 0
+    if occupe_par_moi or not pris(voulu):
+        return voulu
+    p = voulu + 1
+    while pris(p) and p < voulu + 50:
+        p += 1
+    return p
+
+
+def repond(port: int, route: str, cle: str) -> str:
+    """'répond' | 'arrêté' — sonde HTTP légère sans dépendance."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{route}", headers={"Authorization": f"Bearer {cle}"})
+        urllib.request.urlopen(req, timeout=2)
+        return "répond"
+    except Exception:
+        with socket.socket() as s:
+            s.settimeout(0.5)
+            return "répond (autre API)" if s.connect_ex(("127.0.0.1", port)) == 0 else "arrêté"
+
+
+# ─── 3. racines et balayage ─────────────────────────────────────────────────
+def disques_montes() -> list[Path]:
+    try:
+        r = subprocess.run(["findmnt", "-rno", "TARGET,FSTYPE", "-t", "ext4,xfs,btrfs,ntfs,ntfs3,exfat"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    cibles = []
+    for l in r.stdout.splitlines():
+        t = l.split()[0]
+        if t.startswith(("/boot", "/snap", "/var/lib", "/proc", "/sys", "/dev", "/run")):
+            continue
+        cibles.append(Path(t))
+    return cibles
+
+
+def lire_ctx_gguf(chemin: Path) -> int | None:
+    """Lit <arch>.context_length dans l'en-tête GGUF (v2/v3), sans dépendance."""
+    T = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
+    try:
+        with open(chemin, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            version, = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return None
+            n_t, n_kv = struct.unpack("<QQ", f.read(16))
+
+            def lire(t):
+                if t == 8:
+                    n, = struct.unpack("<Q", f.read(8)); return f.read(n).decode("utf-8", "replace")
+                if t == 9:
+                    st, = struct.unpack("<I", f.read(4)); n, = struct.unpack("<Q", f.read(8))
+                    return [lire(st) for _ in range(n)]
+                fmt = T[t]; return struct.unpack("<" + fmt, f.read(struct.calcsize(fmt)))[0]
+            arch = None; ctx = None
+            for _ in range(n_kv):
+                k = lire(8); t, = struct.unpack("<I", f.read(4)); v = lire(t)
+                if k == "general.architecture":
+                    arch = v
+                if k.endswith(".context_length"):
+                    ctx = int(v)
+                if arch and ctx:
+                    return ctx
+            return ctx
+    except Exception:
+        return None
+
+
+def classer(d: Path) -> tuple[str, str, int | None] | None:
+    """(classe, format, ctx) pour un dossier ou fichier modèle, sinon None. Classes : llamacpp | acvram | vllm."""
+    if d.is_file() and d.suffix.lower() == ".gguf":
+        return ("llamacpp", "gguf", lire_ctx_gguf(d))
+    if not d.is_dir():
+        return None
+    noms = {p.name.lower() for p in d.iterdir()} if os.access(d, os.R_OK) else set()
+    ggufs = [p for p in d.iterdir() if p.suffix.lower() == ".gguf"] if noms else []
+    if ggufs and "config.json" not in noms:
+        return ("llamacpp", "gguf", lire_ctx_gguf(sorted(ggufs)[0]))
+    if "config.json" in noms and any(n.endswith(".safetensors") for n in noms):
+        try:
+            cfg = json.loads((d / "config.json").read_text())
+        except Exception:
+            cfg = {}
+        ctx = cfg.get("max_position_embeddings") or (cfg.get("text_config") or {}).get("max_position_embeddings")
+        if ("acvram_manifest.json" in noms or "acvram.json" in noms or any(n.startswith("manifeste") for n in noms)
+                or any(n.startswith("acvram-") and n.endswith(".safetensors") for n in noms)):
+            return ("acvram", "nvfp4", ctx)
+        q = cfg.get("quantization_config") or {}
+        meth = str(q.get("quant_method", "")).lower()
+        if meth in ("awq", "gptq", "fp8", "compressed-tensors", "compressed_tensors"):
+            return ("vllm", meth.replace("compressed-tensors", "ct").replace("compressed_tensors", "ct"), ctx)
+        return None
+    return None
+
+
+def balayer(racine: Path, profondeur: int, budget: float) -> tuple[list[tuple[Path, str, str, int | None]], int]:
+    """Modèles trouvés sous racine ; second élément = nombre de dossiers NON balayés (budget épuisé)."""
+    trouves = []
+    reste = 0
+    t0 = time.monotonic()
+    pile = [(racine, 0)]
+    while pile:
+        d, prof = pile.pop()
+        if time.monotonic() - t0 > budget:
+            reste += 1 + len(pile)
+            break
+        c = classer(d)
+        if c:
+            trouves.append((d, *c))
+            continue
+        if prof >= profondeur or not d.is_dir():
+            continue
+        try:
+            enfants = sorted(p for p in d.iterdir() if not p.name.startswith(".") and not p.is_symlink())
+        except OSError:
+            continue
+        for p in reversed(enfants):
+            if p.is_dir():
+                pile.append((p, prof + 1))
+            elif p.suffix.lower() == ".gguf" and prof < profondeur:
+                c = classer(p)
+                if c:
+                    trouves.append((p, *c))
+    return trouves, reste
+
+
+# ─── 4. génération ──────────────────────────────────────────────────────────
+def alias_de(classe: str, chemin: Path, fmt: str) -> str:
+    nom = chemin.stem if chemin.is_file() else chemin.name
+    nom = re.sub(r"[^A-Za-z0-9.]+", "-", nom).strip("-").lower()
+    nom = re.sub(r"-(nvfp4|gguf|awq|gptq|fp8|bf16|int8)$", "", nom)
+    return f"{classe}-{nom}-{fmt}"
+
+
+def lire_tsv(p: Path) -> dict[str, list[str]]:
+    d: dict[str, list[str]] = {}
+    if p.exists():
+        for l in p.read_text(encoding="utf-8").splitlines():
+            if l and not l.startswith("#"):
+                c = l.split("\t")
+                d[c[0]] = c[1:]
+    return d
+
+
+def ecrire_si_change(p: Path, texte: str) -> bool:
+    if p.exists() and p.read_text(encoding="utf-8") == texte:
+        return False
+    if p.exists():
+        shutil.copy2(p, p.with_name(p.name + f".avant-{DATE}"))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(texte, encoding="utf-8")
+    return True
+
+
+def fusionner_config_kimi(cfg: Path, moteurs: dict[str, dict], modeles: dict[str, tuple[str, str, int]], routeur: int | None) -> bool:
+    """Ajoute/remplace les blocs [models.<alias>] gérés et [providers.<moteur>] ; le reste du fichier est intact."""
+    texte = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
+    blocs: list[tuple[str, str]] = []  # (titre|'', contenu)
+    titre, cour = "", []
+    for l in texte.splitlines(keepends=True):
+        m = re.match(r"^\[([^\]]+)\]\s*$", l)
+        if m:
+            blocs.append((titre, "".join(cour))); titre, cour = m.group(1), [l]
+        else:
+            cour.append(l)
+    blocs.append((titre, "".join(cour)))
+    geres = {f"models.{a}" for a in modeles} | {f"providers.{k}" for k in moteurs}
+    anciens_geres = {t for t, _ in blocs if t.startswith("models.") and t.split(".", 1)[1].split("-")[0] in MOTEURS_CONNUS}
+    garde = [(t, c) for t, c in blocs if t not in geres and t not in anciens_geres]
+    sortie = "".join(c for _, c in garde).rstrip("\n") + "\n\n"
+    for k in sorted(moteurs, key=lambda x: ORDRE_MOTEUR.get(x, 99)):
+        m = moteurs[k]
+        base = f"http://127.0.0.1:{routeur}/{k}/v1" if routeur else f"http://127.0.0.1:{m['port']}/v1"
+        # api_key : conservée si le bloc existait
+        ancien = next((c for t, c in blocs if t == f"providers.{k}"), "")
+        mk = re.search(r'^api_key\s*=\s*"([^"]*)"', ancien, re.M)
+        cle = mk.group(1) if mk else m.get("cle_defaut", "")
+        sortie += f'[providers.{k}]\ntype = "openai"\nbase_url = "{base}"\napi_key = "{cle}"\n\n'
+    for a in sorted(modeles):
+        moteur, modele, ctx = modeles[a]
+        sortie += f'[models.{a}]\nprovider = "{moteur}"\nmodel = "{modele}"\nmax_context_size = {ctx}\n\n'
+    return ecrire_si_change(cfg, sortie.rstrip("\n") + "\n")
+
+
+# ─── installation ───────────────────────────────────────────────────────────
+def ecrire_parc_toml(p: Path, chemins: dict, racines: list[Path], profondeur: int, moteurs: dict, outils: dict, extras: dict) -> bool:
+    def q(v): return json.dumps(str(v), ensure_ascii=False)
+    s = ["# parc.toml — écrit par parc-installer ; modifiable à la main (relancer parc-installer fusionne).", "[chemins]"]
+    for k, v in chemins.items():
+        s.append(f"{k} = " + (("[" + ", ".join(q(x) for x in v) + "]") if isinstance(v, list) else q(v)))
+    s += ["", "[racines]", "modeles = [" + ", ".join(q(r) for r in racines) + "]", f"profondeur = {profondeur}", "", "[outils]"]
+    for k in ("kimi", "claude", "hf"):
+        s.append(f"{k} = {q(outils.get(k, ''))}")
+    for k in sorted(moteurs, key=lambda x: ORDRE_MOTEUR.get(x, 99)):
+        m = moteurs[k]
+        s += ["", f"[moteurs.{k}]", "present = true", f"port = {int(m['port'])}"]
+        for kk in ("nom", "cle_defaut", "chemin", "version", "journal", "tokens"):
+            if m.get(kk):
+                s.append(f"{kk} = {q(m[kk])}")
+    s += ["", "[extras]"] + [f"{k} = " + (q(v) if isinstance(v, str) else str(v)) for k, v in extras.items()]
+    return ecrire_si_change(p, "\n".join(s) + "\n")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--auto", action="store_true", help="sans question ; refuse (rc 3) si le balayage est tronqué")
+    ap.add_argument("--config", type=Path, default=Path(os.environ.get("ACVRAM_PARC_CONFIG", CONFIG_DEFAUT)))
+    ap.add_argument("--racine", action="append", type=Path, default=[], help="racine de modèles (répétable) ; sinon détection")
+    ap.add_argument("--sans-balayage", action="store_true", help="ne pas parcourir les disques : racines de parc.toml/--racine seulement")
+    ap.add_argument("--importer", type=Path, help="parc.tar d'une autre machine (notes gardées, colonne « mesuré sur »)")
+    ap.add_argument("--exporter", type=Path, help="écrit parc.tar (TSV + notes) pour une autre machine")
+    ap.add_argument("--verifier", action="store_true", help="vérification seule, rien n'est écrit")
+    ap.add_argument("--decoder", action="store_true", help="un jeton par alias acvram sous carte.sh (carte requise)")
+    ap.add_argument("--sans-minuteur", action="store_true")
+    a = ap.parse_args()
+    try:
+        os.nice(19)
+    except OSError:
+        pass
+    subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], capture_output=True)
+    hote = socket.gethostname()
+    P = charger(a.config)
+    rc = 0
+
+    # 1. matériel
+    g = gpus()
+    sm120 = any(x["cc"] >= 12.0 for x in g)
+    if g:
+        for x in g:
+            dire(f"GPU : {x['nom']} {x['vram_mo']} Mo compute_cap {x['cc']}")
+    else:
+        dire("GPU : aucun (nvidia-smi absent) → llama.cpp CPU seulement")
+
+    # 2. moteurs
+    moteurs = detecter_moteurs(P)
+    if "acvram" in moteurs and not sm120:
+        dire("acvram : présent mais aucune carte sm_120 (NVFP4 = sm_120) → classe acvram RETIRÉE des menus")
+        del moteurs["acvram"]
+    for k, m in moteurs.items():
+        nom, port, route, var_cle, cle_def = MOTEURS_CONNUS[k]
+        m.setdefault("nom", nom); m.setdefault("route", route); m.setdefault("cle_defaut", cle_def)
+        voulu = int(m.get("port", port))
+        etat = repond(voulu, route, m["cle_defaut"])
+        m["port"] = port_libre(voulu, occupe_par_moi=(etat.startswith("répond")))
+        if m["port"] != voulu:
+            dire(f"{k} : port {voulu} pris par autre chose → {m['port']}")
+        dire(f"moteur {k:9s} présent : {m.get('chemin', '')} {m.get('version', '')} — port {m['port']} {etat if m['port'] == voulu else 'arrêté'}")
+    for k in MOTEURS_CONNUS:
+        if k not in moteurs:
+            dire(f"moteur {k:9s} absent")
+    outils = dict(P.outils)
+    for o, motifs in (("kimi", [".kimi-code/bin/kimi"]), ("claude", []), ("hf", [])):
+        if not outils.get(o):
+            outils[o] = shutil.which(o) or _premier(motifs) or ""
+
+    # 3. racines
+    racines = list(dict.fromkeys([*a.racine, *P.racines]))
+    tronque_total = 0
+    if not a.sans_balayage:
+        for disque in disques_montes():
+            if any(str(r).startswith(str(disque)) for r in racines):
+                continue
+            trouves, reste = balayer(disque, min(P.profondeur, 3), BUDGET_DISQUE_S)
+            if trouves:
+                parents = sorted({t[0].parent for t in trouves}, key=lambda p: len(str(p)))
+                for pr in parents:
+                    if not any(str(pr).startswith(str(r) + "/") or pr == r for r in racines):
+                        racines.append(pr)
+            if reste:
+                tronque_total += reste
+                dire(f"balayage {disque} : budget {BUDGET_DISQUE_S:.0f} s épuisé, {reste} dossier(s) NON balayé(s)")
+    modeles: dict[str, tuple[str, str, int]] = {}
+    chemins_alias: dict[str, Path] = {}
+    par_classe: dict[str, int] = {}
+    for r in racines:
+        if not r.exists():
+            dire(f"racine {r} : ABSENTE (disque non monté ?)")
+            continue
+        trouves, reste = balayer(r, P.profondeur, BUDGET_DISQUE_S)
+        tronque_total += reste
+        for chemin, classe, fmt, ctx in trouves:
+            if classe not in moteurs:
+                continue
+            al = alias_de(classe, chemin, fmt)
+            modeles[al] = (classe, chemin.name if chemin.is_dir() else chemin.stem, int(ctx or 32768))
+            chemins_alias[al] = chemin
+            par_classe[classe] = par_classe.get(classe, 0) + 1
+    dire(f"racines : {len(racines)} — " + ", ".join(str(r) for r in racines))
+    dire("modèles : " + (", ".join(f"{k} {v}" for k, v in sorted(par_classe.items())) or "aucun"))
+    if tronque_total and a.auto:
+        dire(f"REFUS --auto : {tronque_total} dossier(s) non balayé(s) ; ajoute la racine à la main (--racine) ou relance sans --auto")
+        return 3
+    if not a.auto and sys.stdin.isatty() and not a.verifier:
+        rep = input("Confirmer ces racines et ce parc ? [O/n] ").strip().lower()
+        if rep and rep not in ("o", "oui", "y"):
+            dire("abandon"); return 4
+
+    # 4. génération (TSV, notes, vision, config.toml)
+    tsv_dir = P.tsv_dir
+    if a.importer:
+        with tarfile.open(a.importer) as t:
+            for mbr in t.getmembers():
+                if mbr.name.endswith(".tsv") and Path(mbr.name).name in ("notes-modeles.tsv",):
+                    f = t.extractfile(mbr)
+                    if f:
+                        for l in f.read().decode("utf-8").splitlines():
+                            if l and not l.startswith("#"):
+                                c = l.split("\t")
+                                (tsv_dir / "notes-modeles.tsv").parent.mkdir(parents=True, exist_ok=True)
+                                notes_imp = lire_tsv(tsv_dir / "notes-modeles.tsv")
+                                if c[0] not in notes_imp:
+                                    with open(tsv_dir / "notes-modeles.tsv", "a", encoding="utf-8") as g_:
+                                        g_.write("\t".join(c + [f"mesuré sur {a.importer.stem}"]) + "\n")
+    changes = []
+    if not a.verifier:
+        for classe, nom_tsv in (("llamacpp", "gguf"), ("vllm", "vllm"), ("acvram", "acvram")):
+            anciens = lire_tsv(P.tsv(nom_tsv))
+            lignes = {al: [str(chemins_alias[al]), str(modeles[al][2])] for al in modeles if modeles[al][0] == classe or (classe == "llamacpp" and modeles[al][0] == "rapide")}
+            for al, c in anciens.items():
+                if al not in lignes:
+                    lignes[al] = c[:2] if Path(c[0]).exists() else [c[0], c[1] if len(c) > 1 else "32768", "ABSENT"]
+                    if len(lignes[al]) == 3:
+                        dire(f"{al} : ABSENT ({c[0]}) — conservé, à retirer à la main")
+            texte = "".join(f"{al}\t" + "\t".join(lignes[al]) + "\n" for al in sorted(lignes))
+            if ecrire_si_change(P.tsv(nom_tsv), texte):
+                changes.append(P.tsv(nom_tsv).name)
+        notes = lire_tsv(P.tsv("notes"))
+        entete = [l for l in P.tsv("notes").read_text(encoding="utf-8").splitlines() if l.startswith("#")] if P.tsv("notes").exists() else []
+        for al in modeles:
+            notes.setdefault(al, list(FICHE_ABSENTE))
+        texte = "".join(l + "\n" for l in entete) + "".join(f"{al}\t" + "\t".join(notes[al]) + "\n" for al in sorted(notes))
+        if ecrire_si_change(P.tsv("notes"), texte):
+            changes.append("notes-modeles.tsv")
+        vision = lire_tsv(P.tsv("vision"))
+        for al, ch in chemins_alias.items():
+            cj = ch / "config.json" if ch.is_dir() else None
+            if cj and cj.exists():
+                try:
+                    cfg = json.loads(cj.read_text()); mt = str(cfg.get("model_type", ""))
+                    vision[al] = ["vision" if (mt in TYPES_VL and "vision_config" in cfg) else "texte-seul", f"config.json:{mt}"]
+                except Exception:
+                    pass
+        texte = "".join(f"{al}\t" + "\t".join(vision[al]) + "\n" for al in sorted(vision))
+        if ecrire_si_change(P.tsv("vision"), texte):
+            changes.append("vision-modeles.tsv")
+        routeur = P.extras.get("routeur_port")
+        if fusionner_config_kimi(P.config_kimi, moteurs, modeles, int(routeur) if routeur else None):
+            changes.append("config.toml")
+        # secrets : clés aléatoires si absentes
+        if not P.secrets.exists():
+            import secrets as sec
+            P.secrets.parent.mkdir(parents=True, exist_ok=True)
+            P.secrets.write_text("".join(f"{MOTEURS_CONNUS[k][3]}={sec.token_hex(8)}\n" for k in moteurs), encoding="utf-8")
+            os.chmod(P.secrets, 0o600); changes.append(P.secrets.name)
+        chemins = {"kimi_dir": str(P.kimi_dir).replace(str(Path.home()), "~"), "tsv_dir": str(P.tsv_dir).replace(str(Path.home()), "~"),
+                   "secrets": str(P.secrets).replace(str(Path.home()), "~"), "bin": str(P.bin).replace(str(Path.home()), "~"),
+                   "mcp_claude": str(P.mcp_claude).replace(str(Path.home()), "~"), "icone_claude": str(P.icone_claude).replace(str(Path.home()), "~"),
+                   "dossiers_lancement": [str(d).replace(str(Path.home()), "~") for d in P.dossiers_lancement],
+                   # Fallback D1 peut retourner un chemin d'arbre (/home/…) quand le paquet n'est pas
+                   # installé. On normalise vers le chemin canonique du paquet pour que le toml reste
+                   # portable ; le fallback D1 s'activera de nouveau si le paquet est absent.
+                   "lib": str(P.lib) if str(P.lib).startswith("/usr/") else "/usr/share/acvram-parc/kimi-menu.lib.sh"}
+        if ecrire_parc_toml(a.config, chemins, racines, P.profondeur, moteurs, outils, P.extras):
+            changes.append(a.config.name)
+        # minuteur modeles-a-jour
+        if not a.sans_minuteur and shutil.which("systemctl"):
+            src = PARTAGE / "systemd-user"
+            dst = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "systemd/user"
+            if src.exists():
+                dst.mkdir(parents=True, exist_ok=True)
+                for u in ("modeles-a-jour.service", "modeles-a-jour.timer"):
+                    if (src / u).exists() and (not (dst / u).exists() or (dst / u).read_bytes() != (src / u).read_bytes()):
+                        shutil.copy2(src / u, dst / u); changes.append(u)
+                r = subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+                r = subprocess.run(["systemctl", "--user", "enable", "--now", "modeles-a-jour.timer"], capture_output=True, text=True)
+                dire("minuteur modeles-a-jour : " + ("activé" if r.returncode == 0 else f"non activé ({(r.stderr or '').strip()[:80]})"))
+        if a.exporter:
+            with tarfile.open(a.exporter, "w") as t:
+                for n in ("gguf", "vllm", "acvram", "notes", "vision"):
+                    if P.tsv(n).exists():
+                        t.add(P.tsv(n), arcname=P.tsv(n).name)
+            dire(f"exporté : {a.exporter}")
+        dire("écrit : " + (", ".join(changes) if changes else "rien (déjà à jour)"))
+
+    # 6. vérification
+    faux = 0
+    for n, cl in (("gguf", "llamacpp"), ("vllm", "vllm"), ("acvram", "acvram")):
+        for al, c in lire_tsv(P.tsv(n)).items():
+            if not Path(c[0]).exists():
+                faux += 1; dire(f"FAUX : {al} → {c[0]} n'existe pas")
+    for k, m in moteurs.items():
+        dire(f"vérif {k:9s} : {repond(int(m['port']), m['route'], m['cle_defaut'])} sur {m['port']}")
+    if a.decoder:
+        dire("--decoder : à jouer sous outils/carte.sh (carte requise), non fait ici")
+    total = sum(len(lire_tsv(P.tsv(n))) for n in ("gguf", "vllm", "acvram"))
+    dire(f"alias : {total} ; faux : {faux} ; hôte : {hote}")
+    if faux:
+        rc = 2
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
