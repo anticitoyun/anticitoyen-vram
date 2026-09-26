@@ -51,6 +51,12 @@ TACHE_GSM8K="gsm8k"
 LIMITE_GSM8K=${LIMITE_GSM8K:-50}
 
 D="${SORTIE}.echantillons"
+# vide AVANT chaque prise : `lm_eval --output_path` AJOUTE un `results_*.json` horodaté sans
+# jamais retirer les anciens — un `find | head -1` sur un dossier réutilisé (mêmes `--tasks`
+# renommées entre deux essais, ex. 261b) reprenait un résultat PÉRIMÉ d'un essai précédent,
+# silencieusement (aucune erreur, juste le mauvais fichier) : bogue trouvé en écrivant cette
+# note, jamais publié.
+rm -rf "$D"
 mkdir -p "$D"
 
 echo "=== MMLU generative (gabarit de conversation, limite $LIMITE_MMLU/tâche, graine $GRAINE)"
