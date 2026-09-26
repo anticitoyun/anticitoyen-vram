@@ -1,13 +1,48 @@
-<p align="center"><img src="logo-acvram.png" alt="acvram" width="420"></p>
+<p align="center">
+  <img src="../docs/logo-acvram.png" alt="acvram" width="200">
+</p>
 
 # anticitoyen VRAM/RAM (`acvram`)
 
-🌐 [Français](../README.md) · [العربية](README.ar.md) · [বাংলা](README.bn.md) · [Català](README.ca.md) · [Čeština](README.cs.md) · [Dansk](README.da.md) · [Deutsch](README.de.md) · [Ελληνικά](README.el.md) · [English](README.en.md) · [Esperanto](README.eo.md) · [Español](README.es.md) · [فارسی](README.fa.md) · [Suomi](README.fi.md) · [עברית](README.he.md) · [हिन्दी](README.hi.md) · [Magyar](README.hu.md) · [Bahasa Indonesia](README.id.md) · [Italiano](README.it.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Norsk bokmål](README.nb.md) · [Nederlands](README.nl.md) · [Polski](README.pl.md) · [Português](README.pt.md) · [Română](README.ro.md) · [Русский](README.ru.md) · [Svenska](README.sv.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [Tiếng Việt](README.vi.md) · [中文](README.zh.md)
+<p align="center">
+  <a href="https://github.com/anticitoyun/anticitoyen-vram/releases/latest"><img src="https://img.shields.io/github/v/release/anticitoyun/anticitoyen-vram" alt="Release"></a>
+  <a href="https://github.com/anticitoyun/anticitoyen-vram/actions/workflows/tests.yml"><img src="https://github.com/anticitoyun/anticitoyen-vram/actions/workflows/tests.yml/badge.svg" alt="CI"></a>
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg" alt="Licence GPL-3.0-or-later"></a>
+  <a href="https://buymeacoffee.com/anticitoyen"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-soutenir-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
 
-> Destek: [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)
+Belleği bir hiyerarşi olarak ele alan, her GPU'ya kendi donanımının en iyi okuduğu sayısal biçimi veren ve her token'i saniye kadar joule cinsinden de optimize eden, OpenAI API ile uyumlu bir çıkarım ağ geçidi.
 
-OpenAI API'si ile uyumlu, belleği bir hiyerarşi olarak ele alan ve her GPU'ya
-silikonunun en iyi okuduğu sayısal biçimi veren bir çıkarım geçidi.
+<div align="center">
+
+[🇫🇷 Français](../README.md) · [🇬🇧 English](README.en.md) · [🇸🇦 العربية](README.ar.md) · [🇧🇩 বাংলা](README.bn.md) · [🇪🇸 Català](README.ca.md) · [🇨🇿 Čeština](README.cs.md) · [🇩🇰 Dansk](README.da.md) · [🇩🇪 Deutsch](README.de.md) · [🇬🇷 Ελληνικά](README.el.md) · [🌐 Esperanto](README.eo.md) · [🇪🇸 Español](README.es.md) · [🇮🇷 فارسی](README.fa.md) · [🇫🇮 Suomi](README.fi.md) · [🇮🇱 עברית](README.he.md) · [🇮🇳 हिन्दी](README.hi.md) · [🇭🇺 Magyar](README.hu.md) · [🇮🇩 Bahasa Indonesia](README.id.md) · [🇮🇹 Italiano](README.it.md) · [🇯🇵 日本語](README.ja.md) · [🇰🇷 한국어](README.ko.md) · [🇳🇴 Norsk bokmål](README.nb.md) · [🇳🇱 Nederlands](README.nl.md) · [🇵🇱 Polski](README.pl.md) · [🇵🇹 Português](README.pt.md) · [🇷🇴 Română](README.ro.md) · [🇷🇺 Русский](README.ru.md) · [🇸🇪 Svenska](README.sv.md) · [🇹🇭 ไทย](README.th.md) · **🇹🇷 Türkçe** · [🇺🇦 Українська](README.uk.md) · [🇻🇳 Tiếng Việt](README.vi.md) · [🇨🇳 中文](README.zh.md)
+
+</div>
+
+<p align="center"><img src="captures/resultats-22-09.png" alt="vLLM ve llama.cpp'ye karşı verim ve enerji karşılaştırması" width="720"></p>
+
+---
+
+## İçindekiler
+
+- [İki fikir](#idees)
+- [Hızlı başlangıç](#demarrage)
+- [`acvram plan` ne söylüyor](#plan)
+- [Hızlanmak](#optimisations)
+- [HTTP uç noktaları](#http)
+- [Sayılar nereden geliyor](#chiffres)
+- [Belgeler](#documentation)
+- [Ölçülen sonuçlar](#resultats)
+- [Durum](#etat)
+- [Katkılar](#credits)
+- [Lisans](#licence)
+- [Projeyi destekleyin](#soutien)
+
+---
+
+<a id="idees"></a>
+
+## İki fikir
 
 Belirli bir makine için tasarlandı:
 
@@ -15,32 +50,24 @@ Belirli bir makine için tasarlandı:
 |---|---|
 | İşlemci | Intel Core i9-14900K (8 P çekirdek + 16 E çekirdek) |
 | Anakart | ASUS ROG Maximus Z790 Dark Hero |
-| Bellek | 96 GB DDR5 |
-| GPU 0 | ASUS RTX 5090 Astral LC OC, 32 GB — Blackwell, `sm_120` |
-| GPU 1 | ASUS RTX 3080 Ti, 12 GB — Ampere, `sm_86` |
-| Sistem | Ubuntu 26.04 LTS (CUDA 13); iki kart da PCIe x8/x8'de, 400 W / 275 W ile sınırlı |
+| Bellek | 96 Go DDR5 |
+| GPU 0 | ASUS RTX 5090 Astral LC OC, 32 Go — Blackwell, `sm_120` |
+| GPU 1 | ASUS RTX 3080 Ti, 12 Go — Ampere, `sm_86` |
+| Sistem | Ubuntu 26.04 LTS (CUDA 13); iki kart PCIe x8/x8'de, 400 W / 275 W ile sınırlı |
 
-## İki fikir
-
-**GPU başına bir biçim.** RTX 5090'da FP4 tensör çekirdekleri var; RTX 3080
-Ti'de yok, FP8 de yok. İkisini ortak bir biçime hizalamak 5090'ı boşa
-harcardı. Dönüştürücü bu yüzden *aynı modeli iki kez* yazar, her hedefin
-gerçekten kullanabildiği biçimde:
+**GPU başına bir biçim.** RTX 5090'ın FP4 tensor çekirdekleri var; RTX 3080 Ti'nin ne bunlar ne de FP8 var. İkisini ortak bir biçime hizalamak 5090'ı israf ederdi. Bu yüzden dönüştürücü *aynı modeli iki kez* yazar, her hedefin gerçekten kullanabileceği biçimde:
 
 | | RTX 5090 | RTX 3080 Ti |
 |---|---|---|
-| ağırlıklar | **NVFP4** — E2M1 + her 16'da FP8 E4M3 ölçek | **INT4** — uint4 + her 128'de fp16 ölçek ve sıfır |
+| ağırlıklar | **NVFP4** — her 16'da bir E2M1 + FP8 E4M3 ölçeği | **INT4** — her 128'de bir uint4 + fp16 ölçek ve sıfır |
 | ağırlık başına bit | 4,50 | 4,16 |
-| BF16'ya göre | ×3,56 daha küçük | ×3,85 daha küçük |
-| hesaplama modu | FP4 tensör çekirdekleri | çekirdekte FP16'ya dekuantize, FP16 tensör çekirdekleri |
+| BF16'ya karşı | ×3,56 daha küçük | ×3,85 daha küçük |
+| hesaplama modu | FP4 tensor çekirdekleri | çekirdek içinde FP16'ya dekuantize, FP16 tensor çekirdekleri |
 | KV önbelleği | INT8 | INT8 |
 
-Ağırlık başına 4,5 bit ile 32 GB VRAM yaklaşık **56 milyar parametre**
-barındırır; BF16'da bu 16 milyardır. İki kartta bu, RAM'e dokunmadan önce
-yaklaşık **78 milyar yerleşik parametre** eder.
+Ağırlık başına 4,5 bit'te 32 Go VRAM, BF16'daki 16 milyara karşılık yaklaşık **56 milyar parametre** barındırır. İki kart birlikte, ana belleğe hiç dokunmadan yaklaşık **78 milyar yerleşik parametre** verir.
 
-**Bellek bir hiyerarşidir, duvar değil.** Üç kat; planlayıcı modelin sığmasını
-ummak yerine her katın neye mal olduğunu ölçer:
+**Bellek bir duvar değil, bir hiyerarşidir.** Üç katman, ve zamanlayıcı modelin sığacağını ummak yerine her birinin maliyetini ölçer:
 
 ```
 RTX 5090     32 Go   ~1790 Go/s     NVFP4
@@ -48,38 +75,44 @@ RTX 3080 Ti  12 Go    ~912 Go/s     INT4
 DDR5 hôte    96 Go   limité par le PCIe ou la DDR
 ```
 
+---
+
+<a id="demarrage"></a>
+
 ## Hızlı başlangıç
 
 ```bash
-./install.sh                       # environnement virtuel + torch cu128 + acvram
-acvram doctor                      # cette machine est-elle prête, et pour quoi
-acvram detect                      # qu'y a-t-il réellement ici
+./install.sh                       # sanal ortam + torch cu128 + acvram
+acvram doctor                      # bu makine hazır mı, ve ne için
+acvram detect                      # burada gerçekte ne var
 
-acvram plan  ~/modeles/Qwen3-32B                    # où irait chaque couche
+acvram plan  ~/modeles/Qwen3-32B                    # her katman nereye gidecek
 acvram convert ~/modeles/Qwen3-32B -o ~/acv/qwen3-32b
 acvram serve ~/acv/qwen3-32b --port 8000
 ```
 
-Ardından herhangi bir OpenAI istemcisi bağlanır:
+Herhangi bir OpenAI istemcisi ardından bağlanır:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3-32b","messages":[{"role":"user","content":"Bonjour"}],"stream":true}'
+  -d '{"model":"qwen3-32b","messages":[{"role":"user","content":"Merhaba"}],"stream":true}'
 ```
 
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
-                               messages=[{"role": "user", "content": "Bonjour"}])
+                               messages=[{"role": "user", "content": "Merhaba"}])
 ```
 
-## `acvram plan` ne söyler
+---
 
-Planlayıcı, herhangi bir indirmeden önce çalıştırılmayı hak eder. Bir
-modelin bu makinede kullanılabilir olup olmadığını belirleyen sorulara yanıt
-verir:
+<a id="plan"></a>
+
+## `acvram plan` ne söylüyor
+
+Zamanlayıcının her indirmeden önce çalıştırılması gerekir. Bir modelin bu makinede kullanılabilir olup olmadığına karar veren soruları yanıtlar:
 
 ```
 $ acvram plan ~/modeles/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
@@ -98,41 +131,31 @@ $ acvram plan ~/modeles/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
   prefill estime     847 jetons/s
 ```
 
-Sığan ilk yapılandırmayı tutmak yerine yapılandırma uzayını tarar ve iki
-kararı, dile getirilmeyi hak edecek kadar sezgiye aykırıdır:
+İlk uyanı tutmak yerine yapılandırma uzayını araştırır, ve kararlarından ikisi açıklanmayı hak edecek kadar sezgiye aykırıdır:
 
-* **Bir model tek başına 5090'a sığdığında 3080 Ti'yi kullanmaz.** Bir boru
-  hattının dilimleri seri çalışır: 1790 GB/s'lik bir hatta 912 GB/s'lik bir
-  aşama eklemek tek akışlı çözümlemeyi yavaşlatır. `--gpus all` ile
-  zorlanabilir.
-* **Ağırlıkları VRAM'de tutmak için KV önbelleğini küçültür.** Önbelleğe
-  verilen her gigabayt, PCIe veri yoluna itilen bir gigabayt ağırlıktır ve
-  PCIe üzerinden bir ağırlık okumak VRAM'den okumanın yaklaşık otuz katına mal
-  olur. Yukarıdaki 70B'de tek başına bu denge 2,3'ten 17,8 jeton/s'ye götürür.
+* **Bir model yalnızca 5090'a sığdığında 3080 Ti'yi kullanılmadan bırakır.** Bir hattın aşamaları sıralı çalışır: 1790 Go/s'lik bir hatta 912 Go/s'lik bir aşama eklemek tekli-akış çözümlemesini yavaşlatır. `--gpus all` ile zorlanır.
+* **Ağırlıkları VRAM'de tutmak için KV önbelleğini küçültür.** Önbelleğe verilen her gibibyte, PCIe veri yoluna itilmiş bir gibibyte ağırlıktır, ve bir ağırlığı PCIe üzerinden okumak VRAM'den okumanın yaklaşık otuz katı maliyetlidir. Yukarıdaki 70B'de, tek başına bu tercih hızı 2,3'ten 17,8 token/s'ye çıkarır.
 
-## Hızlı gitmek
+---
 
-Dört eniyileme; her biri yalnızca kronometreyle değil, bir denklik kanıtıyla
-doğrulanmıştır: yanıtı değiştiren bir eniyileme bir hatadır.
+<a id="optimisations"></a>
 
-### Spekülatif çözümleme (`--speculative`)
+## Hızlanmak
 
-1 boyutlu yığınla bir jeton çözümlemek bellekle sınırlıdır: makine tek bir
-jeton üretmek için tüm etkin ağırlıkları okur. Önerilen K jetonu doğrulamak
-aynı ağırlıkları **yalnızca bir kez** okur. İki öneren:
+Her biri yalnızca bir kronometreyle değil, bir eşdeğerlik kanıtıyla doğrulanmış dört optimizasyon: yanıtı değiştiren bir optimizasyon bir hatadır.
 
-* `ngram` (varsayılan) — geçerli soneki bağlamda daha önce arar ve ardından
-  geleni önerir. Hiçbir şeye mal olmaz, model gerektirmez. Çıktı girdiyi
-  kopyaladığında kârlıdır: kod düzenleme, RAG, özetleme.
-* `draft` — ikinci bir aygıtta küçük bir model. Bu donanımda o aygıt,
-  planlayıcının 5090'a sığan her model için bilerek boşta bıraktığı
-  RTX 3080 Ti'dir.
+Yoğun modellerin NVFP4 doğrusalları varsayılan olarak Marlin düzeninden geçer (b = 8'de +%57 ila +%90 verim, TTFT +2 ila +4 ms, revue/poste6-piece147-verdict-24-09.md'ye göre; geri dönüş `ACVRAM_PROJ_MARLIN=0`, bkz. [CHANGELOG.md](../CHANGELOG.md)).
 
-Kabul kesindir, yaklaşık değil: bir öneri `min(1, p/q)` olasılığıyla kabul
-edilir ve bir ret, `p - q`'nun normalleştirilmiş pozitif kısmından yeniden
-örnekler. Bilerek kötü kalibre edilmiş bir taslağa karşı 40 000 çekilişte
-ölçüldüğünde, yayılan dağılım hedeften 0,002 toplam varyasyon içinde kalır —
-spekülasyon hız satın alır, asla farklı bir yanıt değil.
+### Spekülatif kod çözme (`--speculative`)
+
+1 boyutlu bir toplu işle tek bir token'i kod çözmek bellek sınırlıdır: makine tek bir token üretmek için tüm etkin ağırlıkları okur. Önerilen K token'i doğrulamak aynı ağırlıkları **yalnızca bir kez** okur. İki öneri sağlayıcı:
+
+* `ngram` (varsayılan) — geçerli soneki bağlamda daha önce arar ve onu takip edeni önerir. Hiçbir maliyeti yoktur, hiçbir model gerektirmez. Çıktı girdiyi kopyaladığında karlıdır: kod düzenleme, RAG, özetleme.
+* `draft` — ikinci bir cihazda küçük bir model. Bu düzende, bu cihaz, zamanlayıcının 5090'a sığan her model için bilerek boşta bıraktığı RTX 3080 Ti'dir.
+
+`mtp` (modelin `nextn` başlığı) ve `auto` de mevcuttur; şu haliyle karlı değildir ve varsayılan olarak etkin değildir — bkz. `docs/ARCHITECTURE.md`.
+
+Kabul yaklaşık değil, kesindir: bir öneri `min(1, p/q)` olasılığıyla kabul edilir ve bir ret, `p - q`'nun normalize edilmiş pozitif kısmından yeniden örnekleme yapar. Kasıtlı olarak kötü kalibre edilmiş bir taslağa karşı 40.000 çekimde ölçüldüğünde, yayılan dağılım hedefe göre 0,002 toplam varyasyonda kalır — spekülasyon hız satın alır, asla farklı bir yanıt değil.
 
 ```
 modele jouet, glouton, k=4    etapes   jetons/etape   sortie
@@ -143,51 +166,27 @@ modele jouet, glouton, k=4    etapes   jetons/etape   sortie
 
 ### Önek önbelleği (varsayılan olarak etkin)
 
-Bloklar, jeton dilimlerinin *zincirlenmiş* özetiyle adreslenir: bir sistem
-komutunu paylaşan iki istek onun bloklarını paylaşır ve ikincisinin bunları
-yeniden hesaplaması gerekmez. Zincirleme vazgeçilmezdir: farklı bir bağlamdaki
-aynı on altı jeton aynı anahtar ve değerleri içermez ve yalnızca dilimi
-özetlemek bir dizinin önbelleğini bir diğerine sunardı.
+Bloklar, token dilimlerinin *zincirlenmiş* özeti ile adreslenir: bir sistem talimatını paylaşan iki istek onun bloklarını paylaşır, ve ikincisinin artık onları önceden hesaplaması gerekmez. Zincirleme vazgeçilmezdir: farklı bir bağlamdaki aynı on altı token aynı anahtarları ve değerleri içermez, ve yalnızca dilimi özetlemek bir dizinin önbelleğini bir başkasına hizmet ettirirdi.
 
-İçeriği tanımlanabilir kalan serbest bırakılmış bir blok, boş listesi yerine
-bir LRU kuyruğuna girer: önbellek böylece istekler arasında, sunabileceği bir
-tahsisi asla reddetmeden hayatta kalır.
+İçeriği tanınabilir kalan serbest bırakılmış bir blok, boş bloklar listesi yerine bir LRU kuyruğuna katılır: önbellek böylece isteklerin arasında hayatta kalır, hizmet edebileceği bir tahsisi asla reddetmeden.
 
-### Ana bilgisayar katında hesaplama (`--host-exec`)
+### Ana makine yürütmesi (`--host-exec`)
 
-Ağırlıkları RAM'de bulunan bir katman GPU'ya kopyalanabilir ya da yerinde
-hesaplanabilir. İki yol da bellekle sınırlıdır ve aynı baytları okur: daha
-hızlı olan, veri yolu daha geniş olandır — PCIe 5.0 x16 yaklaşık 54 GB/s,
-çift kanallı DDR5 yaklaşık 70 GB/s verir — ve yerinde hesaplamak ayrıca GPU'yu
-bir kopyayı bekletmek yerine serbest bırakır.
+Ağırlıkları RAM'de bulunan bir katman, GPU'ya kopyalanabilir veya yerinde hesaplanabilir. Her iki yol da bellek sınırlıdır ve aynı byte'ları okur: en hızlısı en geniş veri yoluna sahip olandır — PCIe 5.0 x16 yaklaşık 54 Go/s verir, çift kanallı DDR5 yaklaşık 70 Go/s — ve yerinde hesaplama ayrıca GPU'yu bir kopyayı beklemek yerine serbest bırakır.
 
-Bu yalnızca işlemci 4 bit paketlenmiş ağırlıkları doğrudan okuyorsa değer.
-Bu yüzden AVX2 yollu küçük bir C++ çekirdeği (`acvram_cpu.cpp`, ctypes ile
-yüklenir, Python başlıkları ya da ninja olmadan). **Skaler** yedek dalında
-bile `dequantize() @ x`'i INT4'te 1,44, NVFP4'te 3,21 kat geçer; çünkü
-ikincisi önce tüm matrisin 32 bitlik bir kopyasını yazar.
+Bu yalnızca işlemci 4 bit'e paketlenmiş ağırlıkları doğrudan okuduğunda değerlidir. Bu yüzden AVX2 yolu olan küçük bir C++ çekirdeği (`acvram_cpu.cpp`, ctypes ile yüklenir, Python başlıkları veya ninja olmadan). **Skaler** geri dönüş dalında bile, `dequantize() @ x`'i INT4'te 1,44 kat ve NVFP4'te 3,21 kat geçer, çünkü ikincisi önce tüm matrisin 32 bit'lik bir kopyasını yazar.
 
-Mistral-Large-123B'de planlayıcının tahmini 1,35'ten 2,42 jeton/s'ye çıkar.
+Mistral-Large-123B'de, zamanlayıcının tahmini 1,35'ten 2,42 token/s'ye çıkar.
 
-### Karma hassasiyet (`--snr-floor`, varsayılan olarak kapalı)
+### Karışık hassasiyet (`--snr-floor`, varsayılan olarak kapalı)
 
-Dönüştürücü her tensör için katman çıkışındaki sinyal/gürültü oranını ölçer
-ve `--snr-floor` altına düşenleri, tensörlerin %15'i ve bir fiyat tavanı
-(`--promotion-cout-max`, eklenen mebibayt) sınırı içinde daha geniş bir
-biçime yükseltebilir.
+Dönüştürücü, her tensör için her katmanın çıkışındaki sinyal/gürültü oranını ölçer ve `--snr-floor`'un altına düşenleri, tensörlerin %15'i ve bir üst fiyat (`--promotion-cout-max`, eklenen mebibayt cinsinden) sınırında, daha geniş bir biçime yükseltebilir.
 
-Taban **varsayılan olarak sıfırdır**: hiçbir şey yükseltilmez. Çözümleme
-bellek bant genişliğiyle sınırlıdır ve `Huihui-Qwen3.8-27B` üzerindeki ölçüm
-kararı verir — 25 dB taban, %2,0 karışıklık (16 383 jetonluk derlemde 42,591'e
-karşı 43,447) için %13,4 bellek ve %10,6 verim (16,02 ve 46,2'ye karşı
-18,50 GiB ve 41,8 j/s) götürür. Kalite hızdan önemliyse `--snr-floor 25` eski
-davranışı geri getirir.
+Eşik **varsayılan olarak sıfırdır**: hiçbir şey yükseltilmez. Kod çözme bellek bant genişliği ile sınırlıdır, ve `Huihui-Qwen3.8-27B` üzerindeki ölçüm karar verir — 25 dB'lik bir eşik, %2,0'lık şaşkınlık (perplexity) (16.383 token'lık bir külliyatta 43,447'ye karşı 42,591) karşılığında %13,4 bellek ve %10,6 verim maliyetine yol açar (16,02 ve 46,2'ye karşı 18,50 Gio ve 41,8 t/s). `--snr-floor 25`, kalite hızdan önce geldiğinde eski davranışı geri getirir.
 
 ### Ve `acvram eval`
 
-Sinyal/gürültü oranı ve logit kosinüsü yaklaşıklardır.
-`acvram eval DİZİN [DİZİN ...]` kayan pencereyle karışıklığı ölçer; böylece
-bir biçim seçimi kanıtla karara bağlanır:
+Sinyal/gürültü oranı ve logit kosinüsü yaklaşımlardır. `acvram eval REP [REP ...]`, bir biçim seçiminin kanıtlarla karara bağlanması için kayan pencereyle şaşkınlığı ölçer:
 
 ```
 $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
@@ -196,23 +195,29 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
   qwen3-32b-int4         6,583    4,17    16,1 Gio      8192  (+2,7 %)
 ```
 
+---
+
+<a id="http"></a>
+
 ## HTTP uç noktaları
 
 | uç nokta | notlar |
 |---|---|
-| `POST /v1/chat/completions` | SSE akışı ya da tek yanıt; modelin sohbet şablonunu kullanır |
-| `POST /v1/completions` | metin ya da jeton kimlikleri olarak istem |
-| `POST /v1/embeddings` | ortalanmış son gizli durumlar, L2 normalleştirilmiş, `dimensions` gözetilir |
-| `GET /v1/models` | artı bir `acvram` bloğu: biçimler, aygıtlar, KV önbellek kapasitesi |
-| `GET /health`, `GET /metrics` | çözümleme verimi, KV bloklarının doluluğu |
+| `POST /v1/chat/completions` | SSE akışı veya tekil yanıt; modelin sohbet şablonunu kullanır |
+| `POST /v1/completions` | metin veya token kimlikleri olarak istem |
+| `POST /v1/embeddings` | ortalanmış son gizli durumlar, L2 normalize edilmiş, `dimensions` uygulanır |
+| `GET /v1/models` | artı bir `acvram` bloğu: biçimler, cihazlar, KV önbellek kapasitesi |
+| `GET /health`, `GET /metrics` | kod çözme hızı, KV blok doluluğu |
 
-Bu yanıtlardaki alan adları İngilizce kalır: bu OpenAI protokolüdür ve
-çevrilmeleri mevcut tüm istemcileri bozardı.
+Bu yanıtların alan adları İngilizce kalır: bu OpenAI protokolüdür, ve çevirmek mevcut tüm istemcileri bozardı.
+
+---
+
+<a id="chiffres"></a>
 
 ## Sayılar nereden geliyor
 
-Yukarıda anılan her değer bu depodaki kod tarafından üretilir ve `pytest` ile
-doğrulanır. Ölçümler referans çekirdeklerle işlemci üzerinde yapıldı:
+Yukarıda belirtilen her değer bu depodaki kodla üretilir ve `pytest` ile doğrulanır. Referans çekirdeklerle işlemci üzerinde yapılan ölçümler:
 
 | biçim | bit/ağırlık | ağırlık SNR'si | BF16'ya karşı logit kosinüsü |
 |---|---|---|---|
@@ -222,76 +227,95 @@ doğrulanır. Ölçümler referans çekirdeklerle işlemci üzerinde yapıldı:
 | INT4 | 4,16 | 20,0 dB | 0,9427 |
 | INT4 + Hadamard | 4,16 | 21,0 dB | 0,9582 |
 
-Bu ölçümlerden çıkan iki bulgu varsayılanları değiştirdi:
+Bu ölçümlerden çıkan iki tespit, varsayılan değerleri değiştirdi:
 
-* **Hadamard döndürmesi INT4'e yardım eder, NVFP4'e etmez.** INT4'ün 128'lik
-  grupları yalıtılmış bir aykırı kanalı soğuramaz; bu yüzden uç değerleri
-  yaymak, etkinleştirme başına n log n bir dönüşüme değer. NVFP4'ün 16'lık
-  blokları zaten kendi ölçeğini taşır. Bu yüzden `--hadamard auto` bunu
-  yalnızca INT4'e uygular.
-* **KV önbelleği için INT8, FP8 E4M3'ü geçer**: aynı boyutta 44 dB'ye karşı
-  32 dB; çünkü (jeton, baş) başına bir ölçek, FP8'in üs bitleri harcadığı
-  dinamik aralığı zaten sağlar. Bu yüzden iki kart da, 5090 FP8 yapabilse
-  bile INT8 KV önbelleği kullanır.
+* **Bir Hadamard dönüşü INT4'e yardımcı olur, NVFP4'e değil.** INT4'ün 128'lik grupları tek başına bir kanal aykırı değerini ememez, bu yüzden uç değerleri yaymak, aktivasyon başına n log n'lik bir dönüşüme değer. NVFP4'ün 16'lık blokları zaten kendi ölçeklerini taşır. Bu yüzden yalnızca INT4'e uygulanan `--hadamard auto`.
+* **INT8, KV önbelleği için FP8 E4M3'ü geçer**, aynı boyutta 32 dB'ye karşı 44 dB, çünkü (token, başlık) başına bir ölçek zaten FP8'in üstel bitler harcadığı dinamik aralığı sağlar. Bu yüzden her iki kart da, 5090 FP8 yapabilecek olsa bile, INT8'de bir KV önbelleği kullanır. Bir `k8v4` biçimi (INT4'te değerler, %−22 önbellek byte'ı) opsiyonel olarak mevcuttur, **onaylanmamıştır** — bkz. `docs/ARCHITECTURE.md`.
+
+---
+
+<a id="documentation"></a>
 
 ## Belgeler
 
-* [`REPRISE.md`](../REPRISE.md) — **projeyi başka bir makinede sürdürmek**
-* [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — parçalar nasıl bir araya gelir
-* [`docs/MATERIEL.md`](MATERIEL.md) — bu belirli makineyi ayarlamak
-* [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **yapılmamış olanlar**, önce okuyun
-* [`CONVENTIONS.md`](../CONVENTIONS.md) — kod üzerinde çalışma kuralları (dil, biçem, push öncesi denetimler)
+| Belge | İçerik |
+|---|---|
+| [`REPRISE.md`](../REPRISE.md) | **projeyi başka bir makinede sürdürmek** (Fransızca) |
+| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | parçaların nasıl bir araya geldiği |
+| [`docs/MATERIEL.md`](MATERIEL.md) | bu belirli makineyi ayarlamak |
+| [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) | **henüz yapılmamış olan**, önce bunu okuyun |
+| [`CONVENTIONS.md`](../CONVENTIONS.md) | kod üzerinde çalışma kuralları (dil, stil, itmeden önceki kontroller) |
+
+---
+
+<a id="resultats"></a>
 
 ## Ölçülen sonuçlar (22/09/2026, 400 W'ta RTX 5090, enerji sayacında ≥ 20 s rejim)
 
-NVFP4 (uzmanlar) + INT8 (dikkat, baş) olarak Qwen3-Coder-30B-A3B, tüm
-motorlar için aynı protokol (`outils/`, tek kart, `energie.py`):
+Tüm motorlar için aynı protokol (`outils/`, tek kart, `energie.py`) ile NVFP4 (uzmanlar) + INT8 (dikkat, başlık) içinde Qwen3-Coder-30B-A3B:
 
-| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram | vLLM 0.29 (`vllm serve`) | llama.cpp (sm_120) |
 |---|---|---|---|
-| çözümleme, 12 dizi | **1 634 j/s** | 1 782 j/s | — |
-| çözümleme, 1 dizi | **380,8 j/s** | 290,6 j/s | 323,6 j/s |
-| prefill pp2048 | **22 707** jeton/s | 21 054 | 8 671 (TabbyAPI, geri çekildi) |
+| 12 dizi kod çözme | 1 995,1 t/s ² | 2 027,0 t/s ² | — |
+| 1 dizi kod çözme | 312,3 t/s ³ ⁴ | 284,8 t/s ³ | **329,9 t/s** ⁴ |
+| prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, kaldırıldı) |
 
-Günün verimi (tezgâh 1030, eko rejim `-lgc 2700`, hizmetteki ardışık düzen; açgözlü örnekleme CUDA grafiğinde yakalanmış, 0.6.35'ten beri varsayılan). b=12, resmî mühürlü bir hücredir (6 iç içe geçmiş pencerenin medyanı, pencere başına saat frekansı).
+¹ 22/09 düzeltmesi: `serve` varsayılan olarak spekülasyon yapar (`--speculative ngram`, cli.py), rakipler yapmaz; şimdiye kadar yayımlanan 380,8 t/s SPEKÜLASYONLA ölçülmüştü. Spekülasyon olmadan (`--speculative none`, aynı zincir, revue/poste2-piece44-speculation-none-22-09.md): 283,6 t/s — acvram, b=1'de llama.cpp ve vLLM'nin ardından **üçüncü**. Enerjide llama.cpp'nin önünde kalır (net 0,700'e karşı 0,601 J/token). b=12'de spekülasyon hiçbir zaman etkin değildir (`lot_max=2` koruması): bu hücre zaten eşit koşullardaydı.
 
-> **Erratum (22/09/2026).** 0.6.35'in ilk yayını, «vLLM'in +1,84 % önünde» ifadesini 21/09 tarihli 1 596 j/s'lik bir vLLM referansından çıkarıyordu; bu referans bir **çevrimdışı üretimden** (`LLM().generate()`) geliyordu ve **bir sunucuyla kıyaslanamaz**: sürekli zamanlama yok, `acvram serve` yolu değil. 22/09'da, `acvram serve` ile aynı kart ve aynı yol üzerinde **`vllm serve`** (HTTP) karşısında dönüşümlü bir A/V hücresiyle (A1 V1 A2 V2 A3 V3) düzeltildi: vLLM medyanı **1 782 j/s**. Kıyaslanabilir ölçümde **acvram (1 634 j/s), b=12'de vLLM'in yaklaşık 8 % GERİSİNDE**, önünde değil. Eşit saat frekansında J/jeton yeniden ölçümde kalıyor.
+² 23/09, aynı oturum, aynı HTTP istemcisi (`acvram serve` ve `vllm serve`'e karşı `banc-llamacpp-16-09.py`), her kol etrafında açıkça yerleştirilmiş `-lgc 2700`, alternatif hücreler A V V A, kol başına ≥ 5 parti, sapma yalnızca 2 σ'nın ötesinde bildiriliyor (revue/poste2-piece96-vllm-b12-rejeu-89-23-09.md). acvram 0.6.38 (kod çözmede w13, açılmış dikkat azaltma): sapma −%1,6, **2 σ'nın altında: verim eşitliği**. J/token'de **vLLM %7,0 önde kalır** (2 σ'nın ötesinde). 0.6.37 ile aynı protokol −%4,7 veriyordu.
 
-14/09 sabahı acvram aynı hücrede 630 j/s ve 0,619 J/jeton'daydı: kazanımlar
-Blackwell'in yerli FP4 MMA'sından (`mma.sync … kind::mxf4nvf4`, bf16'ya göre
-×7,9), yığın kovası başına gruplanmış GEMM olarak MoE'den, tek çekirdekli
-yönlendirmeden (adım başına 3 677 → 1 517 başlatma) ve izdüşümler için dar bir
-tensör çekirdeği GEMM'inden gelir. Her rakamın `acvram-memoire/revue/` içinde,
-ölçümden önce mühürlenmiş tahmini, aracı ve rejimiyle bir notu vardır —
-rejimsiz bir rakam yayımlanmaz.
+³ ² ile aynı oturum ve aynı protokol, her iki tarafta da spekülasyon olmadan: acvram 312,3'e karşı vLLM 284,8 — **acvram verimde %9,7 önde** (2 σ'nın ötesinde); J/token: **eşitlik** (sapma %0,04, 2 σ'nın altında).
 
-acvram'ın önde olduğu yer: vLLM'in yalnızca FP8'de sunduğu, yerli sm_120
-NVFP4'teki MLA modelleri (GLM-4.7-Flash, b=1: hizmette 165,35 j/s); VRAM'e
-sığmayan modeller; ve tek dizilik çözümleme (b=1: vLLM için 290,6'ya karşı
-380,8 j/s). Büyük yığında ise, VRAM'e sığan bir MoE üzerinde vLLM b=12'de önde
-kalır (1 782'ye karşı 1 634 j/s, bkz. erratum); acvram burada ilerledi (0.6.34'te
-1 540 → 1 634) ama öne geçmedi. Enerjideki fark yeniden ölçülecek.
+⁴ 23/09, llama.cpp'ye karşı aynı protokol (revue/poste2-piece72-llamacpp-b1-23-09.md), yeniden yazılmış yönlendirmeyle (+%5,6) acvram 0.6.37: acvram 310,8'e karşı llama.cpp 329,9 t/s — **llama.cpp verimde %5,8 önde, acvram J/token'de %13,4 önde** (0,598'e karşı 0,691).
+
+Günün verimleri (post 1030, tasarruf rejimi `-lgc 2700`, hizmette hat; açgözlü örnekleme CUDA grafiğinde yakalandı, 0.6.35'in varsayılanı). acvram'ın b=12'si resmi mühürlü bir hücredir (6 iç içe geçmiş pencerenin medyanı, pencere başına saat).
+
+> **Düzeltme (23/09/2026).** Şimdiye kadar yayımlanan vLLM karşılaştırması (b=12: 1 782'ye karşı 1 634 t/s; b=1: 290,6), HTTP üzerinden ölçülen acvram'ı **çevrimdışı** ölçülen vLLM'ye (`LLM().generate()`) karşı koyuyordu, ve 22/09 düzeltmesi vLLM hücresinin `vllm serve` üzerinden geçtiğini yanlışlıkla iddia ediyordu. 23/09: her ikisi için aynı HTTP istemcisi, ve her ikisi için yerleştirilmiş `-lgc` (acvram başlangıçta kendisininkini yerleştirir, `vllm serve` yapmaz: bu önlem olmadan vLLM ~2650'ye karşı ~2930 MHz'de çalışıyordu). ² notundaki sonuç: b=12'de vLLM %9,1 önde.
+
+14/09 sabahı acvram aynı hücrede 630 t/s ve 0,619 J/token'daydı: kazanımlar Blackwell'in yerel FP4 MMA'sından (`mma.sync … kind::mxf4nvf4`, bf16'nın ×7,9 katı), toplu iş kovası başına gruplanmış GEMM'de MoE'den, tek bir çekirdekte yönlendirmeden (adım başına 3.677 → 1.517 başlatma) ve izdüşümler için tensor çekirdekleri üzerinde dar bir GEMM'den gelir. Her sayının `acvram-memoire/revue/`'de ölçümden önce mühürlü tahmini, aracı ve rejimi ile bir notu vardır — rejimsiz bir sayı yayımlanmaz.
+
+acvram'ın önde olduğu yerler: vLLM'nin yalnızca FP8'de sunduğu native NVFP4 sm_120'deki MLA modelleri (GLM-4.7-Flash) (b=1: hizmette 165,35 t/s); VRAM'e sığmayan modeller. Tek dizi kod çözme bunlardan biri değildir: spekülasyon olmadan, acvram orada vLLM'nin %9,7 önünde (not ³), verimde llama.cpp'nin %5,8 gerisinde ama enerjide onun %13,4 önünde (not ⁴). Büyük bir toplu işte, VRAM'e sığan bir MoE üzerinde, vLLM b=12'de verim eşitliğinde (1 995,1'e karşı 2 027,0 t/s, 2 σ'nın altında, not ²) ama %7,0 daha az J/token tutar; acvram orada 1.540 t/s'den (0.6.34) 1.995'e (0.6.38) ilerledi.
+
+---
+
+<a id="etat"></a>
 
 ## Durum
 
-Sürüm 0.6.35. Her şey 5090'da çalışır: `sm_120a` (yerli FP4) ve `sm_86` için
-derlenmiş CUDA çekirdekleri, CUDA grafları, NVFP4/INT8/INT4 kuantizasyonu,
-HTTP sunucusu. Korkuluklar yerinde: kart çalışma oturumlarına görünmez
-(`CUDA_VISIBLE_DEVICES` boş) ve yalnızca `outils/carte.sh` onu kilit altında
-tek seferde bir ölçüme ödünç verir; bir bekçi kilit dışındaki her erişimi
-günlükler; birden fazla kartı kapsayan ya da 10 s'den kısa bir enerji ölçümü
-geçersiz sayılır; bozulmuş rejimde yüklenen bir model bunu söyler ve düelloya
-girmez.
+Sürüm 0.6.38. Her şey 5090'da çalışıyor: `sm_120a` (native FP4) ve `sm_86` için derlenmiş CUDA çekirdekleri, CUDA grafikleri, NVFP4/INT8/INT4 nicemleme, HTTP sunucusu. Koruyucular yerinde: kart çalışma oturumlarına görünmez (boş `CUDA_VISIBLE_DEVICES`) ve yalnızca `outils/carte.sh` onu, kilit altında, seferde bir ölçüm için sunar; bir gözlemci kilit dışındaki her erişimi günlüğe kaydeder; birden fazla kartı kapsayan veya 10 s'den kısa bir enerji ölçümü geçersiz kılınır; bozulmuş rejimde yüklenen bir model bunu belirtir ve bir düelloya girmez.
 
-640 test (`pytest -q`, işlemcide bir dakika; GPU testleri yalnızca
-`carte.sh` altında çalışır). İş takibi: `acvram-memoire/` (kurallar,
-dizin, defterler, 180 notluk inceleme).
+4.107 test (`pytest --collect-only -q`, işlemcide bir dakika; GPU testleri yalnızca `carte.sh` altında çalışır). İşin takibi: `acvram-memoire/` (kurallar, dizin, defterler, birkaç yüz notun incelemesi).
 
-## Destek
+---
 
-acvram kişisel donanım üzerinde geliştirilmektedir. Proje size yararlıysa:
-**Destek: [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)**.
+<a id="credits"></a>
+
+## Katkılar
+
+- **vLLM** — [vllm-project/vllm](https://github.com/vllm-project/vllm) v0.29.0, Apache-2.0 lisansı altında: `acvram/kernels/marlin_port/`, [`acvram/kernels/marlin_port/NOTICE`](../acvram/kernels/marlin_port/NOTICE)'da tam dosya dosya atıf ile Marlin çekirdeklerini (MoE ve yoğun) taşır.
+- **NVIDIA** — CUDA, Blackwell'in FP4 tensor çekirdekleri (`sm_120`) ve bu projenin bağımlı olduğu kütüphaneler.
+- **PyTorch** — tensör motoru ve C++/CUDA uzantıları.
+
+Bağımsız proje, ASUS, NVIDIA veya vLLM projesi ile bağlantılı değildir.
+
+---
+
+<a id="licence"></a>
 
 ## Lisans
 
-GPL-3.0 veya sonrası.
+Bu depodaki kod için [GPL-3.0 veya sonraki](../LICENSE). `acvram/kernels/marlin_port/`, [vLLM](https://github.com/vllm-project/vllm) v0.29.0'dan taşınan kodu içerir (`marlin_moe_wna16`, `gptq_marlin_repack`, `moe_align_block_size` çekirdekleri), Apache-2.0 lisansı altında: her dosya orijinal başlığını korur, lisans metni `LICENSE-vllm`'de bulunur, ve dosya listesi, kaynak commit ve değişiklikler [`acvram/kernels/marlin_port/NOTICE`](../acvram/kernels/marlin_port/NOTICE)'da bulunur.
+
+---
+
+<a id="soutien"></a>
+
+## Projeyi destekleyin
+
+acvram'ın geliştirilmesi kişisel donanım üzerinde yürütülmektedir. Proje size faydalı olduysa:
+
+[![Buy Me a Coffee](https://img.buymeacoffee.com/button-api/?text=Offrir%20un%20café&emoji=☕&slug=anticitoyen&button_colour=FFDD00&font_colour=000000&font_family=Lato&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/anticitoyen)
+
+**https://buymeacoffee.com/anticitoyen**
+
+Çeviriler: [TRADUIRE.md](TRADUIRE.md) (Fransızca; katkı kılavuzu henüz çevrilmedi).
