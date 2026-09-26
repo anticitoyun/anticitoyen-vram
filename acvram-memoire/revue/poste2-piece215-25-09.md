@@ -53,7 +53,40 @@ nommées dans `gdn.py:_projections` si le partage par poste (qkv vs gate vs alph
 chef. Sans ça, le verdict final ne pourra confirmer/infirmer la prédiction qu'au niveau « projections GDN
 globales », pas poste par poste.
 
-b=8 lancé (`ACVRAM_NOM=poste2-p215-b8`), sortie `scratchpad/poste2-p215-25-09/b8/`.
+## Addendum 26/09 02 h 30 — reconstruction par N (ordre chef), regex corrigé
+
+Regex corrigé (1 ligne, `outils/gpu/mesure/familles-b1.py:12`, commit d599b0ceb). Reconstruction par N à partir
+du CSV brut (b=1, `graphe_cuda_gpu_trace.csv`, groupé par (Nom, GrdX, GrdY, GrdZ, BlkX/Y/Z), N connus par
+`acvram_manifest.json` couche 0) :
+
+**Famille « autres » (nvfp4_gemv_kernel plain, hors Marlin)** — AUCUNE des trois shapes N=8192 (qkv) ou N=4096
+(gate) n'y apparaît. Trois groupes seulement :
+- grille (8,1,1), 21 060 lancements = 60,1/pas → `linear_attn.alpha` (N=32) **et** `linear_attn.beta` (N=32) :
+  **même N, indiscernables par la grille** (le cas prédit par chef) — combiné 37,7 µs/pas, part négligeable ;
+- grille (256,1,1), 40,1/pas → N=256 = `mlp.gate` (routeur, N=256, fire sur les 40 couches) — PAS un poste GDN ;
+- grille (512,1,1), 40,1/pas → N=512 = `shared_expert.gate_proj` **et** `up_proj` (N=512 chacun, tie aussi, mais
+  un seul groupe pour 40x/pas au lieu de 80x attendu si séparés → probablement fusionnés en une multi-projection
+  à l'exécution, disposition non confirmée sans NVTX).
+
+**qkv et gate ne sont PAS dans « autres » : ils tournent en Marlin** (confirmé « en Marlin seul quoi qu'il
+arrive », doubles 25/09), donc comptés dans « experts » (1508,6 µs/pas). Isolés dans `marlin_only.csv` par grille :
+- `nvfp4_gemv_marlin2_kernel<…>` grille (128,1,4), **30,1/pas** (= exactement les 30 couches `linear_attention`) :
+  245,2 µs/pas total, 8,18 µs/lancement → **candidat `qkv`** (N=8192, le plus gros, le plus lent/lancement) ;
+- `nvfp4_gemv_marlin2_kernel<…>` grille (64,1,8), **30,1/pas** : 157,5 µs/pas, 5,25 µs/lancement → **candidat
+  `gate`** (N=4096, moitié du poids de qkv, durée cohérente memoire-liée ≈ proportionnelle aux octets) ;
+- `out_proj` (N=2048, GDN-only) **non isolé** : aucun 3ᵉ groupe à ~30/pas trouvé côté Marlin ni côté plain — nommé
+  par `role_marlin` (`gdn.out`), probablement piloté dans la pile doublée avec `shared_expert.down_proj` (tie de
+  disposition, pas de N) → seul poste des 3 nommés qui reste non tranché sans NVTX (2ᵉ cas prévu par chef).
+
+**Révision de la prédiction du 25/09** : qkv+gate confirmés comme postes dominants (402,7 µs/pas à eux deux sur
+3532,7 noyaux_us_pas ≈ 11,4 % du temps noyau total, b=1) — accord qualitatif avec la prédiction (qkv > gate en
+coût), mais le mécanisme nommé était faux (« Marlin seul » ⇒ ils étaient déjà dans « experts », pas « autres » :
+la prédiction pointait la bonne cause, la mauvaise famille). `out_proj` reste à trancher : NVTX en opt-in dans
+`gdn.py:_projections` si le chef le juge nécessaire, sinon le verdict se limite à qkv+gate, confirmé, out_proj
+non isolé.
+
+b=8 en file FIFO (`ACVRAM_NOM=poste2-p215-b8`), sortie `scratchpad/poste2-p215-25-09/b8/` — comparaison b=1/b=8 à
+suivre dès la capture.
 
 ## Blocage avant prise
 
