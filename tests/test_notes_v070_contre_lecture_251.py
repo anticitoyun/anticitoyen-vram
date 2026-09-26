@@ -155,6 +155,13 @@ _CITATION_PIECE = re.compile(
     r"pi[eè]ces?\s+\d{3}[a-z]?(?:\s*b\d)?(?:[,/]\s*\d{3}[a-z]?(?:\s*b\d)?)*"
     r"|\(?\bsee\s+pi[eè]ce\s+\d{3}[a-z]?[^)]*\)?"
     r"|(?:merged pieces|pi[eè]ces fusionn[ée]es)\s*[—-]\s*[0-9a-z,/ ]+?\.", re.IGNORECASE)
+# 280 : un numéro de version (« 0.7.0 », « v0.7.2 ») est un IDENTIFIANT, jamais un chiffre
+# mesuré — mais il a la forme exacte que `_NOMBRE` reconnaît (chiffres séparés par des points),
+# et deux mentions de la même version dans un même paragraphe (une fois nue, une fois précédée
+# de « v ») se normalisent différemment (« 070 » contre « 70 », le premier chiffre de la
+# deuxième étant exclu par le regard-arrière de `_NOMBRE`), créant un faux manquant sans
+# rapport avec la pièce citée. Retiré avant extraction, comme les sha et les numéros de pièce.
+_VERSION = re.compile(r"\bv?\d+\.\d+\.\d+\b")
 
 
 def _chiffres(texte):
@@ -165,7 +172,8 @@ def _chiffres(texte):
     # pour une mesure (son regard-arrière exclut une lettre AVANT, pas après, comme dans
     # `test_readme_chiffres_ancres_238` — même limite documentée là-bas) : les shas sont
     # retirés en premier, avant toute extraction de nombre.
-    sans_shas = _SHA.sub(lambda m: " " if re.search(r"[a-f]", m.group(0)) else m.group(0), texte)
+    sans_version = _VERSION.sub(" ", texte)
+    sans_shas = _SHA.sub(lambda m: " " if re.search(r"[a-f]", m.group(0)) else m.group(0), sans_version)
     sans_pieces = _CITATION_PIECE.sub(" ", sans_shas)
     return {_normalise_nombre(m.group(0)) for m in _NOMBRE.finditer(sans_pieces)
             if len(_normalise_nombre(m.group(0))) >= 2}
@@ -174,13 +182,25 @@ def _chiffres(texte):
 def _paragraphes(texte):
     """Un paragraphe = une puce top-level (`- **`) ou une sous-puce (`  - `), jusqu'à la
     puce suivante — c'est à cette granularité que les notes citent une pièce ET ses
-    chiffres ensemble."""
+    chiffres ensemble.
+
+    280 : la dernière puce d'une section (juste avant `### Install / upgrade`, un `---` de
+    séparation, ou le titre `## Français`/`## English` suivant) avalait tout ce qui suit —
+    ligne d'intro de la section suivante comprise — puisque rien n'arrêtait le bloc avant la
+    puce SUIVANTE. Un chiffre nu dans cette ligne d'intro (« TTFT à 12 requalifié ») se faisait
+    alors attribuer à la dernière pièce citée, sans rapport avec elle. Une ligne vide, un titre
+    (`#`), un séparateur (`---`) ou une clôture/ouverture de bloc de code (```) referment
+    désormais le paragraphe en cours, qui n'a jamais légitimement besoin de les traverser."""
     blocs, courant = [], []
     for l in texte.splitlines():
         if re.match(r"^(-|  -)\s", l):
             if courant:
                 blocs.append("\n".join(courant))
             courant = [l]
+        elif re.match(r"^(#|---\s*$|```)", l) or not l.strip():
+            if courant:
+                blocs.append("\n".join(courant))
+            courant = []
         elif courant:
             courant.append(l)
     if courant:
