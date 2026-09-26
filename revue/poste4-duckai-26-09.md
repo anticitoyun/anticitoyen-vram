@@ -905,3 +905,74 @@ contexte, issue model-runner-V2 K dynamique RTX 5090, SGLang issue Eagle3 RTX 50
 benchmark Qwen3 générique EAGLE-3, TriSpec), vllm.ai (doc spec-decode, tailles de capture CUDA graph),
 spheron.network (guide déploiement EAGLE-3/Medusa, DFlash), amd.com (MTP DeepSeek V3/SGLang),
 consciousengines.com (compatibilité formats checkpoint EAGLE-3).
+
+---
+
+## Q23 — MTP k>1 : rattrapage KV de la tête après vérification, ou cache écrit pendant le brouillon ? (poste5, 277)
+
+**Réponse directe (Luna, 1 avis, très sourcée)** : NON, vLLM et SGLang ne rejouent PAS un passage de
+rattrapage de la tête MTP sur les jetons acceptés avec les états cachés de la cible. Ils vérifient, tronquent
+au préfixe accepté, et continuent le brouillon depuis l'état spéculatif tel quel — **le comportement
+d'acvram (rogner la longueur, garder le cache MTP écrit par la tête elle-même) est celui des moteurs de
+référence, pas un écart**.
+
+**Deux caches distincts, à ne pas confondre** :
+- **KV de la cible** : le passage de vérification écrit les entrées K/V de la cible pour les positions
+  spéculatives ; seul le préfixe accepté est retenu, le reste est ignoré/annulé.
+- **KV de la tête MTP/du brouillon** : écrit par le passage de proposition, en utilisant les états cachés
+  PRODUITS PAR LA TÊTE ELLE-MÊME (récursion). L'opération d'acceptation tronque normalement ce cache ; elle
+  ne rejoue PAS chaque jeton accepté à travers la tête avec les états cachés de la cible.
+
+**Fichiers vLLM cités** : `vllm/v1/spec_decode/mtp_proposer.py`, `vllm/v1/spec_decode/eagle_proposer.py`,
+`vllm/model_executor/models/deepseek_mtp.py`, `vllm/v1/sample/rejection_sampler.py` (fait juste
+accepter/rejeter, ne relance jamais le modèle MTP). Doc vLLM-Ascend (organisation équivalente) :
+`load_model`, `dummy_run`, `generate_token_ids`, `_prepare_inputs`, `_propose` — le rejet est décrit comme
+« jeter le jeton rejeté et tout ce qui en dérive », jamais comme « rejouer les jetons acceptés dans la
+tête ». **SGLang** : `sglang/srt/speculative/`, `eagle_worker.py`, `spec_utils.py` — même logique NEXTN/MTP,
+committer le plus long préfixe accepté, rien décrit comme rejeu par état caché de la cible.
+
+**Pourquoi garder l'état de proposition n'est PAS intrinsèquement une erreur** : la récursion de la tête MTP
+est *voulue* comme `ĥ_{i+1} = M(ĥ_i, e(x̂_{i+1}))` — un jeton accepté ne dit QUE qu'il a passé la
+vérification cible, PAS que son état caché de proposition égale l'état caché cible correspondant. Remplacer
+le cache MTP par des états cachés cible définirait un AUTRE brouillon, pas une exigence de correction.
+
+**Ce qui explique VRAIMENT un écart d'acceptation (Luna, avec repères chiffrés)** :
+- **Dégradation par position, effet d'entraînement connu (FastMTP, papier arXiv)** : MTP « vanille » :
+  ~70 % à la position 1, ~10 % à la position 2, quasi 0 % à la position 3 ; un entraînement récursif
+  (fine-tuning spécifique) améliore ces positions à ~80 %/56 %/36 %. C'est un DÉCALAGE
+  ENTRAÎNEMENT/SERVICE : beaucoup de têtes MTP sont entraînées en teacher forcing (chaque couche MTP voit
+  le VRAI jeton), mais le service les nourrit récursivement de leur propre jeton échantillonné — la cause
+  documentée de l'erreur qui s'accumule.
+- **Repère SGLang réel de la même famille de problème que vous** : une issue SGLang compare le MÊME modèle
+  MTP sous SGLang (**~0,33** d'acceptation) contre vLLM (**~0,63**) — écart attribué à un comportement
+  spécifique SGLang/model-runner, PAS à une différence d'algorithme spéculatif fondamental. Une autre issue
+  NEXTN/MTP montre une acceptation ~2,4-3,3 (longueur moyenne) juste après démarrage, qui chute vers 1 après
+  accumulation d'un bogue d'état de cache — un redémarrage restaure le taux d'origine.
+- **Aucune ablation publique** « cache de proposition conservé » vs « recalculé depuis les états cachés
+  cible » n'existe pour Qwen3-Next/3.5/3.8 ou DeepSeek-V3 — votre écart (0,38 vs 0,475-0,489) ne peut PAS
+  être attribué en toute sécurité à ce seul choix.
+
+**Causes plausibles alternatives à l'écart 0,38 vs 0,475-0,489 (liste Luna)** : définition différente du
+taux d'acceptation (jetons acceptés/proposés vs longueur moyenne acceptée vs jeton bonus inclus ou non vs
+par position) ; `num_speculative_tokens` différent ; greedy vs rejection sampling ; température/top-p
+différents ; quantification cible ou tête différente ; désaccord de poids cible/tête ; partage
+embedding/tête LM incorrect ; mauvais position_ids ou masque d'attention ; KV de brouillon tronqué à tort ;
+gestion d'état hybride (DeltaNet/Mamba) ; utilisation récursive d'une seule tête alors que le checkpoint a
+des couches MTP dédiées par position ; désalignement cache/backend CUDA graph ; distribution du prompt ;
+longueur de contexte.
+
+**Protocole d'instrumentation recommandé** : logger séparément par tour `draft_len`, `accepted_draft_len`,
+`bonus_token_accepted`, `first_rejection_position`, `per_position_acceptance[k]`, `target_argmax[k]`,
+`draft_token[k]`, `draft_probability[k]`, `target_probability[k]`. Puis comparer l'acceptation PAR POSITION
+(k=1,2,3...) à l'agrégat. **Test diagnostique décisif** : faire tourner 2 variantes — (a) jeter le cache MTP
+à chaque tour et régénérer la proposition suivante depuis l'état caché cible ; (b) tronquer le cache MTP au
+préfixe accepté et continuer récursivement (= comportement actuel acvram). Si (a) améliore nettement
+l'acceptation en position 2/3, l'état retenu est incohérent avec la récurrence de référence. Si NON,
+l'écart est probablement ailleurs — le plus souvent alignement jeton/état caché, indexation de position,
+gestion du rejet, ou différence de définition de métrique.
+
+**Sources** : GitHub (vLLM `mtp_proposer.py`, `eagle_proposer.py`, `deepseek_mtp.py`,
+`rejection_sampler.py`, issue « how does vllm handle wrong tokens », issue NEXTN/MTP acceptance decays to 0,
+issue MTP always rejects draft tokens, issue Step-3.5-Flash MTP), vllm.ai (doc MTP vllm-ascend, proposer
+`_prepare_inputs`/`_propose`), lmsys.org (Accelerating SGLang with Multiple Token Prediction), arXiv
+(FastMTP), redhat.com (Optimize vLLM speculative decoding with FastMTP heads).
