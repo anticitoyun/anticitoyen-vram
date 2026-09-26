@@ -427,7 +427,7 @@ def _regime_echelle_awq(model, blocs=None) -> str:
     return f"mixte({detail})"
 
 
-def _couverture_experts(model) -> str:
+def _couverture_experts(model, blocs=None) -> str:
     """Disposition des experts par couche MoE : la valeur seule si toutes les couches MoE la
     partagent (« marlin », « marlin-w13 », « naturel »…), sinon le COMPTE par disposition
     (« marlin-w13×44+naturel×4 »), le plus fréquent en tête, et POUR CHAQUE couche non-marlin*
@@ -449,7 +449,8 @@ def _couverture_experts(model) -> str:
                 numerotes.append((i, m))
                 break
     if not numerotes:      # modèle sans `layers` exposées : on garde l ordre des modules
-        numerotes = list(enumerate(m for m in model.modules() if isinstance(m, MoEBlock)))
+        numerotes = list(enumerate(blocs if blocs is not None       # pièce 268 : blocs de regime(), même ordre
+                                   else (m for m in model.modules() if isinstance(m, MoEBlock))))
     if not numerotes:
         return "aucun"
     dispositions = [getattr(m, "experts_layout", None) or "naturel" for _, m in numerotes]
@@ -908,7 +909,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
             # couverture PAR COUCHE (poste7 19/09, budget GLM : 33 couches Marlin + 13 refusées
             # « distinctes » sur la pile naturelle — « experts_layout=marlin » seul mentait)
-            "experts_layout": _couverture_experts(self.model),
+            "experts_layout": _couverture_experts(self.model, blocs),
             # Pièce 47 : qui porte `x / s[e]` des experts — `gemv` (dans le
             # noyau Marlin, au bit), `torch` (gather + division devant chaque
             # GEMV : 8 lancements et 0,47 ms/pas à b=12), `aucune` (alias sans
