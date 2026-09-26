@@ -2,6 +2,8 @@
 import subprocess
 import pathlib
 
+import pytest
+
 PARC_BIN = pathlib.Path(__file__).resolve().parent.parent / "parc" / "bin"
 
 
@@ -13,6 +15,13 @@ def test_vllm_serveur_affiche_le_backend_choisi():
 
     # Modèle standard AWQ pour test
     modele = "/mnt/4TO_SATACMR_2022/Modeles/models_awq/Devstral-Small-2507-AWQ"
+    # Pièce 267c (CI GitHub) : ce test lit le catalogue RÉEL de la machine de dev
+    # (`/mnt/4TO_SATACMR_2022`, ~250 Go de modèles), rien de portable à simuler ici —
+    # aucun runner CI n'a ce montage. `vllm-serveur` échoue même avant de chercher le
+    # modèle (`mkdir /mnt/AI_GENERATOR` refusé, permission denied), preuve que c'est
+    # la disposition de stockage de la machine qui est testée, pas la logique du script.
+    if not pathlib.Path(modele).exists():
+        pytest.skip(f"modèle absent (catalogue réel de la machine cible) : {modele}")
 
     r = subprocess.run(
         ["bash", str(vllm), "--afficher", modele],

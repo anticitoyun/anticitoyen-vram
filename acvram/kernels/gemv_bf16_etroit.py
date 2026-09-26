@@ -8,25 +8,36 @@ appels = 2,99 ms sur 19,9 par pas (15 %). Ici : W [96, 5120] lu une fois par blo
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
 
+# Pièce 267c (CI GitHub, runner sans triton) : `gemv_bf16_etroit()` ci-dessous retombe
+# DÉJÀ sur `F.linear` quand `not x.is_cuda` (ligne « if M > 16 or not x.is_cuda... ») —
+# triton n'est donc jamais réellement nécessaire sur CPU. Seul l'import inconditionnel
+# (et le `@triton.jit` sur le noyau) empêchait ce fichier de se charger sans triton
+# installé, avant même que la garde CPU n'ait sa chance. Même motif que marlin_port.py.
+try:
+    import triton
+    import triton.language as tl
+except Exception:                                          # noqa: BLE001
+    triton = None
+    tl = None
 
-@triton.jit
-def _gemv_bf16_kernel(x, w, y, M, N, K, sxm, swn, sym, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
-                      ARRONDI_BF16: tl.constexpr):
-    n0 = tl.program_id(0) * BN
-    rm = tl.arange(0, BM)
-    rn = n0 + tl.arange(0, BN)
-    rk = tl.arange(0, BK)
-    acc = tl.zeros((BM, BN), dtype=tl.float32)
-    for k0 in range(0, K, BK):
-        xk = tl.load(x + rm[:, None] * sxm + (k0 + rk)[None, :], mask=(rm[:, None] < M) & ((k0 + rk)[None, :] < K), other=0.0)
-        wk = tl.load(w + rn[:, None] * swn + (k0 + rk)[None, :], mask=(rn[:, None] < N) & ((k0 + rk)[None, :] < K), other=0.0)
-        acc = tl.dot(xk, tl.trans(wk), acc)                       # [BM, BK] · [BK, BN], fp32
-    if ARRONDI_BF16:                                              # sortie fp32 AU BIT de « bf16 puis .to(float32) » (175, casts)
-        acc = acc.to(tl.bfloat16).to(tl.float32)
-    tl.store(y + rm[:, None] * sym + rn[None, :], acc.to(y.dtype.element_ty), mask=(rm[:, None] < M) & (rn[None, :] < N))
+if triton is not None:
+
+    @triton.jit
+    def _gemv_bf16_kernel(x, w, y, M, N, K, sxm, swn, sym, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+                          ARRONDI_BF16: tl.constexpr):
+        n0 = tl.program_id(0) * BN
+        rm = tl.arange(0, BM)
+        rn = n0 + tl.arange(0, BN)
+        rk = tl.arange(0, BK)
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for k0 in range(0, K, BK):
+            xk = tl.load(x + rm[:, None] * sxm + (k0 + rk)[None, :], mask=(rm[:, None] < M) & ((k0 + rk)[None, :] < K), other=0.0)
+            wk = tl.load(w + rn[:, None] * swn + (k0 + rk)[None, :], mask=(rn[:, None] < N) & ((k0 + rk)[None, :] < K), other=0.0)
+            acc = tl.dot(xk, tl.trans(wk), acc)                       # [BM, BK] · [BK, BN], fp32
+        if ARRONDI_BF16:                                              # sortie fp32 AU BIT de « bf16 puis .to(float32) » (175, casts)
+            acc = acc.to(tl.bfloat16).to(tl.float32)
+        tl.store(y + rm[:, None] * sym + rn[None, :], acc.to(y.dtype.element_ty), mask=(rm[:, None] < M) & (rn[None, :] < N))
 
 
 def gemv_bf16_etroit(x: torch.Tensor, w: torch.Tensor, fp32: bool = False) -> torch.Tensor:

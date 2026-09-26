@@ -114,7 +114,15 @@ def test_lot_mele_delta_zero():
     out3 = decode_attention_fixed(q, k3, v3, torch.tensor(lens), 2, D ** -0.5)
     k1, v1 = cache.gather_fixed(tables[:1], torch.float32)
     out1 = decode_attention_fixed(q[:1], k1, v1, torch.tensor(lens[:1]), 2, D ** -0.5)
-    assert torch.equal(out3[:1], out1)
+    # Pièce 267c (CI GitHub, runner sans GPU) : `torch.equal` (bit exact) a cassé là où
+    # ce test tourne toujours sur CPU (`F.scaled_dot_product_attention` n'a pas de backend
+    # GPU ici) — SDPA processeur peut choisir un chemin différent selon la taille du LOT
+    # (b=3 contre b=1), même mécanisme que les autres écarts fp32/CPU de cette pièce
+    # (test_ppl_tranches, 256b/267) : non reproduit sur ce poste (bit exact ici), mais
+    # observé en CI. `allclose` à une tolérance serrée reste un vrai test — un batching
+    # réellement cassé (mauvaise ligne lue, masque faux) diverge de plusieurs ordres de
+    # grandeur, jamais de ~1e-6.
+    assert torch.allclose(out3[:1], out1, rtol=1e-5, atol=1e-6), (out3[:1] - out1).abs().max()
 
 
 def test_budget_octets():

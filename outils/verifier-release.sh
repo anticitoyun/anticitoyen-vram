@@ -123,10 +123,15 @@ if [ -n "$AUR" ]; then
   printf '%s\n' "$PB" | grep -q "^sha256sums=('SKIP')" && faux "aur : sha256sums=('SKIP') non renseigné" || ok "aur : sha256sums renseigné"
 fi
 
-# ---- 6. RPM : nom seulement (rpm absent sur ce poste) ; sinon rpm -qip -------------------------------------------
+# ---- 6. RPM : nom seulement (rpm absent sur ce poste, ou release --simule) ; sinon rpm -qip ----------------------
+# Pièce 267c (CI GitHub, `rpm` présent sur le runner mais absent sur le poste de dev) : sous --simule (cette pièce
+# 259, aucune release réelle) les .rpm sont de faux octets, jamais construits par rpmbuild (contrairement au .deb
+# ci-dessus, bâti pour de vrai par dpkg-deb) — `rpm -qip` les rendait légitimement illisibles, uniquement là où
+# `rpm` se trouve installé. Un poste sans `rpm` masquait ce défaut par accident, jamais par conception.
 for r in "$RPM" "$SRPM"; do
   [ -n "$r" ] || continue
-  if command -v rpm >/dev/null; then rpm -qip "$r" >/dev/null 2>&1 && ok "rpm : $(basename "$r") lisible" || faux "rpm : $(basename "$r") illisible"
+  if [ -n "$SIMULE" ]; then saute "rpm : $(basename "$r") — release simulée, nom et taille seulement"
+  elif command -v rpm >/dev/null; then rpm -qip "$r" >/dev/null 2>&1 && ok "rpm : $(basename "$r") lisible" || faux "rpm : $(basename "$r") illisible"
   else saute "rpm : $(basename "$r") — rpm absent, nom et taille seulement"; fi
 done
 

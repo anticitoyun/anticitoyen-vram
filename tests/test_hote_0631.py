@@ -20,10 +20,19 @@ def _sous_processus(env_extra, code):
 
 
 def test_le_defaut_est_thp_omp8_sans_affinite():
+    # Pièce 267c (CI GitHub, runner à peu de cœurs) : l'ENV var posée par `hote.py` vaut
+    # bien "8" (une chaîne, quel que soit le matériel — c'est ce que le paquet DEMANDE),
+    # mais `torch.get_num_threads()` (le nombre de fils EFFECTIF) est capé par torch
+    # lui-même au nombre de processeurs réellement disponibles (`os.cpu_count()`, lu ici
+    # dans le MÊME sous-processus plutôt que supposé 8) dès que la machine en a moins —
+    # `hote_texte()` rapporte l'effectif par construction (docstring : « jamais les
+    # demandées »), donc `omp8` sur la ligne, capé, est le comportement voulu, pas un défaut.
     out = _sous_processus({}, "import acvram, os, torch; from acvram import hote; "
-                              "print(hote.hote_texte(), os.environ['THP_MEM_ALLOC_ENABLE'], os.environ['OMP_NUM_THREADS'], torch.get_num_threads())")
-    txt, thp, omp, nt = out.split()
-    assert txt == "hote=thp,omp8" and thp == "1" and omp == "8" and nt == "8", out
+                              "print(hote.hote_texte(), os.environ['THP_MEM_ALLOC_ENABLE'], "
+                              "os.environ['OMP_NUM_THREADS'], torch.get_num_threads(), os.cpu_count())")
+    txt, thp, omp, nt, nproc = out.split()
+    attendu = min(8, int(nproc))
+    assert txt == f"hote=thp,omp{attendu}" and thp == "1" and omp == "8" and int(nt) == attendu, (out, nproc)
 
 
 def test_acvram_cpus_pose_l_affinite_et_la_ligne_la_relit():
