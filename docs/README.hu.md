@@ -27,6 +27,7 @@ Egy OpenAI API-kompatibilis következtetési átjáró, amely a memóriát hiera
 
 - [A két alapötlet](#idees)
 - [Gyors kezdés](#demarrage)
+- [Telepítés](#installer)
 - [Mit mond az `acvram plan`](#plan)
 - [Gyorsítás](#optimisations)
 - [HTTP végpontok](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="nem_hasznalt")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Szia"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Telepítés
+
+Forrásból (minden platformon):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Vagy csomagból: minden [GitHub-kiadáshoz](https://github.com/anticitoyun/anticitoyen-vram/releases/latest) egy-egy fájl van csatolva:
+
+| Csatorna | A kiadáshoz csatolt fájl | Parancs |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (a neveket az `rpmbuild` állítja elő, nem rögzítettek) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (vagy `rpmbuild --rebuild *.src.rpm` a `.src.rpm` fájlból) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip csomagként nem érhető el (nem készül wheel): a `pip install -e '.[dev]'` egy forrásklónból telepít, akárcsak a `./install.sh`.
 
 ---
 

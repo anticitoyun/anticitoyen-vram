@@ -27,6 +27,7 @@ OpenAI API 互換の推論ゲートウェイ。メモリを階層として扱い
 
 - [二つの考え方](#idees)
 - [クイックスタート](#demarrage)
+- [インストール](#installer)
 - [`acvram plan` が示すこと](#plan)
 - [高速化](#optimisations)
 - [HTTP エンドポイント](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "こんにちは"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## インストール
+
+ソースから（全プラットフォーム共通）：
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+またはパッケージから。各 [GitHub リリース](https://github.com/anticitoyun/anticitoyen-vram/releases/latest) にファイルが一つずつ添付されています：
+
+| チャネル | リリースの添付ファイル | コマンド |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm`（ファイル名は `rpmbuild` が生成するため固定されません） | `sudo rpm -i acvram-<version>-1.*.noarch.rpm`（または `rpmbuild --rebuild *.src.rpm` で `.src.rpm` からビルド） |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip はパッケージとして公開されていません（ビルド済みの wheel はありません）。`pip install -e '.[dev]'` は `./install.sh` と同じく、ソースのクローンからインストールします。
 
 ---
 

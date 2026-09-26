@@ -27,6 +27,7 @@ OpenAI-API-yhteensopiva päättelyportti, joka kohtelee muistia hierarkiana, ant
 
 - [Kaksi ajatusta](#idees)
 - [Pika-aloitus](#demarrage)
+- [Asennus](#installer)
 - [Mitä `acvram plan` kertoo](#plan)
 - [Nopeuttaminen](#optimisations)
 - [HTTP-päätepisteet](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="ei_kaytossa")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Hei"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Asennus
+
+Lähdekoodista (kaikki alustat):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Tai pakettina, jolloin kukin tiedosto on liitetty jokaiseen [GitHub-julkaisuun](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Kanava | Julkaisuun liitetty tiedosto | Komento |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (nimet muodostaa `rpmbuild`, eivätkä ne ole kiinteitä) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (tai `rpmbuild --rebuild *.src.rpm` lähtien `.src.rpm`-tiedostosta) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip-pakettia ei julkaista (valmista wheel-pakettia ei rakenneta): `pip install -e '.[dev]'` asentaa lähdekoodin kloonista, samoin kuin `./install.sh`.
 
 ---
 

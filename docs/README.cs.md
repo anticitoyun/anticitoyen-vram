@@ -27,6 +27,7 @@ Brána pro inferenci kompatibilní s API OpenAI, která zachází s pamětí jak
 
 - [Dvě myšlenky](#idees)
 - [Rychlý start](#demarrage)
+- [Instalace](#installer)
 - [Co říká `acvram plan`](#plan)
 - [Zrychlení](#optimisations)
 - [HTTP koncové body](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="nepoužito")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Ahoj"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Instalace
+
+Ze zdrojového kódu (všechny platformy):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Nebo z balíčku – ke každému [vydání na GitHubu](https://github.com/anticitoyun/anticitoyen-vram/releases/latest) je přiložen jeden soubor:
+
+| Kanál | Soubor přiložený k vydání | Příkaz |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (názvy generuje `rpmbuild`, nejsou pevně dané) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (nebo `rpmbuild --rebuild *.src.rpm` ze souboru `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip není publikován jako balíček (nesestavuje se žádný wheel): `pip install -e '.[dev]'` instaluje z klonu zdrojového kódu, stejně jako `./install.sh`.
 
 ---
 

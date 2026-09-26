@@ -27,6 +27,7 @@ OpenAI API와 호환되는 추론 게이트웨이입니다. 메모리를 하나�
 
 - [두 가지 아이디어](#idees)
 - [빠른 시작](#demarrage)
+- [설치](#installer)
 - [`acvram plan`이 알려 주는 것](#plan)
 - [속도를 내는 법](#optimisations)
 - [HTTP 엔드포인트](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="미사용")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "안녕하세요"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## 설치
+
+소스에서 설치(모든 플랫폼):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+또는 패키지로 설치할 수 있으며, 각 [GitHub 릴리스](https://github.com/anticitoyun/anticitoyen-vram/releases/latest)에 파일이 하나씩 첨부되어 있습니다:
+
+| 채널 | 릴리스 첨부 파일 | 명령 |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (파일 이름은 `rpmbuild`가 생성하며 고정되어 있지 않음) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (또는 `rpmbuild --rebuild *.src.rpm`으로 `.src.rpm`에서 빌드) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip 패키지로는 배포하지 않습니다(빌드된 휠 없음). `pip install -e '.[dev]'`는 `./install.sh`와 마찬가지로 소스 클론에서 설치합니다.
 
 ---
 

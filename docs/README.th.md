@@ -27,6 +27,7 @@
 
 - [สองแนวคิด](#idees)
 - [เริ่มต้นอย่างรวดเร็ว](#demarrage)
+- [ติดตั้ง](#installer)
 - [สิ่งที่ `acvram plan` บอก](#plan)
 - [ทำให้เร็ว](#optimisations)
 - [จุดปลายทาง HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="ไม่ได้
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "สวัสดี"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## ติดตั้ง
+
+จากซอร์สโค้ด (ทุกแพลตฟอร์ม):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+หรือติดตั้งผ่านแพ็กเกจ ซึ่งมีไฟล์แนบมากับทุก [รีลีสบน GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| ช่องทาง | ไฟล์ที่แนบมากับรีลีส | คำสั่ง |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (ชื่อไฟล์สร้างโดย `rpmbuild` จึงไม่ตายตัว) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (หรือ `rpmbuild --rebuild *.src.rpm` จากไฟล์ `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip ไม่ได้เผยแพร่เป็นแพ็กเกจ (ไม่มีการสร้างไฟล์ wheel): `pip install -e '.[dev]'` จะติดตั้งจากซอร์สโค้ดที่โคลนมา เช่นเดียวกับ `./install.sh`
 
 ---
 

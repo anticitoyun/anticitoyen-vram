@@ -27,6 +27,7 @@ OpenAI API के साथ संगत एक इन्फ़रेंस ग�
 
 - [दो विचार](#idees)
 - [त्वरित शुरुआत](#demarrage)
+- [इंस्टॉल करें](#installer)
 - [`acvram plan` क्या बताता है](#plan)
 - [तेज़ी से चलना](#optimisations)
 - [HTTP एंडपॉइंट](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="अप्रयु
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "नमस्ते"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## इंस्टॉल करें
+
+सोर्स से (सभी प्लेटफ़ॉर्म पर):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+या पैकेज के ज़रिए, हर [GitHub release](https://github.com/anticitoyun/anticitoyen-vram/releases/latest) के साथ एक फ़ाइल संलग्न होती है:
+
+| चैनल | release के साथ संलग्न फ़ाइल | कमांड |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (नाम `rpmbuild` द्वारा बनाए जाते हैं, तय नहीं होते) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (या `rpmbuild --rebuild *.src.rpm`, जो `.src.rpm` से पैकेज बनाता है) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip पैकेज के रूप में प्रकाशित नहीं है (कोई wheel नहीं बनाया जाता): `pip install -e '.[dev]'` सोर्स के क्लोन से इंस्टॉल करता है, ठीक `./install.sh` की तरह।
 
 ---
 

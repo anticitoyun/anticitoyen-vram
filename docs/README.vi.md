@@ -27,6 +27,7 @@ Một cổng suy luận tương thích với API OpenAI, coi bộ nhớ như m�
 
 - [Hai ý tưởng](#idees)
 - [Bắt đầu nhanh](#demarrage)
+- [Cài đặt](#installer)
 - [`acvram plan` cho biết gì](#plan)
 - [Chạy nhanh](#optimisations)
 - [Các điểm cuối HTTP](#http)
@@ -105,6 +106,30 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="không dùng")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Xin chào"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Cài đặt
+
+Từ mã nguồn (mọi nền tảng):
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Hoặc qua gói cài đặt, mỗi gói là một tệp đính kèm trong từng [bản phát hành trên GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest):
+
+| Kênh | Tệp đính kèm trong bản phát hành | Lệnh |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (tên do `rpmbuild` tạo ra, không cố định) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (hoặc `rpmbuild --rebuild *.src.rpm` từ tệp `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpak` | `flatpak install acvram-<version>.flatpak` |
+
+Pip không được phát hành dưới dạng gói (không có bản wheel dựng sẵn): `pip install -e '.[dev]'` cài đặt từ một bản sao mã nguồn, giống như `./install.sh`.
 
 ---
 
