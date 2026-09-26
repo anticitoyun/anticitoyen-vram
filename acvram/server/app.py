@@ -981,7 +981,10 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         }
 
     @app.get("/metrics")
-    async def metrics() -> dict:
+    def metrics() -> dict:
+        # Pièce 268 : `def`, pas `async def` — FastAPI l'exécute dans son pool de fils ; en `async def`, son calcul
+        # (regime(), nvidia-smi) gelait la boucle HTTP : 343 ms par appel, TTFT à 12 de 0,242 à 0,785 s sous un
+        # lecteur à 20 Hz (262). Et regime() une seule fois par appel (il y était appelé sept fois).
         # `version` sert a la console, qui l'affiche en tete : sans elle on ne
         # sait pas quelle version repond, et deux versions ont deja coexiste
         # sur cette machine (paquet 0.5.0, venv 0.2.0).
@@ -993,6 +996,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         # planifiee (slots x contexte) : sans lui, un compteur > 0 ne dit pas
         # si le budget est structurellement sous-dimensionne ou accidentel.
         kv_seqs = getattr(plan, "kv_planned_seqs", 0) or 0
+        r = engine.regime()
         return {"engine": engine.stats.to_dict(),
                 "kv_max_tokens": plan.kv_max_tokens,
                 "kv_planned_seqs": kv_seqs,
@@ -1003,14 +1007,14 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 # RÉELLEMENT servie et somme celles qu'il voit lui-même —
                 # 18/09, acvram [0,1] contre llama.cpp [0], énergie faussée
                 # par le repos de la carte inutilisée.
-                "cartes": engine.regime()["cartes"],
-                "repli_eager": engine.regime().get("repli_eager", 0),
-                "replis_eager_raisons": engine.regime().get("replis_eager_raisons", []),
+                "cartes": r["cartes"],
+                "repli_eager": r.get("repli_eager", 0),
+                "replis_eager_raisons": r.get("replis_eager_raisons", []),
                 # pièce 90 : le nombre de clés de graphe refusées et leur raison
                 # principale, structurés — pas seulement noyés dans regime_ligne
-                "graphes": engine.regime().get("graphes"),
-                "graphes_refus_n": engine.regime().get("graphes_refus_n", 0),
-                "graphes_refus_principale": engine.regime().get("graphes_refus_principale"),
+                "graphes": r.get("graphes"),
+                "graphes_refus_n": r.get("graphes_refus_n", 0),
+                "graphes_refus_principale": r.get("graphes_refus_principale"),
                 "energie": _energie_par_jeton(),
                 # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
                 # octet pour octet, que le "[regime]" ecrit dans le JSON
@@ -1024,7 +1028,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "int8_chemins": _chemins_int8(),
                 # pièce 49 : régime spéculatif visible dans /metrics (même source que
                 # regime_ligne — mode + état garde + gain moyen glissant)
-                "speculation": engine.regime().get("speculation"),
+                "speculation": r.get("speculation"),
                 "version": __version__, **app.state.info}
 
     @app.get("/v1/models")

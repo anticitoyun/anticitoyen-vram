@@ -796,9 +796,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         etats_piles: set[str] = set()
         raisons_piles: set[str] = set()
         experts_total = experts_exiles = 0
-        for m in self.model.modules():
-            if not isinstance(m, MoEBlock):
-                continue
+        # Pièce 268 : UN parcours de l'arbre des modules (il en faisait quatre, ~20 000 modules sur un MoE de 48 couches ×
+        # 128 experts, et /metrics appelait regime() sept fois : 343 ms dans la boucle HTTP, 262). Pas de cache entre
+        # appels : `streamed` change en service (`_promote_expert`), l'état rendu doit rester vivant.
+        blocs = [m for m in self.model.modules() if isinstance(m, MoEBlock)]
+        for m in blocs:
             etats_piles.add(m._stack_state)
             if m._stack_state == "non" and getattr(m, "_raison_repli", ""):
                 raisons_piles.add(m._raison_repli)
@@ -827,11 +829,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # chemin mort. La ligne porte désormais le chemin ATTEINT, compté par
         # `MoEBlock._chemin` (REGLES § 7 : noyau atteint, pas fonction appelée).
         chemin_moe += "(" + chemin_moe_atteint(
-            [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
+            [m.__dict__.get("chemins", {}) for m in blocs]) + ")"
         # Piece 127 (poste6) : variable de regime posee mais sans effet (disposition unique) ->
         # la ligne le dit, au lieu de laisser croire qu'elle a agi.
         inertes_moe = sorted(set().union(
-            *(m.__dict__.get("_inertes", set()) for m in self.model.modules() if isinstance(m, MoEBlock))))
+            *(m.__dict__.get("_inertes", set()) for m in blocs)))
         if inertes_moe:
             chemin_moe += "+" + "+".join(inertes_moe)
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
@@ -840,7 +842,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # (`MoEBlock._tensor_refus`), le témoin GEMV (=0) et le témoin de glue A4 (non reproductible).
         if os.environ.get("ACVRAM_MOE_TENSOR", "1") == "1":
             refus = sorted({(m.__dict__["_tensor_refus"] if "_tensor_refus" in m.__dict__ else m._raison_tensor()) or ""
-                            for m in self.model.modules() if isinstance(m, MoEBlock)} - {""})
+                            for m in blocs} - {""})
             from .moe import _MOE_TENSOR_MIN_T
             chemin_moe += f"+tensor(b≥{_MOE_TENSOR_MIN_T}" + ("" if not refus else ",repli:" + " ; ".join(refus)) + ")"
             if os.environ.get("ACVRAM_AWQ_TENSOR", "0") == "1":
