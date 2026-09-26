@@ -100,8 +100,11 @@ def _verifier_231(code: str, t: str, src: str) -> None:
     assert f"README.{code}.md" not in barre[0].split("**")[1] if barre[0].count("**") >= 2 else True
     i_barre = next(i for i, l in enumerate(lignes) if l == barre[0])
     if code in RTL:
-        apres = [l for l in lignes[i_barre + 1:i_barre + 5] if l.strip()]
-        assert apres and apres[0] == '<div dir="rtl">', f"{code} : le corps doit s'ouvrir par <div dir=\"rtl\"> juste après la barre de langues"
+        # animematrix (docs/readme/README.ar.md) : la barre reste dans son <div align="center"> LTR, fermé d'abord ;
+        # le corps s'ouvre ensuite, et seulement ensuite, par <div dir="rtl">
+        apres = [l for l in lignes[i_barre + 1:i_barre + 6] if l.strip()]
+        assert len(apres) >= 2 and apres[0] == "</div>" and apres[1] == '<div dir="rtl">', \
+            f"{code} : après la barre de langues (LTR, fermée par </div>), le corps doit s'ouvrir par <div dir=\"rtl\">"
         fin = [l for l in lignes if l.strip()][-1]
         assert fin == "</div>", f"{code} : <div dir=\"rtl\"> non fermé à la dernière ligne"
         assert t.count('<div dir="rtl">') == 1, f"{code} : une seule balise RTL, autour du corps entier"
