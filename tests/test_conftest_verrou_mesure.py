@@ -4,6 +4,7 @@ ont tourné pendant une fenêtre HTTP mesurée sans qu'aucun ne le voie, parce
 que `_gpu_demande` ne regarde rien sans `CUDA_VISIBLE_DEVICES` (le défaut
 de session, vide). Cette garde-ci lit `$VERROU.qui` sans condition."""
 import os
+import subprocess
 import time
 
 import pytest
@@ -65,6 +66,30 @@ def test_acvram_tests_pendant_mesure_sous_prise_est_accepte(tmp_path, monkeypatc
     monkeypatch.setenv("ACVRAM_TESTS_SANS_VERROU", "1")   # ne pas prendre le vrai flock ensuite
     monkeypatch.setenv("ACVRAM_TESTS_SOUS_CHARGE", "1")   # ne pas dépendre de la charge réelle ici
     conftest.pytest_configure(None)   # ne lève pas
+
+
+def test_acvram_carte_tenue_sur_un_autre_pid_vivant_est_refuse(tmp_path, monkeypatch):
+    """Pièce 246 (chef, réserve du 26/09) : sans ce test, rien ne prouve que
+    `_verrou_tenu_en_mesure` LIT `ACVRAM_CARTE_TENUE` plutôt que d'accepter
+    tout pid vivant par ascendance — `sous_prise_est_accepte` posait le pid
+    du process pytest lui-même, donc "mien" aurait pu venir d'ailleurs. Un
+    pid vivant réel, mais qui n'est PAS le nôtre : doit rester refusé."""
+    autre = subprocess.Popen(["sleep", "5"])
+    try:
+        _ecrire_verrou(tmp_path, pid=autre.pid)
+        monkeypatch.setenv("ACVRAM_VERROU_GLOB", str(tmp_path / "acvram-carte-*.lock"))
+        monkeypatch.setenv("ACVRAM_CARTE_TENUE", str(os.getpid()))   # notre pid, pas celui du verrou
+        tenue = conftest._verrou_tenu_en_mesure()
+        assert tenue is not None
+        assert tenue[1] == autre.pid
+        monkeypatch.setenv("ACVRAM_TESTS_PENDANT_MESURE", "1")
+        monkeypatch.setenv("ACVRAM_TESTS_SANS_VERROU", "1")
+        monkeypatch.setenv("ACVRAM_TESTS_SOUS_CHARGE", "1")
+        with pytest.raises(pytest.UsageError, match="TYPE=mesure"):
+            conftest.pytest_configure(None)
+    finally:
+        autre.terminate()
+        autre.wait()
 
 
 def test_type_etat_n_invalide_pas(tmp_path, monkeypatch):
