@@ -9,6 +9,13 @@
   Aide : `acvram serve --help`. `revue/poste5-piece260-{scelle,banc,moteur}-26-09.md` ; tests `tests/test_i8c_copie_260.py`.
   Écartés en chemin (255) : le FP8 natif W8A8 (`_scaled_mm`, CUTLASS sm_120) — plus lent au décodage, et deux fois plus
   d'erreur que l'int8 W8A8 au préfill.
+* **26/09/2026 — pièce 260x (poste5, décision chef) : copie signée du chemin cublas par un xor, AU DÉFAUT
+  (`ACVRAM_I8C_COPIE=xor` ; `int16` = témoin).** q − 128 (uint8 à zéro 128 → int8) en un noyau au lieu de l'aller-retour int16 ;
+  la copie est transitoire depuis la 201, donc payée à chaque appel cublas. Copie xor au bit, gain mesuré −1,98 ms (L=512) et
+  −2,62 ms (L=2047) sur le TTFT b=1 du Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c (ABBA ×4, médianes B toutes sous A), sous le seuil
+  annoncé de 2,5 ms à L=512 : non revendiqué. Prédiction (−3,5 à −5,5 ms) fausse. Contrôles : L=78 −0,6 %, banc chat b=8
+  +0,20 %. `revue/poste5-piece260x-{scelle,verdict}-26-09.md` ; test cassant `tests/test_i8c_copie_260x.py` (une seule opération
+  aten `bitwise_xor` au défaut ; l'ancienne copie le rend rouge).
 * **26/09/2026 — pièce 232 b (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut pour la 0.7.0 — la 209 est À LA
   DEMANDE.** Deux protocoles, deux résultats sur le même Qwen3-Coder-30B-A3B-nvfp4 pur à b=8 : la 226 (banc chat 102, invites réelles,
   salve unique de 20 s, 5 + 5) donnait 1 = **+12,8 % / −18,4 % J** ; la 229 (poste3, `banc-llamacpp-16-09.py`, invites réelles, lots
