@@ -1,6 +1,7 @@
 """Pièce 259 : `outils/verifier-release.sh` sur une release SIMULÉE (dossier de faux fichiers, jamais gh, jamais /tmp,
 jamais l'installation Flatpak) — le script rend TENU quand tout est là et lisible, et FAUX (fichier MANQUE, PKGBUILD
 non renseigné) quand il manque quelque chose. Casse si un nom attendu change dans release.yml sans que le script suive."""
+import hashlib
 import os
 import pathlib
 import subprocess
@@ -14,7 +15,7 @@ SCRIPT = RACINE / "outils" / "verifier-release.sh"
 V = "0.7.0"
 
 
-def _release_simulee(dossier: pathlib.Path, *, sans_rpm: bool = False, pkgbuild_skip: bool = False) -> None:
+def _release_simulee(dossier: pathlib.Path, *, sans_rpm: bool = False, pkgbuild_skip: bool = False, sommes: bool = True) -> None:
     dossier.mkdir(parents=True)
     # .deb réel (dpkg-deb -b d'une arborescence minimale) : --info et --contents doivent le lire
     racine = dossier / "deb-src"; (racine / "DEBIAN").mkdir(parents=True); (racine / "usr" / "bin").mkdir(parents=True)
@@ -36,6 +37,11 @@ def _release_simulee(dossier: pathlib.Path, *, sans_rpm: bool = False, pkgbuild_
     (dossier / f"acvram-{V}.flatpak").write_bytes(b"flatpak simule")
     with zipfile.ZipFile(dossier / f"translations-{V}.zip", "w") as z:
         z.writestr("fr.json", "{}"); z.writestr("en.json", "{}")
+    if sommes:                                     # 259 b : SHA256SUMS comme le job `sommes` (sha256sum -- *)
+        lignes = []
+        for f in sorted(p for p in dossier.iterdir() if p.is_file()):
+            lignes.append(f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.name}")
+        (dossier / "SHA256SUMS").write_text("\n".join(lignes) + "\n", encoding="utf-8")
 
 
 def _lancer(dossier: pathlib.Path) -> subprocess.CompletedProcess:
@@ -58,9 +64,26 @@ def test_release_complete_est_tenue(hors_tmp):
     r = _lancer(hors_tmp / "complete")
     assert r.returncode == 0 and "VERDICT: TENU" in r.stdout, r.stdout + r.stderr
     for attendu in ("deb : Package acvram", f"deb : Version {V}", "deb : usr/bin/acvram présent", f"aur : pkgver={V}",
-                    "aur : sha256sums renseigné", "translations : 2 fichiers", "flatpak : acvram-0.7.0.flatpak"):
+                    "aur : sha256sums renseigné", "translations : 2 fichiers", "flatpak : acvram-0.7.0.flatpak",
+                    "sha256 : SHA256SUMS vérifié"):
         assert attendu in r.stdout, attendu
-    assert "MANQUE" not in r.stdout and "FAUX " not in r.stdout
+    assert "MANQUE" not in r.stdout and "FAUX " not in r.stdout and "SAUTÉ   sha256" not in r.stdout
+
+
+@pytest.mark.skipif(subprocess.run(["which", "dpkg-deb"], capture_output=True).returncode != 0, reason="dpkg-deb requis")
+def test_une_somme_fausse_est_vue(hors_tmp):
+    """Témoin 259 b : un fichier modifié après la publication de SHA256SUMS rend FAUX."""
+    _release_simulee(hors_tmp / "altere")
+    (hors_tmp / "altere" / f"aur-{V}.tar.gz").write_bytes(b"archive remplacee")
+    r = _lancer(hors_tmp / "altere")
+    assert r.returncode == 1 and "FAUX    sha256 : SHA256SUMS ne correspond pas" in r.stdout, r.stdout
+
+
+@pytest.mark.skipif(subprocess.run(["which", "dpkg-deb"], capture_output=True).returncode != 0, reason="dpkg-deb requis")
+def test_sans_sommes_publiees_le_script_le_dit(hors_tmp):
+    _release_simulee(hors_tmp / "sans-sommes", sommes=False)
+    r = _lancer(hors_tmp / "sans-sommes")
+    assert r.returncode == 0 and "SAUTÉ   sha256 : aucune somme publiée" in r.stdout
 
 
 @pytest.mark.skipif(subprocess.run(["which", "dpkg-deb"], capture_output=True).returncode != 0, reason="dpkg-deb requis")

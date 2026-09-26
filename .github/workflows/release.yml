@@ -182,3 +182,20 @@ jobs:
           V="${TAG#v}"
           zip -q "translations-$V.zip" packaging/langues/*.json docs/TRADUIRE.md
           gh release upload "$TAG" "translations-$V.zip" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Pièce 259 b (poste6) : les sommes des fichiers joints, écrites APRÈS tous les jobs qui joignent — un seul
+  # fichier SHA256SUMS (format `sha256sum`, vérifiable par `sha256sum -c`), lu par outils/verifier-release.sh.
+  # `!cancelled()` : si un job a échoué, les sommes des fichiers présents sont quand même publiées ; le fichier
+  # manquant apparaît alors comme MANQUE dans verifier-release.sh, pas comme une somme absente.
+  # tests/test_release_sommes_259b.py : tout job qui joint un fichier est dans `needs` de ce job.
+  sommes:
+    needs: [deb, rpm, aur, flatpak, translations]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: SHA256SUMS de tout ce que la release joint
+        run: |
+          mkdir joints && gh release download "$TAG" --dir joints --repo "$GITHUB_REPOSITORY"
+          cd joints && rm -f SHA256SUMS
+          sha256sum -- * > ../SHA256SUMS && cat ../SHA256SUMS
+          gh release upload "$TAG" ../SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
