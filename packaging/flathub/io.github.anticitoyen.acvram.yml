@@ -1,6 +1,6 @@
 # Manifeste Flathub d'acvram (console native acvram-gui + lanceur acvram-console) — pièce 236, 26/09/2026.
 # Construit SANS réseau : toutes les roues Python sont des sources `file` (python3-modules.json généré par
-# flatpak-pip-generator dans le SDK ; torch-cu130.json = roues PyTorch cu130 et bibliothèques NVIDIA, voir README.md).
+# sources-pypi.py, roues binaires seulement — 266 d ; torch-cu130.json = roues PyTorch cu130 et bibliothèques NVIDIA, voir README.md).
 # CUDA : le pilote vient de l'extension org.freedesktop.Platform.GL.nvidia-<version> (posée par flatpak d'après le pilote
 # de l'hôte) ; les bibliothèques CUDA côté application (cudart, cublas, cusparse, cufft, curand, nvrtc, nvjitlink) sont
 # celles des roues nvidia-* de PyTorch, sous /app/lib/python3.12/site-packages/nvidia. Les noyaux d'acvram ne se
