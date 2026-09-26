@@ -656,3 +656,55 @@ du FP8 natif Blackwell.
 GitHub (issues réelles : CUTLASS MoE backend unavailable SM_120, Blackwell SM120 FP8 MoE fails GLM-4.7,
 SM89 tactics fail SM120 pure FP8 MoE, SGLang 0.5.3 ne peut pas lancer FP8 sur RTX 5090, feature request
 FP8 blockwise SM120), nvidia.com (SGLang Release 26.02 notes).
+
+---
+
+## Q18 — préfill GDN groupé par cu_seqlens (FLA) : au bit en fp32 (8/8), pas en bf16 (0/7) — normal ?
+
+**3 avis convergents (Luna, gpt-oss, Gemma 4)** : NON, l'égalité au bit en bf16 entre un appel groupé
+(cu_seqlens) et des appels séparés par séquence n'est PAS un contrat raisonnable — seul le fp32 s'en
+approche, et encore sous réserve (voir plus bas).
+
+**Ce que garantit réellement `chunk_gated_delta_rule` de FLA** : les bornes de chunk sont bien relatives à
+chaque séquence, pas à l'offset aplati du batch — `fla/ops/utils/index.py::prepare_chunk_indices()` calcule
+`chunk_counts` par séquence puis `_segmented_arange()` donne `(seg_id, intra_chunk_idx)` : une séquence qui
+commence au jeton aplati 37 a bien son 1er chunk en `chunk_id=0`, jamais `37 % chunk_size`. La segmentation
+mathématique est donc un choix délibéré, pas un accident de la mise à plat (Luna, code cité).
+
+**D'où vient la dérive bf16 quand même** :
+- bf16 n'est pas associatif : tout changement d'ordre des réductions change l'arrondi.
+- Triton autotune/sélection de bloc dépend de la FORME groupée (taille de batch, num_warps, config) —
+  un appel séparé et un appel groupé peuvent ne pas utiliser la même config compilée, même sur la même
+  séquence. FLA issue #734 documente des soucis d'autotune (`chunk_local_cumsum_scalar_kernel`) liés à la
+  forme, spécifiques à H100.
+- Les GEMM de reconstruction tournent sur tensor cores (TF32/bf16) et RÉASSOCIENT la récurrence — cause
+  citée explicitement par SGLang (RFC #28511, GDN/KDA) : « not bit-exact in floating point … reassociates
+  the recurrence ».
+- Même le fp32 n'est pas automatiquement garanti au bit : seulement plus plausible, à condition que
+  l'ordonnancement complet des noyaux et l'ordre de réduction soient tenus identiques.
+
+**Comment vLLM et SGLang qualifient ce chemin** : aucun des deux ne revendique le bit-exact.
+- **SGLang RFC #28511** donne des tolérances numériques explicites, alignées sur le noyau vLLM amont :
+  **fp32 atol 1e-4, bf16 atol 2e-2**.
+- **SGLang-JAX issue #1416** (préfill GDN) : « numerical parity is the hard part » — référence fp32 =
+  `ragged_gated_delta_rule_ref` (JAX pur), vérification VALEUR PAR VALEUR (pas seulement la forme), critère
+  = tolérance + métriques modèle (GPQA-Diamond, MMLU-Pro) préservées, jamais un chiffre isolé.
+- **vLLM** : `tests/ops/test_gated_delta.py` compare le noyau FLA à une référence PyTorch avec
+  `torch.testing.assert_close` (tolérance, pas égalité). vLLM issue « GDN_ATTN does not support
+  batch-invariant mode » traite le déterminisme solo/batché comme un TRAVAIL FUTUR, pas une propriété
+  acquise — cohérent avec un modèle de correction par tolérance, pas par garantie bit à bit.
+- FlashInfer issue #3329 : hang CUDA-graph shape-dépendant sur le préfill GDN groupé, contourné par le
+  backend Triton/FLA — un problème de robustesse, pas une question de bit-exactness.
+
+**Pour notre cas (8/8 fp32, 0/7 bf16)** : cohérent avec l'attendu de la littérature — le résultat fp32
+tenu au bit n'est probablement pas un hasard (moins de tensor cores impliqués, ordre plus stable), mais
+n'est pas non plus une garantie contractuelle de FLA ; le résultat bf16 non tenu au bit ne signale PAS en
+soi un bogue. Protocole recommandé pour 245 : comparer groupé/dégroupé en fp32 avec atol/rtol explicites
+(inspirés SGLang : fp32 1e-4, bf16 2e-2) plutôt qu'une égalité au bit en bf16 ; sur le service, préférer un
+critère KL/logits plutôt qu'une comparaison d'octets.
+
+**Sources** : GitHub (fla/ops/utils/index.py, fla/ops/gated_delta_rule/chunk.py ; FLA issue #734 autotune
+H100 ; FLA issue #640 GDN precision triton3.5/H20 ; vLLM issue GDN_ATTN batch-invariant ; vLLM
+`vllm.model_executor.layers.fla.ops.chunk` ; vLLM/FlashInfer issue #3329 hang préfill groupé ; SGLang RFC
+#28511 précision GDN/KDA ; SGLang-JAX issue #1416 préfill GDN ; SGLang issue Qwen3.5 multi-item scoring),
+vllm.ai (doc API varlen GDN).
