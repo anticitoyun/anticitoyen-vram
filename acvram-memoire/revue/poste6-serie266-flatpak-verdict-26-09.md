@@ -90,3 +90,29 @@ rejeu TENU) ; (d) non : les noyaux ne retombent pas sur la référence. Ce que c
 
 Fichiers : `~/.cache/acvram/releases/v0.7.0/{verif-070.log,flatpak-install.log,flatpak-doctor.txt,liste-release.txt}`,
 `scratchpad/poste6-p070-26-09/{prise-verif-070.sh,prise-p2-noyaux.sh}`.
+
+## 5. verif-071 et verif-072 (26/09, 14 h) — deux releases publiées à vingt minutes d'écart
+
+Runs 36238780414 (v0.7.1, flatpak fini 11:43:37Z) et 36239670393 (v0.7.2, 12:03:59Z), tous deux verts. **Version
+servie** : `gh-pages` 6fe7d2de2 « flatpak : dépôt v0.7.2 », ref `app/…/master` = 2a2036cca2413f16 dans git ET par Pages,
+summary Pages = summary git (sha a94d37f07c03, 9 222 o) — aucune relance nécessaire, l'ordre était le bon. Piège :
+`flatpak remote-ls/remote-info` dans l'installation dédiée montrait encore le commit 25027dac (11:02, la 0.7.0) — cache
+local du summary, pas Pages ; remote retirée avant les prises. Ce hasard d'ordre est ce que la 266 l (fusionnée) rend
+impossible : job `flatpak` sérialisé, dépôt amorcé depuis l'existant, ref qui ne recule pas, gh-pages en un commit orphelin.
+
+**verif-072 TENU, P1 et P2** (vérificateur d1435212e, 14:09 → 14:11) : 7 fichiers, SHA256SUMS vérifié, deb 274 entrées,
+aur pkgver 0.7.2, translations 34, `.flatpakref` GPGKey, install par Pages : **0.7.2, 38 paquets extra-data** ; sous
+carte.sh, `acvram doctor` dans le bac à sable **sort 0** (070 b), `noyaux CUDA fusionnes compiles pour sm_120`, noyaux
+processeur AVX2+FMA, **`ok    vision (transformers, PIL)`** (273 : l'extra est embarqué, 44 roues cp314), seule alerte :
+pas de droit sudo sur nvidia-smi dans le bac à sable (attendu, éco à l'horloge libre). rpm SAUTÉ (outil absent).
+
+**verif-071 TENU, fichiers et sommes seulement** (`--sans-flatpak`, décision chef) : 7 fichiers, SHA256SUMS vérifié, deb
+274 entrées, aur pkgver 0.7.1, translations 34. Le bras Flatpak n'a pas été joué : **un `.flatpakref` ancien mène à la
+dernière version publiée** — le dépôt n'a qu'un ref, `master`, et `acvram-0.7.1.flatpakref` installe la 0.7.2. C'est le
+comportement voulu d'un canal Flatpak (une ligne à ajouter à la section Installer à la prochaine vague) ; le Flatpak
+0.7.1 tel que construit (doctor 1, 070 b) n'est plus observable, seuls le .deb et pip de la 0.7.1 gardent ce code 1.
+Une première prise 071 avec le bras Flatpak avait démarré (2,8 Go tirés) : arrêtée par les PID de ma propre chaîne
+(prise → vérificateur → `flatpak install`, lignes de commande et parents relus), installation partielle effacée.
+
+Fichiers : `~/.cache/acvram/releases/v0.7.2/{verif-072.log,flatpak-doctor.txt}`, `~/.cache/acvram/releases/v0.7.1/verif-071-sans-flatpak.log`,
+`scratchpad/poste6-p07{1,2}-26-09/`.
