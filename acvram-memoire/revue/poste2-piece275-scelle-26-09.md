@@ -65,3 +65,20 @@ tâche (signe d'un crash partiel côté serveur, comme le `400 max_model_len` d�
 `ACVRAM_NOM` posé. 3 modèles × 2 mesures = 6 prises pour les références seules.
 
 Écrit et poussé AVANT toute génération de référence.
+
+## Addendum (chef, avant la relance de la référence mixte-i8c) — prédiction
+
+Prédiction avant mesure (PPL et panel du modèle `Qwen3.8-27B-unsloth-mixte-i8c`, bras par
+défaut 0.7.4) :
+* **PPL** : entre 6 et 9 (même corpus `wiki-gptq.txt`, cadrage 256/2048/2048) — dans la bande
+  déjà vue sur des mixtes/denses comparables de ce dépôt (Coder-30B mesuré à 9,2721 ; un mixte
+  i8c avec attention en int8 devrait rester proche, ni beaucoup plus haut ni beaucoup plus bas).
+* **Panel** : gsm8k et les tâches MMLU au-dessus du hasard sur les 4 (comme le Coder :
+  gsm8k 0,92, mmlu 0,43-0,93) — aucune raison structurelle pour ce modèle de tomber au
+  plancher (i8c est un format de service déjà qualifié ailleurs dans le dépôt).
+* **Falsificateur** : PPL hors [4, 15] ou une tâche du panel à 0 questions valides (signe
+  d'un problème de gabarit de conversation ou de contexte, comme déjà rencontré deux fois en
+  261b/275 sur ce protocole).
+
+Relancée avec `ACVRAM_ATTENTE` long (file derrière `poste5-p277dep`, la publication GitHub de
+chef, et les prises 284 d'poste1).
