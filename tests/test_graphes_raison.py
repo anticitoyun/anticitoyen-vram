@@ -45,6 +45,18 @@ def test_raison_posee_sans_gpu(monkeypatch):
     assert not gr.enabled and gr.raison
 
 
+def test_construction_sans_cuda_ne_leve_pas_267(monkeypatch):
+    """Pièce 267 (CI GitHub, roue torch CPU) : `self.evenement_jetons = torch.cuda.Event()`
+    sans garde, à la construction, levait `RuntimeError: Tried to instantiate dummy base
+    class Event` pour TOUT `GraphRunner` — même un moteur qui ne capturera jamais rien —
+    dès que torch n'a pas d'extension CUDA (Event y est une classe factice). `is_available`
+    simulé plutôt que dépendre de la machine qui joue le test (sur une carte réelle,
+    `torch.cuda.Event()` réussit même simulé à False : le témoin utile est la CI CPU)."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    gr = GraphRunner(_FauxModele(), 2048)
+    assert gr.evenement_jetons is None
+
+
 def test_la_raison_survit_a_l_initialisation(monkeypatch):
     """Épreuve du piège réel : `raison` posée après `_eligible` l'effaçait, et
     tous les cas nommés ressortaient en « raison non nommée »."""
