@@ -10,8 +10,18 @@ RACINE = pathlib.Path(__file__).resolve().parents[1]
 RELEASE = RACINE / ".github" / "workflows" / "release.yml"
 
 
+def _jobs(texte: str | None = None) -> dict:
+    return yaml.safe_load((texte or RELEASE.read_text(encoding="utf-8")))["jobs"]
+
+
 def _flatpak(texte: str | None = None) -> dict:
-    return yaml.safe_load((texte or RELEASE.read_text(encoding="utf-8")))["jobs"]["flatpak"]
+    return _jobs(texte)["flatpak"]
+
+
+def jobs_qui_lisent_packaging_flathub(jobs: dict) -> list[str]:
+    """266 f : tout job dont une étape `run` lit packaging/flathub/ (PYTHON_RUNTIME, sources-*.py, manifeste)."""
+    return [nom for nom, j in jobs.items()
+            if any("packaging/flathub" in s.get("run", "") and "git checkout" not in s.get("run", "") for s in j.get("steps", []))]
 
 
 def outillage_depuis_la_ref_du_workflow(job: dict) -> bool:
@@ -48,3 +58,20 @@ def test_le_test_sait_dire_faux():
     assert not outillage_depuis_la_ref_du_workflow(sans), "sans l'extraction depuis github.sha, la garde doit être rouge"
     peu_profond = {"steps": [dict(s, **{"with": {"ref": "${{ env.TAG }}"}}) if "checkout" in str(s.get("uses", "")) else s for s in job["steps"]]}
     assert not outillage_depuis_la_ref_du_workflow(peu_profond), "sans fetch-depth 0, github.sha n'est pas extractible : rouge"
+
+
+def test_tout_job_qui_lit_packaging_flathub_le_prend_de_la_ref_du_workflow():
+    """266 f : noyaux-precompiles lisait PYTHON_RUNTIME au tag v0.7.0, où il n'existe pas (run 36227010415) — la même
+    extraction que le job flatpak (266 b) s'impose à tout job qui lit ce dossier d'outillage."""
+    jobs = _jobs()
+    lecteurs = jobs_qui_lisent_packaging_flathub(jobs)
+    assert set(lecteurs) >= {"flatpak", "noyaux-precompiles"}, lecteurs      # gabarit : les deux lecteurs d'aujourd'hui
+    fautifs = [n for n in lecteurs if not outillage_depuis_la_ref_du_workflow(jobs[n])]
+    assert not fautifs, f"jobs qui lisent packaging/flathub sans l'extraire de github.sha : {fautifs}"
+
+
+def test_le_temoin_266f():
+    jobs = _jobs()
+    sans = {"steps": [s for s in jobs["noyaux-precompiles"]["steps"] if "github.sha" not in s.get("run", "")]}
+    assert "noyaux-precompiles" in jobs_qui_lisent_packaging_flathub(jobs)
+    assert not outillage_depuis_la_ref_du_workflow(sans), "le job noyaux de la v0.7.0 relancée (sans extraction) doit être rouge"
