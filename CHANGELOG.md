@@ -26,6 +26,20 @@
   Aide : `acvram serve --help`. `revue/poste5-piece260-{scelle,banc,moteur}-26-09.md` ; tests `tests/test_i8c_copie_260.py`.
   Écartés en chemin (255) : le FP8 natif W8A8 (`_scaled_mm`, CUTLASS sm_120) — plus lent au décodage, et deux fois plus
   d'erreur que l'int8 W8A8 au préfill.
+* **26/09/2026 — Paquets (poste6, 259/266 a-j, décision chef) : le Flatpak se livre par un dépôt OSTree signé sur
+  `gh-pages/flatpak` et un `.flatpakref` joint à la release, torch et sa fermeture CUDA en extra-data.** Un bundle seul ne
+  peut pas porter d'extra-data (« Extra data missing in detached metadata ») et GitHub plafonne un fichier de release à
+  2 Gio : le job `flatpak` de `release.yml` construit hors ligne (roues épinglées par `packaging/flathub/sources-pypi.py`
+  et `sources-torch.sh`, index PyTorch puis PyPI en repli si la somme diffère — `roue_url.py`), signe le commit
+  (`flatpak build-sign`, clé `FLATPAK_GPG_KEY`), publie `flatpak/` et `.nojekyll` seuls sur `gh-pages` sous l'identité
+  du bot Actions (266 j, `-c user.name/user.email`, pas de `git config`), joint `acvram-<version>.flatpakref` (`GPGKey`)
+  et retire l'ancien bundle. Installation : `flatpak install --user <url du .flatpakref>` (32 README) ; `apply_extra`
+  dépaquette torch 2.14.0+cu130 (Python 3.14, ABI `cp314` dans l'empreinte des noyaux précompilés) dans
+  `/app/extra/site-packages`. Preuve locale sous carte.sh : import torch, CUDA, cuDNN, cuBLAS dans le bac à sable
+  (carnet `acvram-memoire/poste6.md`, 26/09 12 h). Vérification d'une release fichier par fichier : `outils/verifier-release.sh vX.Y.Z
+  [--flatpak-installer | --flatpak-doctor]` (259, SHA256SUMS 259b). Gardes : `tests/test_flathub_*`,
+  `tests/test_release_*`, `tests/test_verifier_release_259.py`.
+
 * **26/09/2026 — pièce 260x (poste5, décision chef) : copie signée du chemin cublas par un xor, AU DÉFAUT
   (`ACVRAM_I8C_COPIE=xor` ; `int16` = témoin).** q − 128 (uint8 à zéro 128 → int8) en un noyau au lieu de l'aller-retour int16 ;
   la copie est transitoire depuis la 201, donc payée à chaque appel cublas. Copie xor au bit, gain mesuré −1,98 ms (L=512) et
