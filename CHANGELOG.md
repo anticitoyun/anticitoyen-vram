@@ -2,6 +2,22 @@
 
 ## 0.7.4 (26/09/2026)
 
+### Correctif de sûreté
+
+* **26/09/2026 — pièce 283 (poste5 277a-bis puis 277fix, poste5-277 9fdea0a23 ; élargie sur ordre chef ; poste3) :
+  `--speculative ngram` n'est plus le défaut, pour AUCUN alias.** La 277a-bis avait d'abord trouvé un BOGUE DE
+  VÉRIFICATION sur le mixte-i8c (Qwen3.8, GDN, hybride) : sur 5 invites testées, 4 ont émis un jeton spéculatif que
+  le modèle place **13 à 24 logits sous son premier choix** (ε 5,42 à 13,54, écart de logit 13,1 à 24,1). **Cause
+  trouvée par poste5 : le pipeline de décodage n'était pas vidé au passage du décodage simple au spéculatif —
+  jetons répétés.** Ce mécanisme touche TOUT modèle servi avec ngram, dense compris — pas seulement les hybrides
+  où le symptôme avait d'abord été mesuré. **Portée : toutes les versions 0.7.x servies avec la spéculation par
+  défaut** (`ngram`, seul propositeur actif sans configuration explicite depuis leur sortie). **Défaut désormais
+  `none` pour TOUS les alias** ; `ngram` reste servable sur demande explicite (`--speculative ngram`) — le
+  correctif 277fix de poste5 est inclus, sa qualification reste en cours, avec un avertissement au démarrage qui
+  le dit. Tests cassants : `tests/test_speculation_hybride_283.py` (défaut none sur hybride ET non-hybride,
+  avertissement émis sur toute demande explicite de ngram, jamais sur le défaut ni sur `none` explicite).
+  `revue/poste5-piece277abis-verdict-26-09.md`.
+
 * **26/09/2026 — pièce 269 d (poste6, mesure 276, décision chef) : le guet d'admission est COUPÉ pour les alias
   vision ; inchangé en texte (défaut 1).** La 276 a mesuré le guet hors de son régime : en texte (Qwen3-Coder, b = 2/4/8,
   ABBA par point) aucun coût — mur et TTFT p50 B = A ± 1 ms, 14/14 tours à un pas chez B (A : 14, 11, 11), 0 tour de

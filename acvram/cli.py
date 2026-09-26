@@ -886,10 +886,23 @@ def cmd_serve(args: argparse.Namespace) -> int:
     tokenizer = load_tokenizer(args.model)
     speculator = None
     repli = None
+    # Pièce 283 (poste5 277a-bis puis 277fix, poste5-277 9fdea0a23 ; élargie, ordre chef) :
+    # ngram (défaut jusqu'ici) émettait des jetons hors de la distribution du modèle (277a-bis,
+    # hybride GDN : 13 à 24 logits sous le premier choix, 4/5 invites) — cause trouvée par
+    # poste5 : le pipeline n'était pas vidé au passage du décodage simple au spéculatif,
+    # jetons répétés. Le bogue touche TOUT modèle servi avec ngram, dense compris — pas
+    # seulement les hybrides. Défaut = none pour TOUS les alias ; ngram reste servable sur
+    # demande explicite (le correctif 277fix est inclus, qualification encore en cours).
+    demande_explicitement = args.speculative is not None
+    if args.speculative is None:
+        args.speculative = "none"
     if args.speculative == "auto":
         # La tete du modele si elle existe, le n-gramme sinon — repli NOMMÉ (pièce 105 : les têtes MTP de
         # Qwen3.8 étaient converties mais jamais chargées, et rien ne le disait).
         args.speculative, repli = repli_speculatif(loaded.model)
+    if demande_explicitement and args.speculative == "ngram":
+        print(red("  AVERTISSEMENT : --speculative ngram demandé explicitement — pièce 277 (poste5) : "
+                  "correctif 277fix inclus, qualification en cours."))
     if args.speculative == "ngram":
         from .engine.speculative import NGramProposer
         speculator = NGramProposer()
@@ -1329,8 +1342,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="calcule en float16 au lieu de bfloat16")
     sv.add_argument("--log-level", default="info")
     sv.add_argument("--speculative", choices=["none", "ngram", "draft", "mtp", "auto"],
-                    default="ngram",
-                    help="ngram ne coute rien et paie quand la sortie recopie "
+                    default=None,   # 283 : résolu après chargement (None = pas demandé) -- toujours "none"
+                    help="defaut : none, pour TOUT alias -- pièce 277a-bis/277fix (poste5) : le "
+                         "pipeline n'etait pas vide au passage du decodage simple au speculatif "
+                         "(ngram), jetons repetes ; touche tout modele servi avec ngram, dense "
+                         "compris (277a-bis : hybride GDN, jetons 13 a 24 logits sous le premier "
+                         "choix, 4/5 invites). Demander ngram explicitement reste possible (le "
+                         "correctif 277fix est inclus, qualification en cours), avec un "
+                         "avertissement au demarrage. "
+                         "ngram ne coute rien et paie quand la sortie recopie "
                          "l'entree ; draft exige --draft-model ; mtp utilise "
                          "la tete nextn du modele charge si elle porte une "
                          "convention reconnue (Qwen3.5 et suivants, DeepSeek "
