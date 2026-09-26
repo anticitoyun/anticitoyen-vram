@@ -74,3 +74,20 @@ est sous le seuil parce que la part des 233 poids dans le préfill est plus peti
 
 ## 4. Durée
 Micro-banc : une prise ≤ 10 min, tests 260 dans la même prise. Étape moteur : une prise ≤ 20 min.
+
+## Addendum — instruments de l'étape moteur et du panel (avant ces mesures, après le banc)
+* **Moteur** `eng260.py` (base eng243) et **KL** `kl-260.py` (base kl-243) : bascule À CHAUD des int8 d'origine fp8 dans UN
+  processus (liste des tenseurs marqués au chargement, piles comprises ; bf16 = marque posée, cublas = marque retirée ; cache
+  `_i8c` vidé) ; contrôle de prise : B doit compter `cublas` > A (assert). Témoin admis de la KL inchangé (243, n = 96).
+* **PPL appariée (filtre)** : `acvram eval` wiki-gptq, fenêtre 2048/2048, 8 192 jetons, deux processus (A défaut, B
+  `ACVRAM_I8C_FP8_PREFILL=cublas`). Référence : 7,2157 (153b). **Filtre : PPL_B ≤ 1,020 × PPL_A** (précédent P2 19/09) ;
+  prédit PPL_B/PPL_A 1,000-1,010.
+* **Mini panel lm-eval (critère d'acceptation, Q19 + décision chef)** : lm-eval 0.4.13 dans `~/.venvs/lm-eval` (hors venv de
+  mesure), `local-completions` contre `acvram serve` neuf par bras (max-batch 8, 4 096, sans spéculation), tokenizer HF du
+  converti (BOS absent des deux côtés, réglages identiques), glouton, seed 0 : **mmlu 0-shot `--limit 40` par matière**
+  (57 matières, ≈ 2 280 questions, loglikelihood : tout au préfill, le chemin testé) et **gsm8k 5-shot `--limit 500`**
+  (exact_match strict et flexible). Récupération = score_B / score_A par tâche.
+  **Accepté si récupération moyenne (mmlu, gsm8k) ≥ 99 % ET pire tâche ≥ 97 %.** Publiés : scores, récupérations, pire tâche,
+  discordances appariées (A juste/B faux, A faux/B juste) et 2 SE de la différence appariée ; **si un seuil tombe à moins de
+  2 SE : « non résolu », pas « tenu »**. Prédit : mmlu 99,3-100,2 %, gsm8k 98-101 % (résolution gsm8k ≈ ± 1,8 % à n = 500).
+* Chaîne : prise `poste5-p260-moteur` (eng, KL, PPL) puis prise `poste5-p260-lmeval` (A puis B), chacune ≤ 30 min.
