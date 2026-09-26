@@ -254,10 +254,14 @@ def collect_activation_stats(
         return t
 
     collector = _StatCollector()
+    # 235 : dtype explicite (celui des activations de calibration) -- sans lui, le
+    # premier appelant (`tables32` du noyau fusionné, `self._dtype` = fp32 par défaut,
+    # ou le repli PyTorch en `dtype`) gèle la précision de `_ensure` (layers.py:721,
+    # même motif que la 213 côté service).
     rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
-                           spec.rope_theta, spec.rope_scaling)
+                           spec.rope_theta, spec.rope_scaling, dev, dtype)
     rope_mla = (RotaryEmbedding(spec.qk_rope_head_dim, spec.max_position_embeddings,
-                                spec.rope_theta, spec.rope_scaling)
+                                spec.rope_theta, spec.rope_scaling, dev, dtype)
                if spec.est_mla and spec.mla_rope else None)
     embed = get("model.embed_tokens.weight").to(dtype).to(dev)
 
