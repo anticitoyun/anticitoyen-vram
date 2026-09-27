@@ -36,3 +36,10 @@ coûte → Q26 (correction optimiste) justifiée, pas de retour au défaut.
 (d) mixte ≠ none au bit : BOGUE, arrêt, rien en main.
 (e) test 277e VERT sur main : le test ne contrôle rien, à réécrire avant tout verdict.
 Budget : prise ≤ 40 min de carte ; pas de seconde prise sans ordre.
+
+## Avenant 27/09 08 h 3x — prise 1 rendue, prise 2 avant mesure (défaut d'instrument)
+Prise 1 (0df186053, `scratchpad/poste5-p277e-27-09/p1/`) : tests carte rendus — 277 3/3 vert sur 277e ; 277e vert sur
+277e, ROUGE sur main (Coder 41/39/52/24/55, mixte rouge aussi) : condition d'entrée tenue, issue (e) écartée. Débit NON
+mesuré : en 2e passe la garde de rendement (`GardeSpeculation`) avait coupé la spéculation (Coder : 0 proposé sur les
+trois côtés). Prise 2 : seul changement, garde remise à zéro avant chaque invite ; prédictions du tableau inchangées.
+Écart à « pas de seconde prise sans ordre » : défaut de mon instrument, prise ≤ 15 min, assumé ici.
