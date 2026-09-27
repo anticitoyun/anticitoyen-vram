@@ -175,3 +175,20 @@ def test_hors_regime_ne_cache_aucun_regime():
     assert not hors, f"variables de régime cachées dans HORS_REGIME : {sorted(hors)}"
     for v in ("ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_MTP", "ACVRAM_PIPELINE"):
         assert v in {x.env for x in regime.VARIABLES}
+
+
+def test_spec_repos_277e_declaree_et_sondee():
+    """277e : ACVRAM_SPEC_REPOS est lue par le moteur (runner._SPEC_REPOS) ; la table la porte avec sa sonde, et la
+    ligne de régime la nomme quand elle diffère du défaut — sinon deux bras ngram à repos différents se ressemblent."""
+    import subprocess
+    import sys
+    v = next(v for v in regime.VARIABLES if v.nom == "SPEC_REPOS")
+    assert v.lu_a == ("acvram.engine.runner", "_SPEC_REPOS") and v.defaut == "2"
+    env = {k: val for k, val in os.environ.items() if not k.startswith("ACVRAM_")}
+    env.update(CUDA_VISIBLE_DEVICES="", ACVRAM_SPEC_REPOS="0")
+    out = subprocess.run([sys.executable, "-c", "from acvram import regime; import acvram.engine.runner as r; "
+                          "print(r._SPEC_REPOS); print(regime.regime_ligne())"],
+                         env=env, capture_output=True, text=True, timeout=180)
+    lignes = out.stdout.strip().splitlines()
+    assert lignes[0] == "0", out.stderr[-500:]
+    assert "ACVRAM_SPEC_REPOS=0" in lignes[-1], lignes[-1]

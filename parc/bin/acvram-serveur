@@ -26,7 +26,28 @@ else
     ctx_client_min_col4=""
 fi
 [ -d "$dossier" ] || { err "Dossier introuvable : $dossier"; exit 1; }
+dossier=$(readlink -f "$dossier")   # absolu : le service part d'un cwd neutre (plus bas)
 CTX="${CTX:-32768}"
+_ici=$(dirname "$(readlink -f "$0")")
+
+# Epinglage par defaut, comme llamacpp-serveur (l.77) et vllm-serveur (l.225).
+# acvram etait le SEUL des trois a laisser les deux cartes visibles : le
+# planificateur recrutait alors la 3080 Ti (_replanifier, loader.py:1132), et
+# nos mesures portaient un attelage 5090+3080 Ti quand celles des concurrents
+# portaient la 5090 seule. Une surcharge explicite reste possible.
+# AVANT la garde VRAM (t5e, 27/09) : posée après, la garde lisait une variable non
+# définie — `set -u` tuait le lanceur (rc 1) dans tout environnement de bureau.
+: "${CUDA_VISIBLE_DEVICES:=0}"; : "${CUDA_DEVICE_ORDER:=PCI_BUS_ID}"
+[ -n "$CUDA_VISIBLE_DEVICES" ] || CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER
+
+# déjà servi ? (avant la garde : le modèle en place occupe la VRAM qu'elle compte)
+servi=$(curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' \
+    2>/dev/null || true)
+[ "$servi" = "$alias_nom" ] && { echo "acvram sert déjà $alias_nom"; exit 0; }
+# serveur à remplacer : sa VRAM sera rendue, la garde la compte comme libre
+pid=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
 
 # ctx_client_min : le menu exporte CTX_CLIENT_MIN (besoin structurel du client) ;
 # la col4 TSV est une surcharge admin qui prime sur la valeur du menu.
@@ -77,6 +98,12 @@ try:
          '--format=csv,noheader,nounits'],
         text=True, stderr=subprocess.DEVNULL)
     free_mib = int(out.strip().split('\n')[0])
+    if '$pid':
+        apps = subprocess.check_output(
+            ['nvidia-smi', f'--id={gpu_id}', '--query-compute-apps=pid,used_memory',
+             '--format=csv,noheader,nounits'], text=True, stderr=subprocess.DEVNULL)
+        free_mib += sum(int(m) for p, m in (l.split(',') for l in apps.strip().split('\n') if ',' in l)
+                        if p.strip() == '$pid')
     free_bytes = free_mib * 1024 * 1024
     kv_gib   = kv_bytes   / (1024**3)
     free_gib = free_bytes / (1024**3)
@@ -94,23 +121,8 @@ case "$_vram_verdict" in
     *) err "Alias refusé : $_vram_verdict"; exit 1 ;;
 esac
 
-# déjà servi ?
-servi=$(curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
-    | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' \
-    2>/dev/null || true)
-[ "$servi" = "$alias_nom" ] && { echo "acvram sert déjà $alias_nom"; exit 0; }
-
 # remplacer le serveur en place
-pid=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
 [ -n "$pid" ] && { kill "$pid" 2>/dev/null || true; sleep 4; }
-
-# Epinglage par defaut, comme llamacpp-serveur (l.77) et vllm-serveur (l.225).
-# acvram etait le SEUL des trois a laisser les deux cartes visibles : le
-# planificateur recrutait alors la 3080 Ti (_replanifier, loader.py:1132), et
-# nos mesures portaient un attelage 5090+3080 Ti quand celles des concurrents
-# portaient la 5090 seule. Une surcharge explicite reste possible.
-: "${CUDA_VISIBLE_DEVICES:=0}"; : "${CUDA_DEVICE_ORDER:=PCI_BUS_ID}"
-export CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER
 
 # Rien de ce qui decide du placement ou du regime ne doit etre choisi en
 # silence : ces trois valeurs changent ce qui est mesure.
@@ -129,7 +141,11 @@ if [ -n "${ACVRAM_ARBRE:-}" ]; then
 else
     ACVRAM_BIN=${ACVRAM_PAQUET_BIN:-/usr/bin/acvram}
     [ -x "$ACVRAM_BIN" ] || { err "paquet acvram absent ($ACVRAM_BIN) : sudo apt install ./acvram_<version>_amd64.deb, ou ACVRAM_ARBRE=<dépôt>"; exit 1; }
-    SOURCE="paquet($("$ACVRAM_BIN" --version 2>/dev/null | awk '{print $NF}'))"
+    # cwd neutre : lancé depuis un arbre acvram, le paquet refuse l'import (garde d'arbre 276 f) — --version
+    # rendait 1 et `set -e` tuait le lanceur sans un mot (t5e, 27/09) ; le service hérite du même cwd.
+    cd /
+    # 1re ligne seule : --version imprime aussi la mention de soutien, qui coupait « source= » en deux
+    SOURCE="paquet($("$ACVRAM_BIN" --version 2>/dev/null | awk 'NR==1{print $NF}'))"
 fi
 echo "acvram : source=$SOURCE"
 # UN SEUL constructeur : la ligne imprimée est, octet pour octet, celle que l'exec reçoit
@@ -150,7 +166,6 @@ if [ -n "${ACVRAM_EXEC:-}" ]; then exec "$ACVRAM_EXEC" "${CMD[@]}"; fi
 # heriter le verrou (vivant tant que le serveur vit) et rend le PID. Repli sans
 # verrou si carte.sh est introuvable (paquet installe hors depot) — avec un
 # avertissement, jamais en silence.
-_ici=$(dirname "$(readlink -f "$0")")
 CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
 if [ -x "$CARTE_SH" ]; then
     srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$alias_nom" ACVRAM_SERVICE_LOG=/tmp/acvram-serveur.log \
@@ -160,11 +175,18 @@ if [ -x "$CARTE_SH" ]; then
 else
     err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
     setsid nohup "${CMD[@]}" >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
+    srv_pid=$!
 fi
 
 for _ in $(seq 1 120); do
     curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 \
         && { echo "acvram prêt sur 127.0.0.1:$PORT ($alias_nom)"; exit 0; }
+    # mort au démarrage (refus de budget KV, OOM, contexte non tenu) : le dire tout de suite, pas après 240 s
+    # (t5e 27/09 : devstral à 65 536 refusé en quelques secondes, le menu attendait 4 min)
+    if [ -n "${srv_pid:-}" ] && ! kill -0 "$srv_pid" 2>/dev/null; then
+        err "acvram mort au démarrage : $(grep -vE CUDACachingAllocator /tmp/acvram-serveur.log 2>/dev/null | grep -E 'refus|non tenu|Error' | tail -1 | cut -c1-240)"
+        exit 1
+    fi
     sleep 2
 done
 err "acvram n'a pas démarré (voir /tmp/acvram-serveur.log)"

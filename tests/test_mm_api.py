@@ -118,7 +118,7 @@ def _monter(converted, dossier: str, vision: bool, n_img: int = N_IMG):
     h = loaded.spec.hidden_size
     if vision:
         TourVision.depuis_dossier = classmethod(
-            lambda cls, path, man, dev: cls(lambda pv: torch.zeros(1, n_img, h), dev, nom="factice"))
+            lambda cls, path, man, dev: cls(lambda pv, **_annexes: torch.zeros(1, n_img, h), dev, nom="factice"))   # 276 g : la tour reçoit les annexes du processeur
     if vision:   # famille du masque des plages image (20/09, masque par famille) : le jouet Llama n en a pas
         loaded.spec.raw = {**(getattr(loaded.spec, "raw", None) or {}), "architectures": ["Gemma4ForConditionalGeneration"]}
     try:
@@ -128,8 +128,8 @@ def _monter(converted, dossier: str, vision: bool, n_img: int = N_IMG):
     appels = []                                  # (prompt_ids, images) reçus par le moteur
     original = engine.add_request
 
-    def espion(prompt_ids, params, request_id="", images=None):
-        seq = (original(prompt_ids, params, request_id, images=images) if images is not None
+    def espion(prompt_ids, params, request_id="", images=None, traits=None):
+        seq = (original(prompt_ids, params, request_id, images=images, traits=traits) if images is not None
                else original(prompt_ids, params, request_id))
         appels.append((list(prompt_ids), seq.images))
         return seq

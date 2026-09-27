@@ -230,6 +230,10 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 195 (AU DÉFAUT depuis le 25/09, décision déléguée par l utilisateur ; HORS BIT « ± 1 ulp » : ordre des sommes fp32) : linéaires int8 symétriques par canal à 2 ≤ b ≤ 16 servies par `_etroit_canal_kernel` (K entier par programme, géométrie NInfer, table GEOMETRIE_CANAL par forme) — 1 = défaut ; 0 = TÉMOIN NOMMÉ (noyau d avant : vue g128, tranches) ; `BN,BK,W,S` = géométrie imposée ; ligne etroites=…+canal(table|temoin|géométrie) ; mixte b=8 +4,01 % / −3,76 % J, KL ≤ 2 × témoin (revue/poste6-piece195-verdict-25-09.md)"),
     Variable("CAPTURE_MEM_MIN_MIO", "1024", None, None,
              "garde d interblocage de capture (22/09) : mémoire libre minimale (Mio) sous laquelle une capture de graphe est refusée (eager) — une allocation manquante DANS la capture attend sans fin"),
+    Variable("PILE_RENDUE", "1", None, None,
+             "dut (27/09) : 1 = avant la première capture (et sous le seuil de la garde), limite de pile CUDA ramenée à ACVRAM_PILE_OCTETS — rend la mémoire locale que l autotune Triton à froid avait fait réserver (2,7 Gio mesurés) ; 0 = témoin"),
+    Variable("PILE_OCTETS", "1024", None, None,
+             "dut (27/09) : limite de pile (o/fil) visée par ACVRAM_PILE_RENDUE ; le pilote la regrandit au lancement d un noyau qui en a besoin"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",
@@ -352,6 +356,15 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 269 b/c/d (DÉFAUT depuis 269 c, 0.7.3 ; 0 = opt-out ; 269 d : sans effet pour un alias vision) : 1 = la fenêtre d'admission s'ouvre aussi à UNE requête en file quand une "
              "autre est déjà entrée dans le service (gestionnaire HTTP commencé, submit pas encore fait) ; une requête seule "
              "reste sans attente (compteur à 0)"),
+    Variable("TOUR_PREPARATION", "1", ("acvram.engine.runner", "_TOUR_PREPARATION"), None,
+             "pièce 276 g (DÉFAUT si au bit — scellé 276 g ; 0 = témoin) : 1 = la tour de vision tourne dans le fil de "
+             "préparation du serveur (Engine.encoder_images, flux CUDA annexe, verrou de capture), hors de `_admit`, image "
+             "par image (même appel, aucun lot) et se recouvre avec le pas en cours ; 0 = tour dans `_admit` avant le préfill"),
+    Variable("TOUR_FLUX", "1", ("acvram.engine.runner", "_TOUR_FLUX"), None,
+             "pièce 276 h (OPT-IN, défaut 1 = régime 276 g) : nombre de flux CUDA annexes des tours de vision hors du pas — 2 = deux "
+             "tours (une image chacune, même appel, au bit 12/12) en vol ; mesuré 27/09 à b = 12 images : mur −5 %, mais TTFT moyen "
+             "+9 % contre la 276 g (requêtes admises par paires → préfills plus gros) : scellé non tenu, pas de défaut ; une capture "
+             "de graphe attend qu'aucune tour ne soit en vol (VerrouCapture lecteurs/rédacteur)"),
     Variable("ADMISSION_FENETRE_MS", "5", None, None,
              "pièce 179 (DÉFAUT 5 depuis 179 b ; 0 = coupé) : fenêtre d'admission du serveur en ms — moteur vide et ≥ 2 "
              "requêtes en file, attendre que la file cesse de grossir avant le pas (préfill groupé d'une rafale) ; une "

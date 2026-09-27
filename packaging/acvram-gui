@@ -32,6 +32,7 @@ import signal
 import subprocess
 import sys
 import threading
+import unicodedata
 import urllib.request
 
 import gi
@@ -342,6 +343,17 @@ def trouver_serveur() -> int | None:
     return None
 
 
+def cle_recherche_modele(s: str) -> str:
+    """Casse et accents neutralisés (NFKD, ni combinants ni ASCII) — même clé des deux côtés
+    de la comparaison, miroir de _cleRecherche() en JS (page_accueil) pour le filtre en direct."""
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").casefold()
+
+
+def modele_correspond_filtre(nom: str, requete: str) -> bool:
+    """Sous-chaîne insensible à la casse et aux accents ; requête vide = tout correspond."""
+    return cle_recherche_modele(requete) in cle_recherche_modele(nom)
+
+
 def modeles_du_parc() -> list[tuple[str, str]]:
     """(nom, chemin) pour chaque dossier converti qui porte un manifeste."""
     vus, out = set(), []
@@ -533,7 +545,9 @@ def proposer_options_convert(source: str) -> tuple[dict, str]:
 
 
 def page_accueil(erreur: str = "") -> str:
-    opts = "".join(f'<option value="{c}">{n}</option>' for n, c in modeles_du_parc())
+    opts = "".join(
+        f'<option value="{c}" data-clef="{html.escape(cle_recherche_modele(n))}">{n}</option>'
+        for n, c in modeles_du_parc())
     if not opts:
         opts = f'<option disabled>{T("aucun modèle converti trouvé — ACVRAM_PARC ?")}</option>'
     cartes = ""
@@ -561,6 +575,8 @@ def page_accueil(erreur: str = "") -> str:
 {err}
 <div class="carte">
   <h2>{T("modèle")}</h2>
+  <input type="search" id="modele_recherche" autofocus placeholder="{T('rechercher un modèle…')}"
+         oninput="filtrerModeles()" style="width:100%;margin:0 0 8px 0">
   <select id="modele">{opts}</select>
   <h2>{T("carte")}</h2>
   <select id="carte">{cartes}</select>
@@ -631,6 +647,24 @@ function onglet(n){{
   for(const o of document.querySelectorAll('.onglet')) o.classList.toggle('actif', o.id===n);
   for(const b of document.querySelectorAll('.onglets button')) b.classList.toggle('actif', b.id==='ong_'+n);
 }}
+function _cleRecherche(s){{
+  return s.normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+}}
+function filtrerModeles(){{
+  const q=_cleRecherche(document.getElementById('modele_recherche').value.trim());
+  for(const o of document.getElementById('modele').options)
+    o.hidden = !!q && !(o.dataset.clef||'').includes(q);
+}}
+document.getElementById('modele_recherche').addEventListener('keydown', e=>{{
+  if(e.key==='Escape'){{ e.target.value=''; filtrerModeles(); }}
+}});
+document.addEventListener('keydown', e=>{{
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='f'){{
+    e.preventDefault();
+    const champ=document.getElementById('modele_recherche');
+    champ.focus(); champ.select();
+  }}
+}});
 function lancer(){{
   const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
   window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{

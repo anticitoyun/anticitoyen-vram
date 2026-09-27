@@ -151,6 +151,24 @@ class TourVision:
                                  f"{tuple(out.shape)} (attendu (k, {out.shape[0]}, {out.shape[1]}))")
         return out, niveaux
 
+    def traits_niveaux_sur_flux(self, pixel_values: Any, n_attendu: Optional[int] = None,
+                                supplement: Optional[dict] = None, flux: Any = None
+                                ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """276 g : `traits_niveaux` (MÊME appel, même image, aucun lot → au bit) lancé sur un flux CUDA annexe, pour se
+        recouvrir avec le pas moteur en cours sur le flux courant ; attend la fin du flux (le fil appelant seulement), puis
+        marque les tenseurs comme lus par le flux courant (`record_stream`) : l'allocateur ne rendra pas leurs blocs au flux
+        annexe tant que le préfill n'a pas fini de les lire. Sans CUDA ou sans flux : `traits_niveaux` tel quel."""
+        if flux is None or self.device.type != "cuda":
+            return self.traits_niveaux(pixel_values, n_attendu, supplement)
+        with torch.cuda.stream(flux):
+            traits, niveaux = self.traits_niveaux(pixel_values, n_attendu, supplement)
+        flux.synchronize()
+        courant = torch.cuda.current_stream(self.device)
+        traits.record_stream(courant)
+        if niveaux is not None:
+            niveaux.record_stream(courant)
+        return traits, niveaux
+
     @classmethod
     def depuis_dossier(cls, path: str, manifest: dict,
                        device: torch.device) -> Optional["TourVision"]:

@@ -82,3 +82,67 @@ def test_garde_vram_dit_nvidia_smi_absent(poste, tmp_path):
     r = _run(poste, PATH=str(bindir))
     assert r.returncode == 0, r.stdout + r.stderr
     assert "nvidia-smi introuvable — garde VRAM inactive" in r.stdout, r.stdout
+
+
+# --- t5e (27/09) : quatre pannes du menu trouvées à sec, chaque test rouge sur le lanceur d'avant -----------------
+
+def test_sans_cuda_visible_devices(poste):
+    """Environnement de bureau : CUDA_VISIBLE_DEVICES non défini. Avant : `set -u` tuait le lanceur dans la garde
+    VRAM (rc 1, « variable sans liaison »), l'épinglage n'étant posé qu'après."""
+    env = dict(poste["env"]); env.pop("CUDA_VISIBLE_DEVICES", None)
+    r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "cartes=0" in r.stdout
+
+
+def test_version_sur_deux_lignes(poste):
+    """--version imprime aussi la mention de soutien : « source= » doit rester sur une ligne."""
+    poste["paquet"].write_text("#!/bin/sh\n[ \"$1\" = --version ] && printf 'acvram 9.9.9\\nbuymeacoffee.com/x\\n'\n")
+    r = _run(poste)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "acvram : source=paquet(9.9.9)\n" in r.stdout, r.stdout
+
+
+def test_cwd_dans_un_arbre(poste):
+    """Lancé depuis un arbre acvram, le paquet refuse l'import (garde d'arbre) : --version rend 1. Avant : le lanceur
+    mourait en silence (set -e) et le service aurait hérité du même cwd."""
+    poste["paquet"].write_text("#!/bin/sh\n[ \"$PWD\" = / ] || exit 1\n[ \"$1\" = --version ] && echo 'acvram 9.9.9'\n")
+    r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True,
+                       env=poste["env"], cwd=str(poste["arbre"]), timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "source=paquet(9.9.9)" in r.stdout
+
+
+def test_garde_compte_la_vram_du_serveur_remplace(poste, tmp_path):
+    """Changer d'alias quand un modèle acvram occupe la carte : la VRAM du serveur en place sera rendue. Avant : la
+    garde ne comptait que la VRAM libre et refusait tout changement d'alias à grand contexte."""
+    (tmp_path / "Modele-nvfp4" / "config.json").write_text(
+        '{"num_hidden_layers": 48, "num_key_value_heads": 4, "num_attention_heads": 32, "hidden_size": 4096}')
+    ancien = subprocess.Popen(["sleep", "60"])
+    try:
+        faux = tmp_path / "faux"; faux.mkdir()
+        (faux / "ss").write_text(f"#!/bin/sh\necho 'LISTEN 0 5 127.0.0.1:1 0.0.0.0:* users:((\"x\",pid={ancien.pid},fd=3))'\n")
+        (faux / "nvidia-smi").write_text(
+            "#!/bin/sh\ncase \"$*\" in *memory.free*) echo 1000;; *compute-apps*) echo "
+            f"'{ancien.pid}, 30000';; esac\n")
+        for f in faux.iterdir():
+            f.chmod(0o755)
+        # KV fp16 à 32 768 : 2 × 48 × 4 × 128 × 32768 × 2 = 3 Gio > 1 000 Mio libres, < 31 000 avec l'ancien serveur
+        r = _run(poste, PATH=f"{faux}:{os.environ['PATH']}")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Alias refusé" not in r.stderr
+    finally:
+        ancien.kill(); ancien.wait()
+
+
+def test_mort_au_demarrage_dite_sans_attendre(poste, tmp_path):
+    """t5e 27/09 : un serveur qui meurt au démarrage (refus de budget KV) laissait le menu attendre 240 s. Le lanceur
+    surveille le PID et rend 1 aussitôt. Rouge avant : timeout du test (30 s) au lieu d'un rc 1 nommé."""
+    poste["paquet"].write_text("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'acvram 9.9.9'; exit 0; }\nexit 3\n")
+    env = {**poste["env"], "ACVRAM_CARTE_SH": str(tmp_path / "absent")}
+    env.pop("ACVRAM_SERVEUR_A_SEC")
+    try:
+        r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True, env=env, timeout=30)
+    except subprocess.TimeoutExpired:
+        pytest.fail("le lanceur attend encore un serveur mort")
+    assert r.returncode == 1 and "acvram mort au démarrage" in r.stderr, r.stderr
