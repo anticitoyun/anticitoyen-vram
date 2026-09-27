@@ -40,7 +40,9 @@ def _ctx_texte(engine) -> str:
     if v == "absent":
         return " ctx_tenu=non-chauffe"
     demande = getattr(engine, "ctx_demande", v)
-    return f" ctx_tenu={v}" if demande == v else f" ctx_tenu={v}(demandé {demande})"
+    txt = f" ctx_tenu={v}" if demande == v else f" ctx_tenu={v}(demandé {demande})"
+    seuil = getattr(engine, "moe_seuil", None)
+    return txt + (f" moe_tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
 
 
 class ChauffeContexte:
@@ -85,6 +87,10 @@ class ChauffeContexte:
             return False
         self.reserve_chauffe = (libre, seuil)
         return True
+
+    def _a_des_moe(self) -> bool:
+        from .moe import MoEBlock
+        return any(isinstance(m, MoEBlock) for m in self.model.modules())
 
     def _libre_apres_chauffe(self) -> tuple[int, int]:
         """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
@@ -147,11 +153,7 @@ class ChauffeContexte:
         essai = self._essai_de_chauffe
 
         t0 = time.time()
-        tenu: Optional[int]
-        if essai(n):
-            tenu = n
-        else:
-            bas, haut = 0, n                                              # bas tenu (0 : rien), haut non tenu
+        def dichotomie(bas: int, haut: int) -> int:                     # bas tenu (0 : rien), haut non tenu
             for _ in range(8):
                 milieu = max(pas, ((bas + haut) // 2) // pas * pas)
                 if milieu <= bas or milieu >= haut:
@@ -160,7 +162,23 @@ class ChauffeContexte:
                     bas = milieu
                 else:
                     haut = milieu
-            tenu = bas
+            return bas
+
+        from . import moe as _moe
+        _moe.definir_seuil(None)
+        self.moe_seuil: Optional[int] = None
+        tenu: Optional[int] = n if essai(n) else dichotomie(0, n)
+        # d19 : au-delà du tenu d un seul tenant, le bloc MoE par tranches (tampons bornés). Engagé SEULEMENT au-delà :
+        # toute invite qui tenait garde sa sortie et son temps ; au-delà, elle recevait un 400. Pas au bit du seul tenant.
+        if tenu < n and _moe._MOE_MORCEAU > 0 and self._a_des_moe():
+            _moe.definir_seuil(max(tenu, pas))
+            tenu2 = n if essai(n) else dichotomie(tenu, n)
+            if tenu2 > tenu:
+                print(f"[acvram] MoE par tranches ({_moe._MOE_MORCEAU} lignes) au-delà de {tenu} jetons : "
+                      f"{tenu2} tenus", flush=True)
+                self.moe_seuil, tenu = tenu, tenu2
+            else:
+                _moe.definir_seuil(None)
         self._oublier_la_chauffe()
         self.graphs = graphes
         self.ctx_demande = n

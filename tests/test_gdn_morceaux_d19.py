@@ -56,3 +56,18 @@ def test_morceau_multiple_de_64(monkeypatch):
         importlib.reload(G)
     monkeypatch.setenv("ACVRAM_GDN_MORCEAU", "4096")
     importlib.reload(G)
+
+
+def test_moe_tranches_seulement_au_dela_du_seuil(monkeypatch):
+    """MoEBlock.forward : en dessous du seuil (ou sans seuil), UN appel sur toutes les lignes ; au-delà, tranches de
+    _MOE_MORCEAU lignes, concaténées dans l ordre. À sec (bloc factice)."""
+    import acvram.engine.moe as moe
+    b = moe.MoEBlock.__new__(moe.MoEBlock)
+    appels = []
+    b._forward_un = lambda x, valid=None: (appels.append(x.shape[0]), x * 2)[1]
+    x = torch.arange(20.0).reshape(10, 2)
+    monkeypatch.setattr(moe, "_MOE_MORCEAU", 4)
+    for seuil, attendu in ((None, [10]), (10, [10]), (6, [4, 4, 2])):
+        appels.clear(); moe.definir_seuil(seuil)
+        assert torch.equal(moe.MoEBlock.forward(b, x), x * 2) and appels == attendu
+    moe.definir_seuil(None)

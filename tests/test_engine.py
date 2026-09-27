@@ -427,3 +427,38 @@ def test_la_ligne_de_regime_porte_le_sampler(converted, monkeypatch):
     assert " sampler=lent " in eng.regime_ligne() + " "
     monkeypatch.setenv("ACVRAM_SAMPLER_LOT", "1")
     assert " sampler=lot " in eng.regime_ligne() + " "
+
+
+def test_d19_moe_par_tranches_au_dela_du_seul_tenant(converted, monkeypatch):
+    """d19 : OOM simulé au-delà de 40 jetons d un seul tenant ; avec le MoE par tranches engagé AU-DELÀ de 40, 64 tiennent.
+    La chauffe prouve d abord le seul tenant (40), pose le seuil, puis tient 64 ; la ligne dit moe_tranches>40. Témoin
+    ACVRAM_MOE_MORCEAU=0 : refus à 40 comme avant. Cassant : un seuil posé AVANT la première phase rendrait 64 d emblée."""
+    import pytest
+    import torch
+    import acvram.engine.moe as moe
+    from acvram.engine.runner import ContexteNonTenu
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    eng = _engine_cpu(converted)
+    vrai = eng.generate
+    seuils = []
+
+    def faux(prompt_ids, params, images=None):
+        seuils.append(moe._MOE_SEUIL)
+        if len(prompt_ids) + 2 > 40 and moe._MOE_SEUIL is None:
+            raise torch.OutOfMemoryError("CUDA out of memory (simulé)")
+        return vrai(prompt_ids, params, images=images)
+    monkeypatch.setattr(eng, "generate", faux)
+    monkeypatch.setattr(eng, "_a_des_moe", lambda: True)
+    monkeypatch.setattr(moe, "_MOE_MORCEAU", 8)
+    try:
+        assert eng.chauffer_contexte(pas=8) == 64 and eng.moe_seuil == 40 and moe._MOE_SEUIL == 40
+        assert seuils[0] is None                                           # 1re passe : d un seul tenant
+        assert " ctx_tenu=64 moe_tranches>40" in eng.regime_ligne() + " "
+        monkeypatch.setattr(moe, "_MOE_MORCEAU", 0)
+        eng2 = _engine_cpu(converted); vrai = eng2.generate
+        monkeypatch.setattr(eng2, "generate", faux); monkeypatch.setattr(eng2, "_a_des_moe", lambda: True)
+        with pytest.raises(ContexteNonTenu, match="40 jetons tenus"):
+            eng2.chauffer_contexte(pas=8)
+        assert moe._MOE_SEUIL is None
+    finally:
+        moe.definir_seuil(None)
