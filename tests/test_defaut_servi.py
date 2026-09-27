@@ -230,6 +230,8 @@ DEFAUTS_PAR_VERSION["0.7.3"] = ({**DEFAUTS_PAR_VERSION["0.7.1"][0], "ADMISSION_G
 DEFAUTS_PAR_VERSION["0.7.4"] = DEFAUTS_PAR_VERSION["0.7.3"]
 # 0.7.5 (26/09, pièces 277fix/285) : mêmes défauts — spéculation toujours none, correctif dans le code seul.
 DEFAUTS_PAR_VERSION["0.7.5"] = DEFAUTS_PAR_VERSION["0.7.4"]
+# 0.7.6 (27/09, pièce 284 b) : PREFILL_TRANCHES=1 au défaut (préfill par lot coupé à la frontière d'instantané).
+DEFAUTS_PAR_VERSION["0.7.6"] = ({**DEFAUTS_PAR_VERSION["0.7.5"][0], "PREFILL_TRANCHES": "1"}, DEFAUTS_PAR_VERSION["0.7.5"][1])
 
 
 def _var(nom):

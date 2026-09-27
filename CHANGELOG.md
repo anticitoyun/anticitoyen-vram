@@ -1,5 +1,30 @@
 # Journal des changements
 
+## 0.7.6 (27/09/2026)
+
+### Performance
+
+* **27/09/2026 — pièces 284 et 284 b (poste1, poste1-284 486b7faf5) : TTFT du mixte sous charge −54 %, sortie au
+  bit.** Cause (284) : sur un modèle hybride (GDN) avec cache de préfixe — le défaut —, toute invite plus longue que
+  la frontière d'instantané faisait retomber le pas sur un préfill UNE REQUÊTE À LA FOIS, en deux passes
+  (`acvram/engine/runner.py`) : la déquantification (56 % du préfill à b = 1) était refaite par séquence et par passe.
+  Correctif (284 b) : le préfill par lot est coupé en tranches à la frontière et réordonné couche par couche.
+  Qwen3.8-27B-unsloth-mixte-i8c, b = 12, ABBA contre main (deux paires) : **TTFT 5,50 → 2,55 s**, débit × 1,75 ;
+  b = 1 inchangé. Cible scellée 2,4 s non tenue (deux vagues = deux déquantifications ; 284 c en cours), seuil FAUX
+  2,9 s loin. Défaut `ACVRAM_PREFILL_TRANCHES=1` (`0` rend l'ancien chemin). Test cassant
+  `tests/test_prefill_tranches_284.py` (logits et jetons b = 1 et b = 3 au bit, second tour repris à l'instantané).
+  `acvram-memoire/revue/poste1-284-verdict-26-09.md`, `poste1-284b-verdict-26-09.md`.
+
+### Banc de qualité
+
+* **26/09/2026 — pièces 275 b à 275 d (poste2, poste2-275 7cf11504b) : l'extraction des réponses MMLU du banc était
+  fausse.** Le filtre ne reconnaissait que « answer is » et capturait le texte suivant la lettre : 5/30 réponses
+  notées justes contre ≈ 15-16 lettres justes réelles. Tâches dérivées `mmlu_v275_*` (filtres lm-eval enregistrés,
+  nom de tâche changé pour qu'aucun ancien score ne se mélange au nouveau), références re-notées sans nouvelle
+  génération : mixte-i8c moyenne 0,7595, Coder 0,8325. La comparaison appariée de la 237 reste valable (même filtre aux
+  deux bras) mais moins puissante que son n ne le laisse croire. Tests `tests/test_lm_eval_taches_v275.py`,
+  `tests/test_extraction_275c.py`.
+
 ## 0.7.5 (26/09/2026)
 
 ### Correctifs
