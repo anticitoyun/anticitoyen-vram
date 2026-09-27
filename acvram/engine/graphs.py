@@ -250,9 +250,10 @@ def _sonde_pile(gr) -> None:
             return
         avant = gr._photo_memoire()
         torch.cuda.synchronize()
-        rc = cu.cuCtxSetLimit(0, pile)
+        cible = int(os.environ.get("ACVRAM_SONDE_PILE_OCTETS", "1024"))   # défaut CUDA ; regrandit au besoin
+        rc = cu.cuCtxSetLimit(0, ctypes.c_size_t(cible))
         apres = gr._photo_memoire()
-        print(f"[graphe] sonde pile : pile {pile.value} o/fil, cuCtxSetLimit rc={rc} ; hors allocateur "
+        print(f"[graphe] sonde pile : pile {pile.value} → {cible} o/fil, cuCtxSetLimit rc={rc} ; hors allocateur "
               f"{gr._hors_allocateur(avant):.2f} → {gr._hors_allocateur(apres):.2f} Gio, libre "
               f"{avant['libre'] / 2 ** 30:.2f} → {apres['libre'] / 2 ** 30:.2f} Gio", flush=True)
     except Exception as e:                                          # noqa: BLE001

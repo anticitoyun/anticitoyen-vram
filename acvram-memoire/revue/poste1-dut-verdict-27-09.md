@@ -37,3 +37,7 @@ l'autotune (code + mémoire locale réservée). La garde de t5e ne rend que 0,62
 ## Sonde (hypothèse 1, scellée avant) : mémoire locale gardée par le pilote
 * Prédiction : à froid, `cuCtxSetLimit(pile, même valeur)` fait tomber « hors allocateur » de ~3,4 à ≤ 1 Gio. FAUX si < 0,5 Gio
   rendus → hypothèse 2 (modules chargés : code des configurations d'autotune).
+* Sonde 1 (17 h 28) : pile **12 256 o/fil** (défaut 1 024) ; reposée à la même valeur, rien rendu (3,38 → 3,38) — attendu après
+  coup : le pilote ne réduit que si la limite baisse. 12 256 × 170 SM × 1 536 fils ≈ 3,2 Go : l'ordre de grandeur de l'écart.
+* Sonde 2 (scellée avant) : limite ramenée à 1 024 avant la première capture. VRAI si ≥ 2 Gio rendus et serveur vivant
+  (b=1 et b=12 servis sans repli) ; FAUX si < 0,5 Gio rendus.
