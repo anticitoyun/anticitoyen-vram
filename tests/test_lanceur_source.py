@@ -133,3 +133,16 @@ def test_garde_compte_la_vram_du_serveur_remplace(poste, tmp_path):
         assert "Alias refusé" not in r.stderr
     finally:
         ancien.kill(); ancien.wait()
+
+
+def test_mort_au_demarrage_dite_sans_attendre(poste, tmp_path):
+    """t5e 27/09 : un serveur qui meurt au démarrage (refus de budget KV) laissait le menu attendre 240 s. Le lanceur
+    surveille le PID et rend 1 aussitôt. Rouge avant : timeout du test (30 s) au lieu d'un rc 1 nommé."""
+    poste["paquet"].write_text("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'acvram 9.9.9'; exit 0; }\nexit 3\n")
+    env = {**poste["env"], "ACVRAM_CARTE_SH": str(tmp_path / "absent")}
+    env.pop("ACVRAM_SERVEUR_A_SEC")
+    try:
+        r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True, env=env, timeout=30)
+    except subprocess.TimeoutExpired:
+        pytest.fail("le lanceur attend encore un serveur mort")
+    assert r.returncode == 1 and "acvram mort au démarrage" in r.stderr, r.stderr
