@@ -1,5 +1,22 @@
 # Journal des changements
 
+## 0.7.7 (27/09/2026)
+
+### Instrumentation de mesure
+
+* **27/09/2026 — pièce 276 f (poste6, poste6-arbre 2674ef4f7) : garde d'arbre pour les prises A/B.** Un script
+  qui met son répertoire en tête de `sys.path` (92 dans le dépôt) importait le code de l'arbre courant quel que soit
+  le `PYTHONPATH` du bras : les bras « main » des 276 c, d et e ont tourné le code B, et leurs « B = A » ne
+  comparaient rien (errata en tête des verdicts ; 276 c retirée de cette version : contre le vrai main, TTFT moyen
+  +24 %). `ACVRAM_ARBRE=<arbre du bras>` refuse désormais l'import d'un autre arbre à la source et imprime une ligne
+  « ARBRE » dans le journal du serveur ; sans la variable, rien ne change. Tests `tests/test_garde_arbre_276f.py`.
+
+### Sortie
+
+* **27/09/2026 — pièce 287 (poste3, poste3-287 58707831f) : notes de release GitHub bilingues.** Les 30 releases
+  publiées sont désormais en anglais puis en français ; `outils/sortir-version.sh` refuse (code 73) des notes sans
+  « ## English » ET « ## Français ».
+
 ## 0.7.6 (27/09/2026)
 
 ### Performance
