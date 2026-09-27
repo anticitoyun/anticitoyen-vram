@@ -43,6 +43,8 @@ __all__ = ["get_extension", "kernels_available", "build_info", "matmul",
 _EXT: Optional[Any] = None
 _TRIED = False
 _ERROR: str = ""
+_PRECOMPILE: str = ""       # pièce 240 : chemin du .so PRÉCOMPILÉ chargé (vide = compilation JIT ou repli)
+_SRC_HASH_ACTUEL: str = ""  # empreinte complète (source + drapeaux) de la dernière compilation JIT
 _SO_HASH: str = ""          # sha256 du .so effectivement charge : a joindre
 _SO_PATH: str = ""          # a tout releve, car une empreinte .cu/.so prouve
                             # la coherence, jamais l identite de l arbre
@@ -55,8 +57,11 @@ _MIN_CUDA_FOR_SM120 = (12, 8)
 _MIN_CUDA_FOR_FAMILY = (12, 9)
 
 
-def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
+def _arch_flags(nvcc_ver: tuple[int, int] | None = None, archs_forcees=None) -> list[str]:
     """Émet du code pour exactement les architectures présentes, plus un repli PTX.
+
+    ``archs_forcees`` (ou ``ACVRAM_ARCHS="12.0,8.6"``, pièce 241) : architectures imposées, pour compiler SANS carte
+    (CI des noyaux précompilés du Flatpak, 236/240) — elles remplacent celles des cartes présentes.
 
     Les cibles ``sm_100`` et au-delà sont demandées sous leur forme
     *family-specific* (``sm_120f``) et non générique. Ce n'est pas un détail de
@@ -70,7 +75,10 @@ def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
     famille (sm_121, sm_128...), contrairement au suffixe « a ».
     """
     archs: set[tuple[int, int]] = set()
-    if torch.cuda.is_available():
+    forcees = archs_forcees if archs_forcees is not None else archs_depuis_texte(os.environ.get("ACVRAM_ARCHS", ""))
+    if forcees:
+        archs = set(forcees)
+    elif torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             archs.add(torch.cuda.get_device_capability(i))
     if not archs:
@@ -223,6 +231,7 @@ def build_info() -> dict:
         "torch_cuda": torch.version.cuda,
         "device_caps": caps,
         "arch_flags": _arch_flags(),
+        "precompile": _PRECOMPILE,             # 240 : chemin du .so précompilé chargé, vide = JIT
         "cpu": cpu_build_info(),
         "fp4_tensorcore": fp4_mm_info(),
     }
@@ -282,8 +291,127 @@ def noyaux_masques() -> list[str]:
     return sorted(_EXT._noms) if isinstance(_EXT, _ExtensionMasquee) else []
 
 
+# Pièce 240 (Flatpak, 236) : NOYAUX PRÉCOMPILÉS. Le bac à sable n'a pas nvcc ; sans lui, le repli de référence servait
+# à un tiers du débit sans le dire. Un répertoire `ACVRAM_KERNELS_PRECOMPILES` (défaut : <paquet>/precompiles) porte, par
+# empreinte de SOURCE (sha256 du .cu, 16 hex), un `acvram_kernels.so` et son `empreinte.json` :
+#   {"src_sha": sha256 complet du .cu, "src_hash": empreinte source+drapeaux que le .so PORTE (ACVRAM_SRC_HASH),
+#    "archs": ["sm_120f", …], "torch": torch.__version__, "cuda": torch.version.cuda}
+# Le .so est chargé SANS ninja ni nvcc quand tout concorde : même .cu (au bit : c'est le même binaire qu'une compilation
+# JIT de cette source), même torch/CUDA, architecture de la carte présente, et le .so porte bien l'empreinte de son
+# fichier. Sinon : compilation JIT comme avant (et, si le répertoire avait été demandé explicitement, la raison est dite).
+def archs_depuis_texte(texte: str) -> list:
+    """« 12.0,8.6 » → [(12, 0), (8, 6)] ; vide → [] ; tout autre texte lève (pas de repli silencieux)."""
+    out = []
+    for t in (x.strip() for x in texte.split(",") if x.strip()):
+        m = re.fullmatch(r"(\d+)\.(\d+)", t)
+        if not m:
+            raise ValueError(f"ACVRAM_ARCHS : architecture illisible {t!r} (attendu MAJEUR.MINEUR, ex. 12.0)")
+        out.append((int(m.group(1)), int(m.group(2))))
+    return out
+
+
+def _ecrire_empreinte(cand: str, so_source: str, src_sha: str, src_hash: str, archs) -> str:
+    """Range ``so_source`` sous ``cand/acvram_kernels.so`` avec l'empreinte.json que `_precompile_utilisable` relit
+    (une seule écriture, une seule lecture : la CI et le chargeur ne peuvent pas diverger). Rend ``cand``."""
+    import json
+    import shutil
+    os.makedirs(cand, exist_ok=True)
+    shutil.copy2(so_source, os.path.join(cand, "acvram_kernels.so"))
+    with open(os.path.join(cand, "empreinte.json"), "w", encoding="utf-8") as fh:
+        json.dump({"src_sha": src_sha, "src_hash": src_hash, "archs": sorted(archs),
+                   "torch": torch.__version__, "cuda": str(torch.version.cuda),
+                   "python": _abi_python()}, fh, indent=1)          # 266 e : l'ABI CPython qui a compilé le .so
+    return cand
+
+
+def _archs_des_drapeaux(flags) -> list:
+    """« -gencode=arch=compute_120f,code=sm_120f » → « sm_120f » (après le DERNIER « code= »)."""
+    return sorted({f.rsplit("code=", 1)[1] for f in flags if "code=sm_" in f})
+
+
+def compiler_precompile(dossier: str, archs, nvcc_ver=None) -> str:
+    """Pièce 241 : compile le .so pour ``archs`` (ex. [(12, 0)]) SANS carte — conteneur CUDA de la CI — et le range sous
+    ``dossier/<src_sha16>/`` avec son empreinte.json. Même source, mêmes drapeaux qu'une compilation JIT faite sur une
+    carte de cette architecture : l'empreinte que le .so porte est celle que `get_extension` recalculerait. Rend le sous-dossier."""
+    import tempfile
+    from torch.utils.cpp_extension import load
+    _ensure_cuda_home(_MIN_CUDA_FOR_SM120)
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, "acvram_kernels.cu")
+    with open(src, "rb") as fh:
+        octets = fh.read()
+    if b"acvram_src_hash" not in octets:
+        raise RuntimeError("le source ne porte pas le marqueur acvram_src_hash : aucun précompilé ne pourrait être vérifié")
+    flags_cuda = ["-O3", "--use_fast_math", "-lineinfo"] + _arch_flags(nvcc_ver, archs_forcees=list(archs))
+    flags_c = ["-O3"]
+    src_hash = hashlib.sha256(octets + b"\x00FLAGS\x00" + "\x00".join(flags_cuda + flags_c).encode()).hexdigest()[:16]
+    build = tempfile.mkdtemp(prefix="acvram-precompile-")
+    load(name="acvram_kernels", sources=[src], extra_cuda_cflags=flags_cuda + [f"-DACVRAM_SRC_HASH={int(src_hash, 16)}ULL"],
+         extra_cflags=flags_c, build_directory=build, is_python_module=False, verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")))
+    so = os.path.join(build, "acvram_kernels.so")
+    with open(so, "rb") as fh:
+        if int(src_hash, 16).to_bytes(8, "little") not in fh.read():
+            raise RuntimeError(f"{so} ne porte pas l'empreinte {src_hash}")
+    src_sha = hashlib.sha256(octets).hexdigest()
+    return _ecrire_empreinte(os.path.join(dossier, src_sha[:16]), so, src_sha, src_hash, _archs_des_drapeaux(flags_cuda))
+
+
+def _abi_python() -> str:
+    """« cpython-314-x86_64-linux-gnu » : l'ABI CPython courante (SOABI) — un .so compilé sous une autre ne se charge pas."""
+    import sysconfig
+    return str(sysconfig.get_config_var("SOABI") or "")
+
+
+def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version: str, torch_cuda: str, python_abi: str | None = None):
+    """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_noyaux_precompiles_240.py).
+    266 e : l'empreinte porte l'ABI CPython (`python`) ; un .so d'une autre ABI (Flatpak Python 3.14 contre un .so cp312 de la
+    CI) est refusé ici, avec sa raison, au lieu d'échouer à l'import puis de tomber en silence sur la compilation JIT."""
+    import json
+    python_abi = python_abi or _abi_python()
+    src_sha = hashlib.sha256(src_octets).hexdigest()
+    cand = os.path.join(dossier, src_sha[:16])
+    man, so = os.path.join(cand, "empreinte.json"), os.path.join(cand, "acvram_kernels.so")
+    if not (os.path.isfile(man) and os.path.isfile(so)):
+        return None, f"aucun précompilé pour la source {src_sha[:16]} sous {dossier}"
+    try:
+        with open(man, encoding="utf-8") as fh:
+            e = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return None, f"empreinte.json illisible : {exc}"
+    if e.get("src_sha") != src_sha:
+        return None, "empreinte.json : src_sha différent de la source courante (autre version du .cu)"
+    if e.get("torch") != torch_version or e.get("cuda") != str(torch_cuda):
+        return None, f"précompilé pour torch {e.get('torch')} / CUDA {e.get('cuda')}, ici {torch_version} / {torch_cuda}"
+    if e.get("python") != python_abi:
+        return None, f"précompilé pour l'ABI Python {e.get('python') or 'non renseignée'}, ici {python_abi} (266 e)"
+    archs = set(e.get("archs") or [])
+    for a, b in caps:
+        if not ({f"sm_{a}{b}", f"sm_{a}{b}f", f"sm_{a}{b}a"} & archs):
+            return None, f"précompilé sans sm_{a}{b} (architectures : {sorted(archs)})"
+    try:
+        u64 = int(str(e.get("src_hash", "")), 16).to_bytes(8, "little")
+    except (ValueError, OverflowError):
+        return None, "empreinte.json : src_hash invalide"
+    with open(so, "rb") as fh:
+        if u64 not in fh.read():
+            return None, "le .so ne porte pas l'empreinte annoncée par son empreinte.json"
+    return so, "précompilé"
+
+
+def ecrire_precompile(dossier: str) -> str:
+    """Range le .so de la compilation JIT courante (get_extension() déjà appelée, sans repli) sous
+    ``dossier/<src_sha16>/`` avec son empreinte.json ; rend ce sous-dossier. C'est ce que fait la CI pour le Flatpak (236)."""
+    if _EXT is None or not _SO_PATH or not _SRC_HASH_ACTUEL or _PRECOMPILE:
+        raise RuntimeError("ecrire_precompile : il faut une extension compilée en JIT dans ce processus")
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "acvram_kernels.cu"), "rb") as fh:
+        src_sha = hashlib.sha256(fh.read()).hexdigest()
+    return _ecrire_empreinte(os.path.join(dossier, src_sha[:16]), _SO_PATH, src_sha, _SRC_HASH_ACTUEL,
+                             _archs_des_drapeaux(_arch_flags()))
+
+
 def get_extension():
-    """Compile une fois, puis rend le module d'extension, ou None."""
+    """Charge un .so précompilé quand il concorde (240), sinon compile une fois ; rend le module d'extension, ou None."""
     global _EXT, _TRIED, _ERROR
     if _TRIED:
         return _EXT
@@ -304,6 +432,26 @@ def get_extension():
                   f"ou plus recent. Installez une version cu128 ou cu130.")
         warnings.warn(_ERROR)
         return None
+
+    # Pièce 240 : d'abord un .so précompilé qui concorde (Flatpak : pas de nvcc) — avant tout ce qui exige un toolkit.
+    global _SO_HASH, _SO_PATH, _PRECOMPILE
+    here_pre = os.path.dirname(os.path.abspath(__file__))
+    dossier_pre = os.environ.get("ACVRAM_KERNELS_PRECOMPILES") or os.path.join(here_pre, "precompiles")
+    try:
+        with open(os.path.join(here_pre, "acvram_kernels.cu"), "rb") as fh:
+            octets_src = fh.read()
+        so_pre, raison_pre = _precompile_utilisable(dossier_pre, octets_src, caps, torch.__version__, torch.version.cuda)
+        if so_pre:
+            from torch.utils.cpp_extension import _import_module_from_library
+            _EXT = _import_module_from_library("acvram_kernels", os.path.dirname(so_pre), True)
+            with open(so_pre, "rb") as fh:
+                _SO_HASH = hashlib.sha256(fh.read()).hexdigest()[:16]
+            _SO_PATH, _PRECOMPILE = so_pre, so_pre
+            return _EXT
+        if os.environ.get("ACVRAM_KERNELS_PRECOMPILES"):
+            warnings.warn(f"acvram : noyaux précompilés refusés ({raison_pre}) — compilation JIT")
+    except Exception as exc:                      # noqa: BLE001 — un précompilé cassé ne doit pas empêcher le JIT
+        warnings.warn(f"acvram : noyaux précompilés inutilisables ({type(exc).__name__}: {exc}) — compilation JIT")
 
     # Le source inclut ``cuda_fp4.h``, qui n'existe qu'a partir de CUDA 12.8 :
     # l'exigence ne depend pas de l'architecture visee. Un poste dont le nvcc
@@ -412,6 +560,8 @@ def get_extension():
             _EXT = None
             return None
         _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
+        global _SRC_HASH_ACTUEL
+        _SRC_HASH_ACTUEL = _SRC_HASH
         _EXT = load(
             name="acvram_kernels",
             sources=[src],
@@ -438,7 +588,6 @@ def get_extension():
             # depot principal avec son propre binaire, parfaitement coherent.
             # Une empreinte prouve la coherence, pas l'identite : c'est le sha
             # du .so, joint au chiffre, qui identifie ce qui a tourne.
-            global _SO_HASH, _SO_PATH
             _SO_HASH = hashlib.sha256(octets).hexdigest()[:16]
             _SO_PATH = so
         except OSError:
@@ -826,6 +975,17 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
+# Pièce 243 (179 b, HORS BIT, défaut 16 depuis 0.7.0) : seuil GEMV → GEMM int8 SOUS une portée `depaquetage_partage`
+# (boucle par séquence d'une couche GDN au préfill). La déquant y est payée une fois pour toutes les séquences et le GEMV
+# à n = 78 est borné par le calcul (221) : croisement mesuré ≈ 17 (banc isolé). Service mixte b=8 : +9,70 % t/s,
+# −9,3 % J/jeton, KL scellée tenue (revue/poste5-piece243-verdict-26-09.md). Hors portée, la déquant NON partagée
+# régresse (733,7 µs contre 636,4 de GEMV à n = 78) : INT8_GEMV_MAX reste 80. Témoin (sortie d'avant) : 80.
+_INT8_GEMV_MAX_PARTAGE = int(os.environ.get("ACVRAM_INT8_GEMV_MAX_PARTAGE", "") or 16)
+
+
+def seuil_gemv_int8() -> int:
+    """Seuil GEMV int8 en vigueur : `INT8_GEMV_MAX`, ou `INT8_GEMV_MAX_PARTAGE` dans une portée de partage (243)."""
+    return _INT8_GEMV_MAX_PARTAGE if _W_PARTAGES is not None else _INT8_GEMV_MAX
 # Linéaires INT8 au préfill (n > INT8_GEMV_MAX) : bf16 (défaut jusqu'au scellé
 # P0 : déquant entière + cutlass) | a8 (kernels/gemm_w8a8.py : activation int8
 # par jeton, tensor cores int8, sans déquant). Scellé : Coder préfill 2 048
@@ -845,6 +1005,20 @@ _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
 _PREFILL_INT8 = os.environ.get("ACVRAM_PREFILL_INT8", "cublas")
 if _PREFILL_INT8 not in ("bf16", "a8", "cublas"):
     raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8 | cublas")
+# Pièce 260 (opt-in, HORS BIT) : les int8 ré-encodés du fp8 (manifeste « origine: fp8 ») sont exclus du chemin cublas
+# depuis la 139, parce que leur copie signée persistante coûtait 10,6 Go (OOM). La 201 a rendu cette copie transitoire :
+# la raison de l'exclusion est tombée. cublas = W8A8 int8 (A8 par jeton fusionnée, gemm_w8a8) comme les -qkvo-i8c ;
+# bf16 (défaut) = déquant bf16 de la 139.
+_I8C_FP8_PREFILL = os.environ.get("ACVRAM_I8C_FP8_PREFILL", "bf16")
+if _I8C_FP8_PREFILL not in ("bf16", "cublas"):
+    raise ValueError(f"ACVRAM_I8C_FP8_PREFILL={_I8C_FP8_PREFILL!r} : attendu bf16 | cublas")
+# Pièce 260x (AU BIT) : copie signée q − 128 du chemin cublas par UN xor (q ^ 0x80 relu en int8 : 1 octet lu, 1 écrit) au
+# lieu de l'aller-retour int16 (trois noyaux, ≈ 10 octets de trafic par poids) — la copie est transitoire depuis la 201,
+# donc payée à chaque appel hors portée. Micro-banc 260 : qkv 10240×5120 à n = 624, 472 → 196 µs, sortie identique.
+# int16 = témoin (l'ancien calcul).
+_I8C_COPIE = os.environ.get("ACVRAM_I8C_COPIE", "xor")
+if _I8C_COPIE not in ("xor", "int16"):
+    raise ValueError(f"ACVRAM_I8C_COPIE={_I8C_COPIE!r} : attendu xor | int16")
 
 
 def _i8c_eligible(t: INT8Tensor) -> bool:
@@ -858,6 +1032,14 @@ def _i8c_eligible(t: INT8Tensor) -> bool:
               and t.zeros.shape[1] == 1 and bool((t.zeros == 128).all()))
         t.__dict__["_i8c"] = ok
     return ok
+
+
+def copie_signee(q: torch.Tensor) -> torch.Tensor:
+    """uint8 à zéro 128 → int8 signé q − 128, au bit : (q ^ 0x80) relu en int8 vaut q − 128 sur les 256 valeurs
+    (tests/test_i8c_copie_260x.py) ; ACVRAM_I8C_COPIE=int16 garde l'ancien calcul (témoin)."""
+    if _I8C_COPIE == "int16":
+        return (q.to(torch.int16) - 128).to(torch.int8).contiguous()
+    return q.contiguous().view(torch.int8).bitwise_xor(-128)
 
 
 def _i8c_poids(t: INT8Tensor):
@@ -876,7 +1058,7 @@ def _i8c_poids(t: INT8Tensor):
     w = c.get(cle) if c is not None else None
     if w is None:
         CHEMINS_INT8["i8c_fabrique"] += 1
-        w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
+        w = copie_signee(t.qweight)
         if c is not None:
             c[cle] = w
     else:
@@ -970,7 +1152,7 @@ def int8_matmul_partage(x: torch.Tensor, ts: list) -> Optional[list]:
     if _PREFILL_INT8 != "cublas" or x.dtype not in (torch.bfloat16, torch.float16) or n <= 16:
         return None
     ext = get_extension()
-    if ext is not None and ts[0].qweight.is_cuda and n <= _INT8_GEMV_MAX:
+    if ext is not None and ts[0].qweight.is_cuda and n <= seuil_gemv_int8():
         return None                                  # le dispatcher prendrait le GEMV
     if x.is_cuda and (not ts[0].qweight.is_cuda or _bk.resolve("int8", ts[0].qweight.device)[0].name != "cuda-fusionne"):
         return None                                  # backend masqué : la référence torch
@@ -1421,7 +1603,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     27B, soit une centaine de millisecondes pour vingt jetons.
     """
     if gemv_threshold <= 0:
-        gemv_threshold = _INT8_GEMV_MAX
+        gemv_threshold = seuil_gemv_int8()
     t_servi = t               # pièce 179 : le poids servi, avant `vue_g128` (objet neuf à chaque appel)
     ext = get_extension()
     orig_shape = x.shape

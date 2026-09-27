@@ -50,6 +50,15 @@ SECTIONS = {"acvram": "models_acvram", "vLLM": "models_vllm",
             "GGUF": "models_gguf", "EXL3": "models_exl3"}
 _DENSES = {"bf16", "fp16", "fp32"}
 TOLERANCE = 0.05
+# Pièce 267c (CI GitHub) : `du -sk` compte l'espace ALLOUÉ, pas les octets utiles — un
+# petit `acvram_manifest.json` à côté du poids ajoute un bloc entier d'arrondi, et la
+# taille de ce bloc dépend du système de fichiers (ext4 local contre l'overlay du
+# conteneur du runner). Sur un dossier de 100K, ce seul manifeste a fait passer l'écart
+# de sous 5 % (ici) à 7 % (CI) — jamais une différence de MODÈLE (nos catalogues réels
+# pèsent des Mo-Go, où ce même bloc est un bruit sous 0,1 %). Un plancher absolu couvre
+# l'arrondi de bloc SANS jamais masquer un vrai écart : le témoin `test_d_une_taille...`
+# (60 Ko sur 300 Ko, 20 %) reste détecté, largement au-dessus.
+TOLERANCE_PLANCHER_OCTETS = 16 * 1024
 
 
 def lire_menu(texte, doublons=False):
@@ -255,8 +264,9 @@ def controle_c(menu, racines, tailles):
             continue                                      # déjà compté par (a) et (b)
         if taille is not None:
             reel = tailles[chemin]
-            ecart = abs(reel - taille) / max(reel, 1)
-            if ecart > TOLERANCE and _du_h(reel) != _du_h(taille):
+            ecart_octets = abs(reel - taille)
+            ecart = ecart_octets / max(reel, 1)
+            if ecart > TOLERANCE and ecart_octets > TOLERANCE_PLANCHER_OCTETS and _du_h(reel) != _du_h(taille):
                 fautes.append(f"{nom} : menu {_h(taille)}, du -sh {_du_h(reel)} ({ecart:.0%})")
         if racine == "models_acvram" and chemin.is_dir():
             try:
@@ -430,8 +440,14 @@ def test_d_une_taille_fausse_et_un_format_tu_cassent_c(tmp_path):
     racines = _disque_fabrique(tmp_path)
     texte = _MENU_COHERENT.replace("(300K)", "(360K)").replace(" — témoin int8, expert partagé", "")
     _, _, c = _fautes(racines, texte)
-    assert sorted(c) == ["Trois-temoin : rangé sous NVFP4 sans tenseur nvfp4, la ligne ne dit pas ['int8']",
-                         "Un-Q4_K_M : menu 360.00K, du -sh 300K (20%)"], c
+    # 267d (CI GitHub) : le chiffre exact de `du -sh` (300K, 20%) dépend de l'arrondi de
+    # bloc du système de fichiers du runner (304K, 18% vu en CI) — le témoin porte sur la
+    # DÉTECTION (Un-Q4_K_M signalé, avec un couple taille/écart présent sur sa ligne),
+    # jamais sur le chiffre, qui n'a jamais été ce que ce test prouve.
+    assert "Trois-temoin : rangé sous NVFP4 sans tenseur nvfp4, la ligne ne dit pas ['int8']" in c, c
+    lignes_taille = [f for f in c if f.startswith("Un-Q4_K_M : menu 360.00K, du -sh ")]
+    assert len(lignes_taille) == 1 and re.search(r"du -sh \d+(\.\d)?[KMGT] \(\d+%\)$", lignes_taille[0]), c
+    assert len(c) == 2, c
     _, _, c = _fautes(racines, _MENU_COHERENT.replace("(300K)", "(312K)"))
     assert c == [], f"4 % doit passer : {c}"
 

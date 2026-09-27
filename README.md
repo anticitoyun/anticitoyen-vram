@@ -27,6 +27,7 @@ Une passerelle d'inférence compatible avec l'API OpenAI, qui traite la mémoire
 
 - [Les deux idées](#idees)
 - [Démarrage rapide](#demarrage)
+- [Installer](#installer)
 - [Ce que dit `acvram plan`](#plan)
 - [Aller vite](#optimisations)
 - [Points d'entrée HTTP](#http)
@@ -105,6 +106,40 @@ client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
+
+---
+
+<a id="installer"></a>
+
+## Installer
+
+Depuis la source (toutes plateformes) :
+
+```bash
+git clone https://github.com/anticitoyun/anticitoyen-vram.git && cd anticitoyen-vram
+./install.sh
+```
+
+Ou par paquet, un fichier joint à chaque [release GitHub](https://github.com/anticitoyun/anticitoyen-vram/releases/latest) :
+
+| Canal | Fichier joint à la release | Commande |
+|---|---|---|
+| Debian / Ubuntu (.deb) | `acvram_<version>_amd64.deb` | `sudo dpkg -i acvram_<version>_amd64.deb` |
+| Arch (AUR) | `aur-<version>.tar.gz` (PKGBUILD + .SRCINFO) | `tar xzf aur-<version>.tar.gz && cd acvram && makepkg -si` |
+| Fedora / COPR (RPM) | `.rpm` / `.src.rpm` (noms générés par `rpmbuild`, non fixes) | `sudo rpm -i acvram-<version>-1.*.noarch.rpm` (ou `rpmbuild --rebuild *.src.rpm` depuis le `.src.rpm`) |
+| Flatpak | `acvram-<version>.flatpakref` (dépôt OSTree signé sur GitHub Pages ; torch et CUDA sont téléchargés à l'installation) | `flatpak install --user https://github.com/anticitoyun/anticitoyen-vram/releases/download/v<version>/acvram-<version>.flatpakref` |
+
+Un `.flatpakref` installe toujours la dernière version publiée du dépôt.
+
+Avant d'installer, vérifier le fichier téléchargé contre les sommes jointes à la release (`SHA256SUMS`,
+publié une fois tous les autres fichiers présents) :
+
+```bash
+curl -LO https://github.com/anticitoyun/anticitoyen-vram/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+Pip n'est pas publié comme paquet (pas de roue construite) : `pip install -e '.[dev]'` installe depuis un clone de la source, comme `./install.sh`.
 
 ---
 

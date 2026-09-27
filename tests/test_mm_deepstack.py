@@ -108,6 +108,7 @@ class _Enveloppe(nn.Module):
 def _reference_transformers(couches, x, masque, niveaux):
     """État caché après la dernière couche selon transformers (norme finale
     remplacée par l'identité), niveaux ajoutés par ``_deepstack_process``."""
+    pytest.importorskip("transformers")  # pièce 267 : extra optionnel (vision/gdn), absent en CI de base
     from transformers import Qwen3VLConfig, Qwen3VLTextModel
     cfg = Qwen3VLConfig(
         text_config=dict(hidden_size=H, intermediate_size=2 * H, num_hidden_layers=L,

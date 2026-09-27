@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import contextlib
 import glob
 import os
 import sys
@@ -40,6 +41,14 @@ def _depaquetages() -> dict:
         return dict(marlin_port.DEPAQUETAGES)
     except Exception:                                            # noqa: BLE001
         return {}
+
+
+def _chemins_int8() -> dict:
+    try:
+        from .. import kernels
+        return dict(kernels.CHEMINS_INT8)
+    except Exception:                                            # noqa: BLE001
+        return {}
 from . import capteurs as _capteurs
 from .console import GALERIE, PAGE
 from ..engine.runner import Engine, GenerationOutput
@@ -60,6 +69,13 @@ __all__ = ["create_app", "EngineService"]
 # Pièce 179 (DÉFAUT 5 ms depuis 179 b ; 0 = coupé) : fenêtre d'admission du fil moteur — voir `_attendre_les_arrivees`.
 # Banc chat b=8 : +2,0 % (Qwen3.8), sans coût en solo (TTFT +0,07/+0,15 ms, b=1 inchangé).
 _FENETRE_ADMISSION_S = float(os.environ.get("ACVRAM_ADMISSION_FENETRE_MS", "5")) / 1000.0
+# Pièce 269 b (opt-in, à sec) : la fenêtre s'ouvre aussi à UNE requête en file si une autre est déjà ENTRÉE dans
+# le service (gestionnaire HTTP commencé, `submit` pas encore fait) — 269 : après la 268, tout tour à deux pas restant
+# venait du fil moteur réveillé avec une seule requête en file, la 2e à quelques ms derrière dans le gabarit/tokeniseur.
+# Une requête seule n'a personne derrière elle : compteur à 0, porte fermée, elle ne paie rien (179 b).
+# 269 c : AU DÉFAUT depuis la 0.7.3 (mesure 269 b, ABBA ×3 sous carte.sh : 21/21 tours à 12 en un pas contre 15/21,
+# TTFT p50 247,4 ms contre 251,6, solo −0,7 ms) ; ACVRAM_ADMISSION_GUET=0 = opt-out, comportement d'avant.
+_GUET_ADMISSION = os.environ.get("ACVRAM_ADMISSION_GUET", "1") == "1"
 
 class EngineService:
     """Anime le moteur depuis un fil d'arrière-plan et redistribue les résultats."""
@@ -102,6 +118,18 @@ class EngineService:
         if self._thread:
             self._thread.join(timeout=5)
 
+    # 269 b : requêtes HTTP entrées dans le service et pas encore soumises au moteur — lu par le fil moteur (lecture d'un
+    # entier, sans verrou : une valeur d'un tour de boucle en retard ne coûte qu'un tour de 0,5 ms), écrit par la boucle asyncio.
+    en_entree: int = 0
+
+    @contextlib.contextmanager
+    def entree(self):
+        self.en_entree += 1
+        try:
+            yield
+        finally:
+            self.en_entree -= 1
+
     def _attendre_les_arrivees(self) -> None:
         """Pièce 179 (opt-in `ACVRAM_ADMISSION_FENETRE_MS`) : moteur sans séquence en cours et file non pleine — attendre
         que la file cesse de grossir pendant la fenêtre (plafond : 4 fenêtres) avant le pas, pour admettre ensemble des
@@ -110,7 +138,11 @@ class EngineService:
         (chef, 25/09 : le coût en solo décide du défaut). Une rafale dont une seule requête est arrivée au réveil
         reste en deux pas, comme sans fenêtre."""
         eng = self.engine
-        if eng.running or len(eng.waiting) < 2:
+        if eng.running or not eng.waiting:
+            return
+        # 269 b : à une requête en file, la porte ne s'ouvre que si une autre est déjà entrée (opt-in) ; sinon ≥ 2 (179 b)
+        guet = self.guet_actif()
+        if len(eng.waiting) < 2 and not (guet and self.en_entree > 0):
             return
         debut = derniere = time.perf_counter()
         n = len(eng.waiting)
@@ -118,9 +150,11 @@ class EngineService:
             time.sleep(0.0005)
             maintenant = time.perf_counter()
             m = len(eng.waiting)
-            if m != n:
+            # 269 b : une requête entrée mais pas encore soumise compte comme une file qui grossit ; le plafond de 4 fenêtres
+            # se vérifie à CHAQUE tour (pas seulement quand la file n'a pas bougé), sinon le guet tiendrait le fil sans fin
+            if m != n or (guet and self.en_entree > 0):
                 n, derniere = m, maintenant
-            elif maintenant - derniere >= _FENETRE_ADMISSION_S or maintenant - debut >= 4 * _FENETRE_ADMISSION_S:
+            if maintenant - derniere >= _FENETRE_ADMISSION_S or maintenant - debut >= 4 * _FENETRE_ADMISSION_S:
                 break
 
     def _run(self) -> None:
@@ -194,6 +228,13 @@ class EngineService:
         return request_id, q
 
     # -- images ------------------------------------------------------------
+    def guet_actif(self) -> bool:
+        """269 d (mesure 276) : le guet d'admission est coupé pour un alias vision — la préparation d'image d'une requête
+        entrée (`preparer_images`, 16-34 ms) dépasse toujours la fenêtre de 5 ms, le fil attendait le plafond de 20 ms à
+        chaque tour pour un pas groupé qui n'en rend que 8 : +10 ms de mur et de TTFT p50, +25 ms au p95 (Qwen3-VL-2B,
+        b = 4). En texte le guet reste au défaut (269 c ; 276 : b = 2/4/8 sans coût)."""
+        return _GUET_ADMISSION and not self.vision_servie()
+
     def vision_servie(self) -> bool:
         """Le manifeste de l'alias servi porte ``vision: oui`` (pièce (a))."""
         man = getattr(getattr(self.engine, "loaded", None), "manifest", None) or {}
@@ -973,7 +1014,10 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         }
 
     @app.get("/metrics")
-    async def metrics() -> dict:
+    def metrics() -> dict:
+        # Pièce 268 : `def`, pas `async def` — FastAPI l'exécute dans son pool de fils ; en `async def`, son calcul
+        # (regime(), nvidia-smi) gelait la boucle HTTP : 343 ms par appel, TTFT à 12 de 0,242 à 0,785 s sous un
+        # lecteur à 20 Hz (262). Et regime() une seule fois par appel (il y était appelé sept fois).
         # `version` sert a la console, qui l'affiche en tete : sans elle on ne
         # sait pas quelle version repond, et deux versions ont deja coexiste
         # sur cette machine (paquet 0.5.0, venv 0.2.0).
@@ -985,6 +1029,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         # planifiee (slots x contexte) : sans lui, un compteur > 0 ne dit pas
         # si le budget est structurellement sous-dimensionne ou accidentel.
         kv_seqs = getattr(plan, "kv_planned_seqs", 0) or 0
+        r = engine.regime()
         return {"engine": engine.stats.to_dict(),
                 "kv_max_tokens": plan.kv_max_tokens,
                 "kv_planned_seqs": kv_seqs,
@@ -995,14 +1040,14 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 # RÉELLEMENT servie et somme celles qu'il voit lui-même —
                 # 18/09, acvram [0,1] contre llama.cpp [0], énergie faussée
                 # par le repos de la carte inutilisée.
-                "cartes": engine.regime()["cartes"],
-                "repli_eager": engine.regime().get("repli_eager", 0),
-                "replis_eager_raisons": engine.regime().get("replis_eager_raisons", []),
+                "cartes": r["cartes"],
+                "repli_eager": r.get("repli_eager", 0),
+                "replis_eager_raisons": r.get("replis_eager_raisons", []),
                 # pièce 90 : le nombre de clés de graphe refusées et leur raison
                 # principale, structurés — pas seulement noyés dans regime_ligne
-                "graphes": engine.regime().get("graphes"),
-                "graphes_refus_n": engine.regime().get("graphes_refus_n", 0),
-                "graphes_refus_principale": engine.regime().get("graphes_refus_principale"),
+                "graphes": r.get("graphes"),
+                "graphes_refus_n": r.get("graphes_refus_n", 0),
+                "graphes_refus_principale": r.get("graphes_refus_principale"),
                 "energie": _energie_par_jeton(),
                 # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
                 # octet pour octet, que le "[regime]" ecrit dans le JSON
@@ -1011,9 +1056,12 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "regime_ligne": _regime_ligne(),
                 # pièce 147 : noyau du dépaquetage Marlin au préfill de la disposition unique (cuda | triton), compté
                 "depaquetage": _depaquetages(),
+                # pièce 243 : chemins int8 pris (gemv | dequant | …), comptés — seule preuve en service
+                # qu'un seuil GEMV→GEMM a pris (la variable dans regime_ligne ne dit que qu'elle a été lue)
+                "int8_chemins": _chemins_int8(),
                 # pièce 49 : régime spéculatif visible dans /metrics (même source que
                 # regime_ligne — mode + état garde + gain moyen glissant)
-                "speculation": engine.regime().get("speculation"),
+                "speculation": r.get("speculation"),
                 "version": __version__, **app.state.info}
 
     @app.get("/v1/models")
@@ -1033,30 +1081,33 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # -- chat -------------------------------------------------------------
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest, raw: Request):
-        signaler_champs_inconnus(req, "/v1/chat/completions")
-        # Trois états pour une image, jamais un silence : acceptée (alias
-        # vision), refus nommé (source, dépassement), alias sans vision.
-        urls = [u for m in req.messages for u in m.images()]
-        if urls and not service.vision_servie():
-            raise HTTPException(400, f"modèle sans tour de vision : l'alias « {model_name} » "
-                                     "ne porte pas vision: oui dans son manifeste, "
-                                     f"{len(urls)} image_url refusée(s)")
-        messages = messages_pour_gabarit(req.messages, avec_images=bool(urls))
-        extra = dict(req.chat_template_kwargs or {})
-        if req.tools:
-            extra["tools"] = req.tools          # les gabarits HF les rendent eux-mêmes
-        prompt = render_chat(tokenizer, messages, req.add_generation_prompt, extra)
-        params = _params_from(req, 512)
-        images = None
-        if urls:
-            octets = [charger_image(u) for u in urls]           # ImageRefusee -> 400
-            prompt_ids, images = preparer_images(service.processeur_vision(), prompt, octets)
-            n_img = sum(f.n_jetons for f in images)
-            _garde_contexte(engine, prompt_ids, f" dont {n_img} jetons image ({len(images)} image(s))", params=params)
-        else:
-            prompt_ids = _encode(tokenizer, prompt)
-            _garde_contexte(engine, prompt_ids, params=params)
-        request_id, q = await service.submit(prompt_ids, params, images)
+        with service.entree():                       # 269 b : compte les requêtes entrées non soumises
+            signaler_champs_inconnus(req, "/v1/chat/completions")
+            # Trois états pour une image, jamais un silence : acceptée (alias
+            # vision), refus nommé (source, dépassement), alias sans vision.
+            urls = [u for m in req.messages for u in m.images()]
+            if urls and not service.vision_servie():
+                raise HTTPException(400, f"modèle sans tour de vision : l'alias « {model_name} » "
+                                         "ne porte pas vision: oui dans son manifeste, "
+                                         f"{len(urls)} image_url refusée(s)")
+            messages = messages_pour_gabarit(req.messages, avec_images=bool(urls))
+            extra = dict(req.chat_template_kwargs or {})
+            if req.tools:
+                extra["tools"] = req.tools          # les gabarits HF les rendent eux-mêmes
+            # Pièce 268 étape 2 : gabarit (Jinja) et tokeniseur dans un fil (~3 ms par requête, 262/269) — dans la boucle,
+            # ils étalaient une rafale de 12 au-delà de la fenêtre d'admission ; mêmes fonctions, mêmes jetons, même ordre.
+            prompt = await asyncio.to_thread(render_chat, tokenizer, messages, req.add_generation_prompt, extra)
+            params = _params_from(req, 512)
+            images = None
+            if urls:
+                octets = [charger_image(u) for u in urls]           # ImageRefusee -> 400
+                prompt_ids, images = preparer_images(service.processeur_vision(), prompt, octets)
+                n_img = sum(f.n_jetons for f in images)
+                _garde_contexte(engine, prompt_ids, f" dont {n_img} jetons image ({len(images)} image(s))", params=params)
+            else:
+                prompt_ids = await asyncio.to_thread(_encode, tokenizer, prompt)
+                _garde_contexte(engine, prompt_ids, params=params)
+            request_id, q = await service.submit(prompt_ids, params, images)
 
         if req.stream:
             return StreamingResponse(
@@ -1088,32 +1139,33 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # content_block_delta, message_delta, message_stop).
     @app.post("/v1/messages")
     async def anthropic_messages(raw: Request):
-        req = await raw.json()
-        messages = []
-        sys_prompt = req.get("system")
-        if sys_prompt:
-            if isinstance(sys_prompt, list):
-                sys_prompt = "".join(b.get("text", "") for b in sys_prompt)
-            messages.append({"role": "system", "content": sys_prompt})
-        for m in req.get("messages", []):
-            contenu = m.get("content", "")
-            if isinstance(contenu, list):
-                contenu = "".join(b.get("text", "") for b in contenu
-                                  if isinstance(b, dict)
-                                  and b.get("type") == "text")
-            messages.append({"role": m.get("role", "user"),
-                             "content": contenu})
-        prompt = render_chat(tokenizer, messages, True)
-        prompt_ids = _encode(tokenizer, prompt)
-        params = SamplingParams(
-            temperature=float(req.get("temperature", 1.0)),
-            top_p=float(req.get("top_p", 1.0)),
-            top_k=int(req.get("top_k", 0) or 0),
-            max_tokens=int(req.get("max_tokens", 512)),
-            stop=list(req.get("stop_sequences") or []),
-        )
-        _garde_contexte(engine, prompt_ids, params=params)
-        request_id, q = await service.submit(prompt_ids, params)
+        with service.entree():                       # 269 b : compte les requêtes entrées non soumises
+            req = await raw.json()
+            messages = []
+            sys_prompt = req.get("system")
+            if sys_prompt:
+                if isinstance(sys_prompt, list):
+                    sys_prompt = "".join(b.get("text", "") for b in sys_prompt)
+                messages.append({"role": "system", "content": sys_prompt})
+            for m in req.get("messages", []):
+                contenu = m.get("content", "")
+                if isinstance(contenu, list):
+                    contenu = "".join(b.get("text", "") for b in contenu
+                                      if isinstance(b, dict)
+                                      and b.get("type") == "text")
+                messages.append({"role": m.get("role", "user"),
+                                 "content": contenu})
+            prompt = render_chat(tokenizer, messages, True)
+            prompt_ids = _encode(tokenizer, prompt)
+            params = SamplingParams(
+                temperature=float(req.get("temperature", 1.0)),
+                top_p=float(req.get("top_p", 1.0)),
+                top_k=int(req.get("top_k", 0) or 0),
+                max_tokens=int(req.get("max_tokens", 512)),
+                stop=list(req.get("stop_sequences") or []),
+            )
+            _garde_contexte(engine, prompt_ids, params=params)
+            request_id, q = await service.submit(prompt_ids, params)
         mid = new_id("msg")
 
         def stop_reason(r: str) -> str:
@@ -1170,17 +1222,18 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # -- legacy completions ------------------------------------------------
     @app.post("/v1/completions")
     async def completions(req: CompletionRequest):
-        signaler_champs_inconnus(req, "/v1/completions")
-        prompt = req.prompt
-        if isinstance(prompt, list) and prompt and isinstance(prompt[0], int):
-            prompt_ids = list(prompt)
-            prompt_text = ""
-        else:
-            prompt_text = prompt[0] if isinstance(prompt, list) else prompt
-            prompt_ids = _encode(tokenizer, str(prompt_text), brut=True)
-        params = _params_from(req, 256)
-        _garde_contexte(engine, prompt_ids, params=params)
-        request_id, q = await service.submit(prompt_ids, params)
+        with service.entree():                       # 269 b : compte les requêtes entrées non soumises
+            signaler_champs_inconnus(req, "/v1/completions")
+            prompt = req.prompt
+            if isinstance(prompt, list) and prompt and isinstance(prompt[0], int):
+                prompt_ids = list(prompt)
+                prompt_text = ""
+            else:
+                prompt_text = prompt[0] if isinstance(prompt, list) else prompt
+                prompt_ids = _encode(tokenizer, str(prompt_text), brut=True)
+            params = _params_from(req, 256)
+            _garde_contexte(engine, prompt_ids, params=params)
+            request_id, q = await service.submit(prompt_ids, params)
 
         if req.stream:
             return StreamingResponse(

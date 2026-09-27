@@ -20,10 +20,18 @@ def _sous_processus(env_extra, code):
 
 
 def test_le_defaut_est_thp_omp8_sans_affinite():
+    # Pièce 267c puis 267d (CI GitHub) : l'ENV var posée par `hote.py` vaut bien "8" (une
+    # chaîne, quel que soit le matériel — ce que le paquet DEMANDE), mais le nombre de fils
+    # EFFECTIF que torch retient est plafonné à ses CŒURS PHYSIQUES, pas à `os.cpu_count()`
+    # (qui compte les threads logiques — 267d : runner à 4 threads / 2 cœurs physiques avec
+    # hyperthreading, `os.cpu_count()` valait 4, torch plafonnait à 2). Le seul plafond fiable
+    # est celui que TORCH LUI-MÊME rapporte (`torch.get_num_threads()`, lu dans ce même
+    # sous-processus) : la ligne doit lui être cohérente, jamais à une valeur reconstruite.
     out = _sous_processus({}, "import acvram, os, torch; from acvram import hote; "
-                              "print(hote.hote_texte(), os.environ['THP_MEM_ALLOC_ENABLE'], os.environ['OMP_NUM_THREADS'], torch.get_num_threads())")
+                              "print(hote.hote_texte(), os.environ['THP_MEM_ALLOC_ENABLE'], "
+                              "os.environ['OMP_NUM_THREADS'], torch.get_num_threads())")
     txt, thp, omp, nt = out.split()
-    assert txt == "hote=thp,omp8" and thp == "1" and omp == "8" and nt == "8", out
+    assert txt == f"hote=thp,omp{nt}" and thp == "1" and omp == "8", out
 
 
 def test_acvram_cpus_pose_l_affinite_et_la_ligne_la_relit():
@@ -33,9 +41,12 @@ def test_acvram_cpus_pose_l_affinite_et_la_ligne_la_relit():
 
 
 def test_un_reglage_de_session_gagne_et_la_ligne_dit_l_effectif():
+    # 267d : "4" demandé peut lui-même être plafonné par torch aux cœurs physiques (2 sur
+    # le runner CI) — même principe que ci-dessus, comparé à `torch.get_num_threads()`.
     out = _sous_processus({"OMP_NUM_THREADS": "4", "THP_MEM_ALLOC_ENABLE": "0"},
                           "import acvram, torch; from acvram import hote; print(hote.hote_texte(), torch.get_num_threads())")
-    assert out == "hote=sans-thp,omp4 4", out
+    txt, nt = out.split()
+    assert txt == f"hote=sans-thp,omp{nt}", out
 
 
 def test_la_ligne_de_regime_a_sec_porte_hote():

@@ -24,6 +24,18 @@ LISTE_ALIAS_SERVIS = RACINE / "outils" / "poste" / "alias-servis-20-09.txt"
 # Ajouter une ligne par version qui change l'alias ; ne jamais modifier une ligne existante.
 ALIAS_PAR_VERSION = {
     "0.6.38": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.0 (26/09, pièce 232) : même alias servi qu'en 0.6.38 (la bascule S1b attend la 123) ; sha256 relevé sur le disque le 26/09.
+    "0.7.0": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.1 (26/09, pièce 272) : même alias servi qu'en 0.7.0 (aucune pièce de la 0.7.1 ne change l'alias).
+    "0.7.1": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.2 (26/09, pièces 070 b/273) : doctor et paquets seulement, même alias.
+    "0.7.2": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.3 (26/09, pièce 269 c) : guet d'admission au défaut, même alias.
+    "0.7.3": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.4 (26/09, pièce 269 d) : guet coupé pour les alias vision, même alias.
+    "0.7.4": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.5 (26/09, pièces 277fix/285) : correctif ngram hors défaut et outillage de sortie, même alias.
+    "0.7.5": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
 }
 # Formats par famille, identiques pour i8c et S1b (107 bis § 6) : ce qui distingue les deux est dans les experts
 # (calibrés ou non), pas dans les formats.

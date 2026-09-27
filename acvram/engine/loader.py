@@ -113,7 +113,8 @@ def _build_quant(entry: dict, name: str, reader: _ShardReader,
     if fmt == "int8":
         t = INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
                        entry.get("group_size", group_size), shape)
-        if entry.get("origine") == "fp8":
+        from .. import kernels as _kernels
+        if entry.get("origine") == "fp8" and _kernels._I8C_FP8_PREFILL == "bf16":   # 260 : cublas = opt-in W8A8
             # Pièce 139 : préfill en déquant bf16 (W8A16), jamais la copie signée du chemin cublas
             # (kernels._i8c_poids) — nommé sur la ligne de régime (regime.prefill_i8c_texte)
             t.__dict__["prefill_bf16"] = True
@@ -310,9 +311,10 @@ def load_model(path: str, plan: Optional[Plan] = None,
             embed = embed.pin_memory()
 
     rope_gemma = None
+    # dtype du service (pièce 213) : sans lui, fp32 par défaut, et la table dépendait du 1er appelant
     rope = RotaryEmbedding(spec.rotary_dim or spec.head_dim,
                            spec.max_position_embeddings,
-                           spec.rope_theta, spec.rope_scaling)
+                           spec.rope_theta, spec.rope_scaling, None, dtype)
 
     # Profil de routage persistant (bead pds, point 1) : lu une seule fois
     # pour tout le modèle, `None` si aucun n'existe encore — cas normal au

@@ -193,6 +193,25 @@ _reaper_setsid_orphelins() {
   done
 }
 
+# Piece 244 : un TERM/INT/HUP recu par carte.sh LUI-MEME (un `kill` externe,
+# pas notre propre garde DUREE_MAX) tuait ce script sans jamais toucher a la
+# commande, encore vivante dans son groupe (`setsid`, ci-dessous) — le verrou
+# tombe (flock lie au descripteur de CE process), la commande continue hors
+# verrou. Signal transmis au GROUPE de la commande (pgid negatif : elle-meme
+# et tout ce qu'elle a lance), TERM puis KILL apres un repit, avant de sortir
+# — `exit` depuis un trap de signal declenche quand meme le trap EXIT plus
+# bas (verrou rendu, journal, reaper c7w).
+_244_signal() {
+  local sig=$1
+  printf '%s SIGNAL  %-8s %-32s %s recu %s, transmis au groupe\n' "$(date +%FT%T)" "$$" "${NOM:-?}" "${TYPE:-?}" "$sig" >> "${JOURNAL:-/dev/null}" 2>/dev/null || true
+  if [ -n "${_fils:-}" ]; then
+    kill -TERM -- "-$_fils" 2>/dev/null
+    for _ in 1 2 3 4 5; do kill -0 -- "-$_fils" 2>/dev/null || break; sleep 1; done
+    kill -KILL -- "-$_fils" 2>/dev/null
+  fi
+  exit $(( 128 + sig ))
+}
+
 # DOUBLE PRISE : le verrou est deja tenu PAR NOUS, plus haut dans la meme
 # chaine. Le 10/09/2026, une campagne enveloppee de carte.sh lancait des
 # services qui prenaient carte.sh a leur tour : le bras interieur a attendu
@@ -291,6 +310,22 @@ if ! flock -n 9; then
   echo "carte obtenue apres $(( $(date +%s) - debut )) s" >&2
 fi
 
+# Piece 244 : le verrou P vient d'etre obtenu, mais un `.qui` d'une prise
+# precedente peut rester si son proprietaire a ete tue en KILL -9 (aucun trap
+# ne rattrape -9 : ni l'ancien `_reaper_setsid_orphelins`, ni le _244_signal
+# ci-dessus n'ont pu tourner). 5e champ = pgid de la commande (voir plus bas) ;
+# un pgid encore vivant, verrou libre, est le signe exact du defaut du 26/09 —
+# la carte est REFUSEE plutot que rendue a l'aveugle par-dessus une commande
+# qui tourne encore.
+_ancien_p=; _ancien_pgid=
+read -r _ancien_p _ _ _ _ancien_pgid 2>/dev/null < "$INFO" || true
+if [ -n "${_ancien_pgid:-}" ] && kill -0 -- "-$_ancien_pgid" 2>/dev/null; then
+  echo "carte.sh : REFUS — le groupe pgid $_ancien_pgid d'une prise precedente ($INFO) est" >&2
+  echo "  encore vivant alors que le verrou est libre (KILL -9 du carte.sh parent, sans doute) :" >&2
+  echo "  achevez-le (kill -- -$_ancien_pgid) avant de reprendre la carte." >&2
+  exit 4
+fi
+
 # ── MESURE / ETAT : une fois P obtenu (donc AUCUNE autre mesure/service ne tient),
 # prendre LOCK_EX sur S exclut les PARTAGES. On le fait APRES P : ainsi deux
 # mesures se serialisent sur P (attente bornée) au lieu de se refuser sur S, et si
@@ -368,6 +403,11 @@ printf '%s prise   %-8s %-32s %s\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" >> "$JO
 # ce trap trouvait un .qui qui n'est plus le sien — pour laisser une preuve la
 # prochaine fois, au lieu d'un silence.
 trap '[ -n "${_charge_pid:-}" ] && kill "$_charge_pid" 2>/dev/null; _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
+# Piece 244 : voir _244_signal ci-dessus — un TERM/INT/HUP externe sur carte.sh
+# ne doit jamais laisser la commande vivre hors verrou.
+trap '_244_signal 15' TERM
+trap '_244_signal 2' INT
+trap '_244_signal 1' HUP
 AVANT=$(etat_carte)
 
 # CHARGE HOTE, PENDANT LA PRISE (189, ordre chef, apres la 186 : « une mesure
@@ -407,12 +447,27 @@ _TIMEOUT="$VERROU.timeout.$$"
 # commande ne doit hériter ni P ni S, sinon elle prolongerait le verrou après
 # notre sortie (meme piege que le fd 9). fd 8 n'existe pas pour un service, mais
 # ce chemin n'est atteint que par mesure/etat.
+# Piece 244 (chef, contamination du 26/09 : un pytest orphelin de la commande
+# a tourne 10 min hors verrou apres qu'un `kill` externe a tue carte.sh lui-meme
+# — 3e cas en trois jours). `setsid` fait de la commande le chef de son PROPRE
+# groupe de processus (pgid = son pid) : un signal envoye a `-$_fils` (pgid
+# negatif) atteint la commande ET tout ce qu'elle a lance, meme deja reparente,
+# sans dependre de `nvidia-smi` (le reaper c7w ci-dessus ne voit que ce qui
+# touche deja le GPU — un pytest encore sur CPU lui echappe entierement).
 if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
-  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- 9>&- &
+  setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- 9>&- &
 else
-  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 8>&- 9>&- &
+  setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 8>&- 9>&- &
 fi
 _fils=$!
+# 5e champ, en plus du format 4 champs historique de $INFO (lu par qui_tient()
+# et /verrou qui n'en lisent que 4) : le pgid de la commande, pour que la
+# PROCHAINE prise puisse verifier qu'il n'en reste rien avant de continuer.
+# N'ECRASE PAS un $INFO deja repris par quelqu'un d'autre entre-temps (meme
+# garde que le trap EXIT generique, jxm) : si le premier champ n'est plus $$,
+# ce n'est plus notre fichier a completer.
+_p5=; read -r _p5 _ 2>/dev/null < "$INFO"
+[ "$_p5" = "$$" ] && printf '%s %s %s %s %s\n' "$$" "$_pris" "$NOM" "$TYPE" "$_fils" > "$INFO"
 _garde=
 if [ "$DUREE_MAX" -gt 0 ]; then
   # anticitoyen-vram-575 : ce garde-fou heritait stdout/stderr de carte.sh (donc

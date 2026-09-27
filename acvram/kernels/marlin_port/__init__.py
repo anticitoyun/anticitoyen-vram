@@ -402,7 +402,9 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     if par_colonne and E == 1 and noyau not in ("triton", "cuda", "torch") and not (
             noyau == "auto" and w.device.type == "cuda" and (triton is not None or _depaqueter_cuda_disponible())):
         raise ValueError("depaqueter_marlin : échelle globale par colonne servie par les noyaux Triton, CUDA et torch")
-    if par_colonne and noyau == "cuda":
+    # 209 (a) refusait ici TOUTE échelle par colonne au noyau CUDA, y compris E = 1 (le cas 134/147 que l'extension sert
+    # au bit) : deux tests p147 rouges depuis le 25/09 (232, rejeu main = branche). Seule la pile E > 1 lui est fermée.
+    if par_colonne and E > 1 and noyau == "cuda":
         raise ValueError("depaqueter_marlin : échelle globale par colonne d'une pile (E > 1) : noyau triton ou torch")
     if out is None:
         out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
@@ -410,7 +412,8 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     if noyau == "auto":
         noyau = _DEPAQUETAGE if _DEPAQUETAGE in ("cuda", "triton", "torch") else "auto"
     if noyau == "auto":
-        if w.device.type == "cuda" and _depaqueter_cuda_disponible():
+        # une pile E > 1 à g [E, N] ne va JAMAIS au noyau CUDA (il lirait g[e] comme scalaire, sans erreur) : triton/torch
+        if w.device.type == "cuda" and _depaqueter_cuda_disponible() and not (par_colonne and E > 1):
             noyau = "cuda"
         else:
             noyau = "triton" if (w.device.type == "cuda" and triton is not None) else "torch"
@@ -788,6 +791,12 @@ def aligner_blocs_capturable(flat_e: torch.Tensor, block_size: int, num_experts:
     (P_max = G + E·(block−1)) : capturable dans un graphe CUDA. ``flat_e``
     [G] int32 (expert de chaque paire, ordre des jetons). ``tampons`` :
     (sorted_ids, expert_ids, num_post) réutilisés (adresses stables)."""
+    # Pièce 267 : `_aligner_kernel` n'existe QUE `if triton is not None:` (tête du fichier) —
+    # sans garde, triton absent (roue CPU, aucun `@triton.jit` compilé) rendait un NameError
+    # nu plutôt qu'un refus nommé (CI GitHub, torch CPU).
+    if triton is None:
+        raise RuntimeError("aligner_blocs_capturable : triton absent — ce chemin "
+                            "(décodage sous graphe) exige triton, même interprété (CPU)")
     G = flat_e.numel()
     E = num_experts
     P = G + E * (block_size - 1)

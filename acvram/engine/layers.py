@@ -719,8 +719,17 @@ class RotaryEmbedding(nn.Module):
         return inv
 
     def _ensure(self, seq_len: int, device, dtype) -> None:
+        """Tables cos/sin au dtype FIXE du module (`self._dtype`), jamais à celui du premier appelant.
+
+        Pièce 213 : le dtype de l'appel (`dtype`) n'entre plus dans la table. Avant, la table prenait le dtype du
+        PREMIER appelant et n'était reconstruite que sur la longueur : le RoPE principal, construit sans dtype
+        (fp32 par défaut), était d'abord rempli par `tables32` (préfill fusionné) en fp32 NON arrondi, puis
+        reconstruit en bf16 par `reserver` — le 1er lot d'un processus tournait sur d'autres tables que tous les
+        suivants (contam2 de la 213 : Y seul ≠ Y après n'importe quel lot, défaut présent en 0.6.38). Le dtype
+        est aussi une condition de reconstruction, par défense."""
+        dtype = self._dtype
         if self._cos is not None and seq_len <= self._cache_len \
-                and self._cos.device == device:
+                and self._cos.device == device and self._cos.dtype == dtype:
             return
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             # Un graphe capturé garde l'adresse des tables : les remplacer
@@ -739,6 +748,7 @@ class RotaryEmbedding(nn.Module):
         self._cos = emb.cos().to(dtype)
         self._sin = emb.sin().to(dtype)
         self._cache_len = n
+        self._generation = getattr(self, "_generation", 0) + 1     # tables dérivées : reconstruites si périmées
 
     def reserver(self, max_pos: int, device, dtype) -> None:
         """Amène les tables à leur taille finale, hors de toute capture, pour
@@ -761,12 +771,14 @@ class RotaryEmbedding(nn.Module):
         seulement (``reserver``, hors capture) ; rend la ligne indexée sinon."""
         self._ensure(max_pos, device, dtype)
         cs = getattr(self, "_cs_demi", None)
-        if cs is None or cs.shape[0] != self._cos.shape[0] or cs.device != device or cs.dtype != dtype:
+        if (cs is None or cs.shape[0] != self._cos.shape[0] or cs.device != device or cs.dtype != self._cos.dtype
+                or getattr(self, "_gen_demi", None) != self._generation):
             if cs is not None and torch.cuda.is_current_stream_capturing():
                 raise RuntimeError("demi-tables RoPE réallouées pendant une capture de "
                                    "graphe — appeler reserver() avant la capture")
             half = self._cos.shape[-1] // 2
             self._cs_demi = torch.stack((self._cos[:, :half], self._sin[:, :half]), dim=1).contiguous()
+            self._gen_demi = self._generation
             cs = self._cs_demi
         return None if positions is None else cs[positions]
 
@@ -776,7 +788,8 @@ class RotaryEmbedding(nn.Module):
         conversions par couche et par jeton."""
         self._ensure(max_pos, device, self._dtype)
         c32 = getattr(self, "_cos32", None)
-        if c32 is None or c32.shape[0] != self._cos.shape[0] or c32.device != device:
+        if (c32 is None or c32.shape[0] != self._cos.shape[0] or c32.device != device
+                or getattr(self, "_gen32", None) != self._generation):
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 # première allocation comprise : un tenseur créé pendant une capture vit
                 # dans le bassin du graphe et meurt avec la capture suivante (REGLES § 6)
@@ -788,6 +801,7 @@ class RotaryEmbedding(nn.Module):
                       f"{torch.cuda.is_current_stream_capturing()}", flush=True)
             self._cos32 = self._cos.to(torch.float32).contiguous()
             self._sin32 = self._sin.to(torch.float32).contiguous()
+            self._gen32 = self._generation
         return self._cos32, self._sin32
 
     def forward(self, positions: torch.Tensor, device, dtype,
@@ -803,7 +817,9 @@ class RotaryEmbedding(nn.Module):
         self._ensure(max_pos, device, dtype)
         if self._mrope_axes is not None and positions.dim() == 2:
             return self.forward_mrope(positions, device, dtype, max_pos)
-        return self._cos[positions], self._sin[positions]
+        cos, sin = self._cos[positions], self._sin[positions]
+        # table au dtype du module ; l'appelant d'un autre dtype reçoit une conversion, jamais une autre table
+        return (cos, sin) if cos.dtype == dtype else (cos.to(dtype), sin.to(dtype))
 
     def forward_mrope(self, positions: torch.Tensor, device, dtype,
                       max_pos: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -829,6 +845,8 @@ class RotaryEmbedding(nn.Module):
         col = torch.arange(half, device=device).unsqueeze(0)     # [1, half]
         cos = self._cos[idx, col]
         sin = self._sin[idx, col]
+        if cos.dtype != dtype:
+            cos, sin = cos.to(dtype), sin.to(dtype)
         return torch.cat((cos, cos), dim=-1), torch.cat((sin, sin), dim=-1)
 
 

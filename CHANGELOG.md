@@ -1,5 +1,213 @@
 # Journal des changements
 
+## 0.7.5 (26/09/2026)
+
+### Correctifs
+
+* **26/09/2026 — pièce 277fix (poste5, poste5-277fix 557c761a0) : le bogue 277 est corrigé ; la spéculation reste
+  hors défaut.** Le pipeline de décodage est vidé avant un pas spéculatif (`_pipeline_vider`, `acvram/engine/pipeline.py`,
+  `acvram/engine/runner.py`) : plus de jetons répétés au passage simple → spéculatif. Mixte-i8c : sortie ngram
+  identique au bit à `--speculative none` (k = 4 et k = 1). Qwen3-Coder : deux écarts restants sur 5 × 32 jetons, tous
+  deux des quasi-égalités (jeton spéculatif = second choix du modèle, marge 0,0152 et 0,0154, seuil scellé 0,5 avant
+  la mesure). Sans le correctif, les mêmes tests sont ROUGES (mixte 2/2 ; Coder marge 12,19). **Défaut inchangé :
+  `none` pour tous les alias** — le ngram corrigé peut faire plus de pas que `none` (jusqu'à 55 pas pour 32 jetons) ;
+  il ne reviendra au défaut qu'après la 277e. L'avertissement de `--speculative ngram` dit désormais « bogue 277
+  corrigé ». Tests : `tests/test_spec_pipeline_277.py`, `tests/test_speculation_hybride_283.py`.
+  `revue/poste5-piece277fix-verdict-26-09.md`.
+
+### Outillage de sortie
+
+* **26/09/2026 — pièce 285 (poste3, poste3-285 ba09fa7cb) : `outils/verifier-release.sh` refuse deux défauts qu'il
+  laissait passer.** (a) un fichier `releases/download/vX.Y.Z/…` cité dans le corps de la release mais absent de ses
+  assets (cas réel : le `.flatpakref` cité par les notes de la v0.7.3, jamais produit) ; (b) un Flatpak installé qui
+  n'est pas la version publiée (cas réel : la vérification de la v0.7.4 a écrit « OK … (0.7.2) », GitHub Pages
+  servant encore l'ancien commit) — jusqu'à 10 `flatpak update`, puis refus (code 66). `outils/sortir-version.sh` :
+  le run « Release packages » est choisi par son tag (`headBranch`), plus le premier venu ; reprise explicite
+  `--depuis N` après un échec d'étape. Tests : `tests/test_corps_release_assets_285.py`,
+  `tests/test_flatpak_version_285c.py`, `tests/test_sortir_version_285b.py`.
+
+## 0.7.4 (26/09/2026)
+
+### Correctif de sûreté
+
+* **26/09/2026 — pièce 283 (poste5 277a-bis puis 277fix, poste5-277 9fdea0a23 ; élargie sur ordre chef ; poste3) :
+  `--speculative ngram` n'est plus le défaut, pour AUCUN alias.** La 277a-bis avait d'abord trouvé un BOGUE DE
+  VÉRIFICATION sur le mixte-i8c (Qwen3.8, GDN, hybride) : sur 5 invites testées, 4 ont émis un jeton spéculatif que
+  le modèle place **13 à 24 logits sous son premier choix** (ε 5,42 à 13,54, écart de logit 13,1 à 24,1). **Cause
+  trouvée par poste5 : le pipeline de décodage n'était pas vidé au passage du décodage simple au spéculatif —
+  jetons répétés.** Ce mécanisme touche TOUT modèle servi avec ngram, dense compris — pas seulement les hybrides
+  où le symptôme avait d'abord été mesuré. **Portée : toutes les versions 0.7.x servies avec la spéculation par
+  défaut** (`ngram`, seul propositeur actif sans configuration explicite depuis leur sortie). **Défaut désormais
+  `none` pour TOUS les alias** ; `ngram` reste servable sur demande explicite (`--speculative ngram`), avec un
+  avertissement au démarrage qui dit ce qui est VRAI dans les deux cas — que la 277fix de poste5 soit ou non
+  entrée dans cette version (son test Coder n'est pas encore tranché) : « bogue 277 (jetons répétés au passage
+  simple → spéculatif) ; sortie possiblement différente de --speculative none ; qualification en cours ». Tests
+  cassants : `tests/test_speculation_hybride_283.py` (défaut none sur hybride ET non-hybride, avertissement émis
+  sur toute demande explicite de ngram, jamais sur le défaut ni sur `none` explicite) et
+  `tests/test_ngram_pas_defaut_ailleurs_283.py` (audit des autres points d'entrée : `Engine`, CLI, API serveur,
+  GUI — aucun autre défaut ngram trouvé). `revue/poste5-piece277abis-verdict-26-09.md`.
+
+* **26/09/2026 — pièce 269 d (poste6, mesure 276, décision chef) : le guet d'admission est COUPÉ pour les alias
+  vision ; inchangé en texte (défaut 1).** La 276 a mesuré le guet hors de son régime : en texte (Qwen3-Coder, b = 2/4/8,
+  ABBA par point) aucun coût — mur et TTFT p50 B = A ± 1 ms, 14/14 tours à un pas chez B (A : 14, 11, 11), 0 tour de
+  l'issue nommée sur 42 ; **avec images** (Qwen3-VL-2B-Instruct-bf16-vision, b = 4, une image 448×448 par requête) la
+  préparation d'image d'une requête entrée (`preparer_images`, 16-34 ms) dépasse toujours la fenêtre de 5 ms : le fil
+  attendait le plafond de 20 ms à chaque tour (12/14) pour un pas groupé qui n'en rend que 8 — **mur +10,2 ms, TTFT p50
+  +9,6 ms (104,5 → 114,0), p95 +25 ms (113 → 138)**. `EngineService.guet_actif()` = guet ET pas `vision_servie()` ; test
+  cassant `test_269d_alias_vision_le_guet_est_coupe` ; opt-out `ACVRAM_ADMISSION_GUET=0` inchangé. **Non couvert : un
+  alias vision servant du texte seul (guet coupé pour lui aussi), plusieurs images par requête, b = 12 avec images, 2e
+  modèle (274).** `revue/poste6-piece276-{a-sec,verdict}-26-09.md`.
+
+### Paquets
+
+* **26/09/2026 — pièce 266 m : le Flatpak se construit de nouveau.** La 0.7.3 n'a pas de `.flatpakref` :
+  le dépôt OSTree amorcé depuis la branche gh-pages perdait ses dossiers vides (git ne les garde pas), et
+  `flatpak build-update-repo` échouait sur `opendir(refs/remotes)`. Les dossiers `refs/remotes`, `refs/mirrors`,
+  `tmp` et `state` sont recréés avant la mise à jour, avec un `.keep`. Témoin local : copie brute → code 1, copie
+  recréée → code 0. Garde `test_266m`.
+
+## 0.7.3 (26/09/2026)
+
+* **26/09/2026 — pièce 269 c (poste6, décision chef sur la mesure 269 b) : le guet d'admission est AU DÉFAUT
+  (`ACVRAM_ADMISSION_GUET=1` ; `0` = opt-out, comportement d'avant).** Après la 268, tout tour à deux pas restant à b=12
+  venait du fil moteur réveillé avec UNE requête en file, la 2e à quelques millisecondes derrière dans le gabarit et le
+  tokeniseur hors boucle ; le guet (compteur `en_entree` des requêtes entrées non soumises) tient la fenêtre d'admission
+  ouverte tant qu'une autre requête est en route. Mesure 269 b (ABBA ×3 sous carte.sh, 6a5df2a12, instruments 262,
+  Qwen3-Coder-30B-A3B nvfp4, 21 tours à 12 + 15 solo par côté) : **21/21 tours en un pas contre 15/21**, TTFT p50 par
+  requête **247,4 ms contre 251,6**, p95 par tour (médiane/max) 247,8/263,4 contre 256,2/271,5, max par tour 248,0/263,5
+  contre 256,3/272,7, solo 37,7 ms contre 38,4 (aucun coût, fenêtre solo identique), 0 tour de l'issue nommée (fenêtre
+  ≈ 20 ms puis pas de 1). **Non couvert : b < 12, images, autre modèle.** `revue/poste6-piece269b-{a-sec,verdict}-26-09.md` ;
+  test cassant « défaut 1 » `tests/test_admission_guet_269b.py::test_269c_au_defaut_le_guet_est_ouvert`, opt-out testé.
+
+## 0.7.2 (26/09/2026)
+
+* **26/09/2026 — pièce 070 b (poste6) : `acvram doctor` sortait 1 partout, hôte et Flatpak.** `_doctor_eco` (poste7-eco
+  19/09) appelait `subprocess.run` sans que `cli.py` importe `subprocess` : `NameError` en toute dernière ligne, après le
+  rapport complet — invisible à qui ne lit que les « ok / ECHEC ». Vu par verif-070 (doctor du bac à sable Flatpak, code
+  1 avec 0 ECHEC sur l'hôte). `import subprocess` ; `tests/test_doctor_eco_070b.py` (sudo factice, rouge sur l'ancien).
+* **26/09/2026 — pièce 273 (poste6, décision chef) : l'extra `vision` (transformers, pillow) est une ALERTE du doctor,
+  pas un ÉCHEC, et le Flatpak l'embarque.** Le doctor de la v0.7.0 en Flatpak rendait `ECHEC transformers est absent`,
+  `ECHEC PIL est absent` : la liste de `sources-pypi.py` dans `release.yml` ne prenait pas l'extra, et le doctor exigeait
+  ce que `pyproject` déclare optionnel (décision du 21/09, trou P3, renversée : l'utilisateur de .deb ou de pip sans
+  multimodal ne voit plus un doctor rouge ; un modèle multimodal sans `vision` échoue toujours au chargement, en clair).
+  `_doctor_modules()` : requis (safetensors, fastapi, uvicorn, tokenizers, jinja2) en ÉCHEC ; extras (`vision`) en
+  `alerte vision indisponible (… absent) : pip install 'acvram[vision]'`, code 0. Flatpak : transformers et pillow dans
+  la liste de `sources-pypi.py` (44 roues cp314/abi3/py3 résolues à sec en 18 s, aucune sdist). Gardes :
+  `tests/test_doctor_modules_273.py` (imports factices : sans vision → 0 + alerte, avec → ok), `tests/test_flathub_vision_273.py`.
+
+## 0.7.1 (26/09/2026)
+
+* **26/09/2026 — pièce 268 (poste1) : `/metrics` hors de la boucle HTTP, AU DÉFAUT, sortie identique champ par champ.** Il
+  était un `async def` qui appelait `engine.regime()` sept fois (cinq à six parcours de l'arbre des modules chacun) : 343 ms
+  par appel DANS la boucle — aucune requête lue ni rendue pendant ce temps. Désormais `def` (pool de fils), `regime()` une
+  fois par appel, un seul parcours. Sous un lecteur de `/metrics` à 20 Hz, TTFT à 12 requêtes (Qwen3-Coder-30B-A3B
+  srcQ4_K_M-nvfp4) **0,78 → 0,24 s** (témoin sans lecteur 0,247 s) ; `/metrics` **343 → 60 ms**. Étape 2 : gabarit et
+  tokeniseur de `/v1/chat/completions` dans un fil (au bit, neutre à 12 requêtes). `revue/poste1-268-verdict-26-09.md` ;
+  tests cassants `tests/test_metrics_hors_boucle_268.py` (rouges sur l'ancien code).
+* **26/09/2026 — pièce 262 (poste1) : le « TTFT 2,29 × plus lent que llama.cpp à 12 séquences » est requalifié.** Mesuré
+  sans lecteur `/metrics` concurrent, le TTFT à 12 de la 0.7.0 vaut **0,242 s** contre 0,66 s pour llama.cpp `-np 1` ; le
+  duel (`duel-moteurs.py`) interrogeait `/metrics` pendant le tour et mesurait surtout ce défaut (0,80 s).
+  `revue/poste1-262-verdict-26-09.md`.
+* **Notes sans changement de code** : 269 (poste6, fenêtre d'admission 10/15 ms FAUX, défaut 5 ms inchangé,
+  `revue/poste6-piece269-*`) ; 270 (poste1, préfill du Coder décomposé, MoE 55 % au solo, levier au bit ≤ 7 ms, clos,
+  `revue/poste1-270-decomposition-26-09.md`).
+
+* **26/09/2026 — pièce 209 (Marlin par ligne, poste2, chaîne 237b-c-d) : qualifiée par tâches (237d, McNemar
+  apparié, 4 tâches, n=650) — aucune différence significative, mais borne basse IC95 moyenne 93,4 % < 97 % :
+  reste à la demande.** `revue/poste2-piece237d-verdict-26-09.md`.
+* **26/09/2026 — pièce 260 (poste5, décision chef) : `ACVRAM_I8C_FP8_PREFILL=cublas` À LA DEMANDE, pas au défaut.** Les int8
+  ré-encodés du fp8 (manifeste « origine: fp8 », 233 tenseurs du Qwen3.8-27B-unsloth-mixte-i8c) étaient exclus du chemin W8A8
+  int8 du préfill depuis la 139 (copie signée persistante, 10,6 Go) ; la 201 a rendu cette copie transitoire, l'opt-in les y
+  remet. **Gain** : préfill par lot 8 × 78 **−26,8 %** (0,4105 → 0,3005 s), mur par lot seulement **−2,4 %**. **Prix** : KL de
+  décodage (b=8, 32 pas après le préfill) max **0,215**, 9 × le seuil admis (0,0242) ; argmax **94,1 %** contre 99,6 % au
+  témoin ; PPL wiki-gptq 2048 **+1,05 %** (7,0273 → 7,1013). Au mur, le gain ne paie pas la qualité : défaut inchangé (bf16).
+  Aide : `acvram serve --help`. `revue/poste5-piece260-{scelle,banc,moteur}-26-09.md` ; tests `tests/test_i8c_copie_260.py`.
+  Écartés en chemin (255) : le FP8 natif W8A8 (`_scaled_mm`, CUTLASS sm_120) — plus lent au décodage, et deux fois plus
+  d'erreur que l'int8 W8A8 au préfill.
+* **26/09/2026 — Paquets (poste6, 259/266 a-j, décision chef) : le Flatpak se livre par un dépôt OSTree signé sur
+  `gh-pages/flatpak` et un `.flatpakref` joint à la release, torch et sa fermeture CUDA en extra-data.** Un bundle seul ne
+  peut pas porter d'extra-data (« Extra data missing in detached metadata ») et GitHub plafonne un fichier de release à
+  2 Gio : le job `flatpak` de `release.yml` construit hors ligne (roues épinglées par `packaging/flathub/sources-pypi.py`
+  et `sources-torch.sh`, index PyTorch puis PyPI en repli si la somme diffère — `roue_url.py`), signe le commit
+  (`flatpak build-sign`, clé `FLATPAK_GPG_KEY`), publie `flatpak/` et `.nojekyll` seuls sur `gh-pages` sous l'identité
+  du bot Actions (266 j, `-c user.name/user.email`, pas de `git config`), joint `acvram-<version>.flatpakref` (`GPGKey`)
+  et retire l'ancien bundle. Installation : `flatpak install --user <url du .flatpakref>` (32 README) ; `apply_extra`
+  dépaquette torch 2.14.0+cu130 (Python 3.14, ABI `cp314` dans l'empreinte des noyaux précompilés) dans
+  `/app/extra/site-packages`. Preuve locale sous carte.sh : import torch, CUDA, cuDNN, cuBLAS dans le bac à sable
+  (carnet `acvram-memoire/poste6.md`, 26/09 12 h). Vérification d'une release fichier par fichier : `outils/verifier-release.sh vX.Y.Z
+  [--flatpak-installer | --flatpak-doctor]` (259, SHA256SUMS 259b). Gardes : `tests/test_flathub_*`,
+  `tests/test_release_*`, `tests/test_verifier_release_259.py`.
+
+* **26/09/2026 — pièce 260x (poste5, décision chef) : copie signée du chemin cublas par un xor, AU DÉFAUT
+  (`ACVRAM_I8C_COPIE=xor` ; `int16` = témoin).** q − 128 (uint8 à zéro 128 → int8) en un noyau au lieu de l'aller-retour int16 ;
+  la copie est transitoire depuis la 201, donc payée à chaque appel cublas. Copie xor au bit, gain mesuré −1,98 ms (L=512) et
+  −2,62 ms (L=2047) sur le TTFT b=1 du Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c (ABBA ×4, médianes B toutes sous A), sous le seuil
+  annoncé de 2,5 ms à L=512 : non revendiqué. Prédiction (−3,5 à −5,5 ms) fausse. Contrôles : L=78 −0,6 %, banc chat b=8
+  +0,20 %. `revue/poste5-piece260x-{scelle,verdict}-26-09.md` ; test cassant `tests/test_i8c_copie_260x.py` (une seule opération
+  aten `bitwise_xor` au défaut ; l'ancienne copie le rend rouge).
+## 0.7.0 (26/09/2026)
+
+* **26/09/2026 — pièce 232 b (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut pour la 0.7.0 — la 209 est À LA
+  DEMANDE.** Deux protocoles, deux résultats sur le même Qwen3-Coder-30B-A3B-nvfp4 pur à b=8 : la 226 (banc chat 102, invites réelles,
+  salve unique de 20 s, 5 + 5) donnait 1 = **+12,8 % / −18,4 % J** ; la 229 (poste3, `banc-llamacpp-16-09.py`, invites réelles, lots
+  répétés en débit SOUTENU, 5 passes par bras) donne 1 = **−15,3 % / +25,4 % J** (B 1 547,3 contre C 1 784,0 t/s ; A = be837ca1 contre C :
+  +1,9 %, neutre). Tant que l'écart entre les deux protocoles n'est pas expliqué (pièce nsys à venir), la release garde l'ancien
+  comportement (piles à sous-normales refusées, naturel + decode_mma) et `ACVRAM_MARLIN_PAR_LIGNE=1` reste disponible ; la 209 réempaquette
+  les poids au bit (aucun poids changé), mais la SORTIE servie n'est pas identique : à 0 et à 1, les 8 séquences réelles
+  du Coder b=8 divergent dès le jeton 6 à 55 selon la séquence (237 b, poste2) ; KL contre HF bf16 en cours. Elle reste
+  gagnante sur qkvo-i8c (209 c). Test cassant si le défaut revient à 1 :
+  `tests/test_marlin_pile_par_ligne_209.py::test_232_le_facteur_par_ligne_est_a_la_demande_et_0_le_defaut`.
+
+Chaîne du 24 au 26/09, deux faits distincts, chacun avec sa pièce :
+* **parité du pas de décodage contre NInfer** (202, poste1) : Qwen3.8-27B-unsloth-mixte-i8c b=8, pas
+  hôte 16,09 ms contre 15,98 chez NInfer (**+0,7 %, parité**). Le banc chat servi reste derrière,
+  422,6 t/s contre ≈ 463 chez NInfer (**−8,7 %**) : l'écart est dans le service (banc − pas, 2,84 ms
+  contre 1,29 au bit), pas dans les noyaux — décomposition en cours (204/221).
+* **gain interne de la nuit du 24-25/09** (190, bilan poste2, main contre main, sans comparaison à un
+  autre moteur) : même alias, même b, débit 323,4 → 394,8 t/s (**+22,08 %**), composé de
+  172/175b/176/179/182/187 (`revue/poste2-piece190-cellule-mixte-b8-25-09.md`).
+
+Gains propres à cette version, au-dessus de ces deux faits :
+* **175/187/194/195b** au défaut : portes GDN α/β en un appel (`ACVRAM_GDN_AB=auto`, 175/175b) ;
+  GEMV int8 par tranches de 6 au lieu de 16 (187, +6,65 % b=8 mixte) ; β‖α GDN sur un second flux
+  (194 b2, `ACVRAM_GDN_AB_FLUX=1`, +2,20 % b=8) ; GEMM int8 étroit à K entier par canal (195b,
+  `ACVRAM_ETROIT_CANAL=1`, +4,01 % b=8, −3,76 % J/jeton).
+* **201** (poste5) : un modèle vision/MTP qui ne tenait pas n'est plus chargé en silence — capacité
+  KV annoncée baisse pour en tenir compte (Qwen3.8 nvfp4 −7,4 %, gemma-4-31B-vision −21,4 %) ; copie
+  int8 transitoire (i8c servi sans OOM), coût nul au banc. `revue/poste5-piece201-verdict-25-09.md`.
+* **209 à la demande** (poste6, 232 b) : le facteur Marlin par ligne d'expert (209, exact au bit, +5,77 % sur qkvo-i8c) reste
+  disponible par `ACVRAM_MARLIN_PAR_LIGNE=1`, à 0 par défaut. Sur Qwen3-Coder-30B-A3B-nvfp4 pur il gagne en salve unique à invites
+  réelles (226 : +12,8 %) mais perd en débit soutenu (229 : −15,3 %, +25,4 % J) ; l'écart entre protocoles n'est pas expliqué, la release
+  garde l'ancien comportement (`revue/poste6-piece226-verdict-26-09.md`, `revue/poste3-piece229-verdict-3bras-26-09.md`).
+* **210/210b** (poste5) : `/v1/completions` — logprobs d'un jeton à texte vide gardés (suit
+  `token_ids`, plus `text_delta`) ; usage omis dans le flux sans `stream_options.include_usage`
+  (`CompletionChunk`) au lieu de {0,0,0} sur chaque fragment ; l'outil TTFT comptait ces jetons
+  vides comme « aucun jeton reçu » — corrigé, ce n'était pas le service.
+* **212** (poste4) : la marge de VRAM avant capture des graphes double sur les modèles à couche
+  récurrente (GDN/KDA/mamba2) — `_KV_MARGE_MIN_GDN` 3 072 Mio au lieu de 1 536, ≈ −12 192 jetons de
+  capacité KV sur les Qwen3.8.
+* **Purge d'historique** (171, poste6) : `outils/purge-historique.sh` exécuté réellement le 25/09,
+  1 015 Mio → 67 Mio, 146 réfs réécrites, Dolt intacte, vérifié sur clone neuf.
+
+* **213 b** (poste5) : la contamination servie de la 213 (mixte b=8 : le 1er lot différait des lots suivants,
+  requête après requête ≠ requête seule) est corrigée — le dtype du RoPE est fixé et `loader.py:313` ne
+  laisse plus la première passe choisir une précision différente : **le 1er lot égale désormais les lots
+  suivants au bit** ; la calibration fixe aussi sa précision (235).
+* **26/09/2026 — pièce 250 (poste6) : `depaqueter_marlin(noyau="cuda")` acceptait à nouveau l'échelle globale PAR COLONNE d'un
+  tenseur dense (E = 1, pièces 134/147).** La 209 (a) (25/09, a256676f8) avait fermé le noyau CUDA à toute échelle par colonne, pile
+  OU dense, alors que seule la pile E > 1 (g [E, N]) lui est inconnue : deux tests p147 rouges depuis, sur main comme sur la branche
+  232 (rejeu seul, même prise, 04:07). Le service n'était pas touché (`auto`, jamais `"cuda"` explicite, et aucune pile E > 1 n'est
+  dépaquetée en service). Le choix `auto` refuse désormais lui aussi le noyau CUDA à une pile E > 1 par colonne (il aurait lu g[e]
+  comme scalaire, sans erreur) ; test cassant `test_pile_par_colonne_refusee_au_cuda_et_auto_evite_cuda`.
+
+* **243** (poste5, décision chef) : seuil GEMV → GEMM int8 abaissé à 16 dans la portée de déquant PARTAGÉE du préfill
+  GDN (`ACVRAM_INT8_GEMV_MAX_PARTAGE=16` par défaut, 80 = témoin, sortie d'avant). HORS BIT, KL scellée tenue (b=8, 32 pas :
+  max 0,00603 ≤ 0,00793 = 2 × le témoin déjà servi, argmax 254/256, PPL 6,0483 → 6,0657). Qwen3.8-27B-unsloth-mixte-i8c b=8 :
+  préfill 8 × 78 0,821 → 0,410 s par lot (**−50 %**) ; banc chat servi (ABBA ×5, serveur neuf, -lgc 2700) 423,6 → **464,7 t/s
+  (+9,70 %)**, J/jeton net 0,7615 → 0,6906 (**−9,3 %**) — le niveau de NInfer (≈ 463). Réserve : les dix fenêtres sont bridées en
+  puissance (plafond 400 W), les deux bras également. Hors portée, le seuil reste 80 : la déquant non partagée régresse (733,7 µs
+  contre 636,4 de GEMV à n = 78). `revue/poste5-piece243-verdict-26-09.md` ; test cassant `tests/test_int8_seuil_partage_243.py`.
+
 * **26/09/2026 — pièce 226 (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE=1` REVIENT AU DÉFAUT — la « régression » de la 209
   sur le Coder nvfp4 pur était un artefact du banc.** L'histoire vraie : la 209 (25/09) sert en Marlin les piles d'experts à échelles
   sous-normales par un facteur par ligne, exact au bit, +5,77 % sur qkvo-i8c ; la 220 (25/09) l'a remise en opt-in sur le banc de la 217

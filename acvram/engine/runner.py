@@ -406,13 +406,15 @@ def _raison_principale_refus(refusees: dict) -> Optional[str]:
     return Counter(refusees.values()).most_common(1)[0][0]
 
 
-def _regime_echelle_awq(model) -> str:
+def _regime_echelle_awq(model, blocs=None) -> str:
     """Porteur de l'échelle AWQ des experts, agrégé sur les couches MoE :
     « gemv(N/M) », « torch(N/M) », « aucune », ou « mixte(...) » quand les
     couches ne s'accordent pas — chaque valeur vient du dernier forward du
     bloc (`MoEBlock._echelle_awq`), jamais d'une variable d'environnement."""
     from .model import MoEBlock
-    vals = [getattr(m, "_echelle_awq", None) for m in model.modules() if isinstance(m, MoEBlock)]
+    if blocs is None:                                  # pièce 268 : regime() passe les MoEBlock déjà collectés
+        blocs = [m for m in model.modules() if isinstance(m, MoEBlock)]
+    vals = [getattr(m, "_echelle_awq", None) for m in blocs]
     vus = [v for v in vals if v is not None]
     if not vus:
         return "?"                                     # aucun forward MoE encore passé
@@ -425,7 +427,7 @@ def _regime_echelle_awq(model) -> str:
     return f"mixte({detail})"
 
 
-def _couverture_experts(model) -> str:
+def _couverture_experts(model, blocs=None) -> str:
     """Disposition des experts par couche MoE : la valeur seule si toutes les couches MoE la
     partagent (« marlin », « marlin-w13 », « naturel »…), sinon le COMPTE par disposition
     (« marlin-w13×44+naturel×4 »), le plus fréquent en tête, et POUR CHAQUE couche non-marlin*
@@ -447,7 +449,8 @@ def _couverture_experts(model) -> str:
                 numerotes.append((i, m))
                 break
     if not numerotes:      # modèle sans `layers` exposées : on garde l ordre des modules
-        numerotes = list(enumerate(m for m in model.modules() if isinstance(m, MoEBlock)))
+        numerotes = list(enumerate(blocs if blocs is not None       # pièce 268 : blocs de regime(), même ordre
+                                   else (m for m in model.modules() if isinstance(m, MoEBlock))))
     if not numerotes:
         return "aucun"
     dispositions = [getattr(m, "experts_layout", None) or "naturel" for _, m in numerotes]
@@ -796,9 +799,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         etats_piles: set[str] = set()
         raisons_piles: set[str] = set()
         experts_total = experts_exiles = 0
-        for m in self.model.modules():
-            if not isinstance(m, MoEBlock):
-                continue
+        # Pièce 268 : UN parcours de l'arbre des modules (il en faisait quatre, ~20 000 modules sur un MoE de 48 couches ×
+        # 128 experts, et /metrics appelait regime() sept fois : 343 ms dans la boucle HTTP, 262). Pas de cache entre
+        # appels : `streamed` change en service (`_promote_expert`), l'état rendu doit rester vivant.
+        blocs = [m for m in self.model.modules() if isinstance(m, MoEBlock)]
+        for m in blocs:
             etats_piles.add(m._stack_state)
             if m._stack_state == "non" and getattr(m, "_raison_repli", ""):
                 raisons_piles.add(m._raison_repli)
@@ -827,11 +832,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # chemin mort. La ligne porte désormais le chemin ATTEINT, compté par
         # `MoEBlock._chemin` (REGLES § 7 : noyau atteint, pas fonction appelée).
         chemin_moe += "(" + chemin_moe_atteint(
-            [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
+            [m.__dict__.get("chemins", {}) for m in blocs]) + ")"
         # Piece 127 (poste6) : variable de regime posee mais sans effet (disposition unique) ->
         # la ligne le dit, au lieu de laisser croire qu'elle a agi.
         inertes_moe = sorted(set().union(
-            *(m.__dict__.get("_inertes", set()) for m in self.model.modules() if isinstance(m, MoEBlock))))
+            *(m.__dict__.get("_inertes", set()) for m in blocs)))
         if inertes_moe:
             chemin_moe += "+" + "+".join(inertes_moe)
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
@@ -840,7 +845,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # (`MoEBlock._tensor_refus`), le témoin GEMV (=0) et le témoin de glue A4 (non reproductible).
         if os.environ.get("ACVRAM_MOE_TENSOR", "1") == "1":
             refus = sorted({(m.__dict__["_tensor_refus"] if "_tensor_refus" in m.__dict__ else m._raison_tensor()) or ""
-                            for m in self.model.modules() if isinstance(m, MoEBlock)} - {""})
+                            for m in blocs} - {""})
             from .moe import _MOE_TENSOR_MIN_T
             chemin_moe += f"+tensor(b≥{_MOE_TENSOR_MIN_T}" + ("" if not refus else ",repli:" + " ; ".join(refus)) + ")"
             if os.environ.get("ACVRAM_AWQ_TENSOR", "0") == "1":
@@ -904,12 +909,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
             # couverture PAR COUCHE (poste7 19/09, budget GLM : 33 couches Marlin + 13 refusées
             # « distinctes » sur la pile naturelle — « experts_layout=marlin » seul mentait)
-            "experts_layout": _couverture_experts(self.model),
+            "experts_layout": _couverture_experts(self.model, blocs),
             # Pièce 47 : qui porte `x / s[e]` des experts — `gemv` (dans le
             # noyau Marlin, au bit), `torch` (gather + division devant chaque
             # GEMV : 8 lancements et 0,47 ms/pas à b=12), `aucune` (alias sans
             # échelles d'experts). Lu sur les blocs, pas sur une variable.
-            "echelle_awq": _regime_echelle_awq(self.model),
+            "echelle_awq": _regime_echelle_awq(self.model, blocs),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             # pièce 129 : disposition Marlin, bilan du chargement ; 170 : même fragment que l'eval PPL (marlin_bilan_texte)
             "dense": kernels.narrow_regime() + kernels.marlin_bilan_texte(self.model),
@@ -1644,9 +1649,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             t0 = time.perf_counter()
             b_reel = len(decodable)
             if self.speculator is not None and self._garde_spec.eligible(b_reel):
-                n0 = self.stats.decode_tokens
-                outputs += self._speculative_decode(decodable)
-                self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
+                if self._pipeline_pendiente is not None:
+                    # pièce 277 : un pas simple est encore en vol — le livrer d'abord ; spéculer au pas suivant, sur
+                    # un état et un `output_ids` de nouveau d'accord (sinon jetons répétés, sortie ≠ décodage simple)
+                    outputs += self._pipeline_vider()
+                else:
+                    n0 = self.stats.decode_tokens
+                    outputs += self._speculative_decode(decodable)
+                    self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
             else:
                 outputs += self._plain_decode(decodable)
             t1 = time.perf_counter()

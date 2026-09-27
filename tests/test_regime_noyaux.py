@@ -104,10 +104,16 @@ def test_prefill_regime_refuse_les_anciens_noms(monkeypatch):
 def masques_propres():
     from acvram import kernels
     etat = (kernels._EXT, kernels._TRIED, kernels._ERROR, set(backends._MASQUES))
+    # 240 : `regime.masquer` ÉCRIT os.environ (ACVRAM_DISABLE_KERNELS=1, ACVRAM_MOE_MMA=0) et `monkeypatch.delenv` d'une
+    # variable ABSENTE n'enregistre rien à restaurer — la valeur fuyait vers tous les tests suivants du même processus
+    # (test_gemv_marlin::test_splitk_opt_in_sous_processus : sous-processus sans extension, 4 skipped, seulement quand ce
+    # fichier passe avant lui). L'environnement se restaure ici, pas par monkeypatch.
+    environ = dict(os.environ)
     backends._RESOLVED.clear()
     try:
         yield
     finally:
+        os.environ.clear(); os.environ.update(environ)
         kernels._EXT, kernels._TRIED, kernels._ERROR = etat[:3]
         backends._MASQUES.clear(); backends._MASQUES.update(etat[3])
         backends._RESOLVED.clear()
@@ -160,7 +166,7 @@ def test_hors_regime_ne_cache_aucun_regime():
                 "CARTE_", "PPL_TRANCHE", "QA_", "WARM_GRAPHS", "BANC_", "SESSION", "VERROU", "DUMP_",
                 "TETE_FP32_ENTREE", "MOE_DECODE_MASQUES", "DISABLE_", "TYPE", "ARBRE", "PROFIL", "LOG",
                 "CHARGE_OK", "ECO_", "SERVEUR", "PORT", "CACHE_PREFIXE", "HOTE", "MUET", "MARLIN_CACHE",
-                "CHAUFFE_CTX", "JOURNAL_")   # JOURNAL_ : journaux de conversion (observation) ; CHAUFFE_CTX : opt-out de la PREUVE du contexte, visible sur la ligne (ctx_tenu=non-verifie)
+                "CHAUFFE_CTX", "JOURNAL_", "PRECOMPILES", "ARCHS")   # ARCHS : architectures de COMPILATION des .so (241), même famille que ARCH_FAMILY   # PRECOMPILES : dossier d'un .so précompilé (240), un chemin   # JOURNAL_ : journaux de conversion (observation) ; CHAUFFE_CTX : opt-out de la PREUVE du contexte, visible sur la ligne (ctx_tenu=non-verifie)
     hors = []
     for nom in regime.HORS_REGIME:
         court = nom[len("ACVRAM_"):]
