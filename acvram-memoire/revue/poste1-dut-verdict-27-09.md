@@ -41,3 +41,11 @@ l'autotune (code + mémoire locale réservée). La garde de t5e ne rend que 0,62
   coup : le pilote ne réduit que si la limite baisse. 12 256 × 170 SM × 1 536 fils ≈ 3,2 Go : l'ordre de grandeur de l'écart.
 * Sonde 2 (scellée avant) : limite ramenée à 1 024 avant la première capture. VRAI si ≥ 2 Gio rendus et serveur vivant
   (b=1 et b=12 servis sans repli) ; FAUX si < 0,5 Gio rendus.
+* Sonde 2 (17 h 32) : **VRAI** — pile 12 256 → 1 024 o/fil, hors allocateur 3,38 → 0,64 Gio (l'état à chaud), libre 1,57 →
+  4,30 Gio ; serveur VIVANT, b=1 47,6 t/s, b=12 206,5 t/s, repli_eager 0, refus 0.
+## Correctif (graphs.py `_rendre_pile`, défaut ; témoin ACVRAM_PILE_RENDUE=0)
+Avant la première capture, et sous le seuil de la garde (autotune d'une forme nouvelle en service) : limite de pile ramenée à
+ACVRAM_PILE_OCTETS (1 024). Tests à sec `tests/test_pile_rendue_dut.py` : 3 rouges sur v0.7.7, verts ; voisins 150 passés.
+## Scellé de la preuve à froid (défaut, sans sonde) — écrit avant
+* T (9b641ebc6) contre B (ce commit), T B B T, froid garanti. Prédiction : T meurt 2/2 ; B vit 2/2, repli_eager 0, ligne
+  « pile locale rendue » présente. FAUX si un B meurt ou replie.

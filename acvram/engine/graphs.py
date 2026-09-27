@@ -238,27 +238,30 @@ def _avec_tokens(batch: "ForwardBatch", tokens: torch.Tensor) -> "ForwardBatch":
     return b2
 
 
-def _sonde_pile(gr) -> None:
-    """dut : imprime la mémoire hors allocateur et la limite de pile (API pilote), repose la limite à sa valeur
-    (le pilote rend alors la mémoire locale gardée au-delà), puis la même photo. Diagnostic opt-in (ACVRAM_SONDE_PILE=1)."""
+def _rendre_pile() -> Optional[tuple[int, int]]:
+    """dut (27/09) : ramène la limite de pile CUDA (mémoire locale par fil) au défaut et rend au pilote ce qu il gardait.
+    À froid, l autotune Triton essaie des configurations qui débordent en mémoire locale ; le pilote garde la réserve au
+    MAXIMUM jamais demandé (12 256 o/fil mesurés, × 170 SM × 1 536 fils ≈ 2,7 Gio) : chauffe à 1,6 Gio libres, capture
+    refusée ou confirmation échouée, serveur mort au premier démarrage d une version (worktree ou paquet neuf). Le pilote
+    regrandit la réserve au lancement d un noyau qui en a besoin : aucune sortie ne change (lieu du débordement seul).
+    Rend (avant, après) en octets par fil, ou None (à sec, témoin ACVRAM_PILE_RENDUE=0, pilote muet)."""
+    if os.environ.get("ACVRAM_PILE_RENDUE", "1") == "0" or not torch.cuda.is_available():
+        return None
     import ctypes
     try:
         cu = ctypes.CDLL("libcuda.so.1")
         pile = ctypes.c_size_t(0)
-        if cu.cuCtxGetLimit(ctypes.byref(pile), 0) != 0:        # 0 = CU_LIMIT_STACK_SIZE
-            print("[graphe] sonde pile : cuCtxGetLimit en échec", flush=True)
-            return
-        avant = gr._photo_memoire()
+        if cu.cuCtxGetLimit(ctypes.byref(pile), 0) != 0:           # 0 = CU_LIMIT_STACK_SIZE
+            return None
+        cible = int(os.environ.get("ACVRAM_PILE_OCTETS", "1024"))
+        if pile.value <= cible:
+            return (pile.value, pile.value)
         torch.cuda.synchronize()
-        cible = int(os.environ.get("ACVRAM_SONDE_PILE_OCTETS", "1024"))   # défaut CUDA ; regrandit au besoin
-        rc = cu.cuCtxSetLimit(0, ctypes.c_size_t(cible))
-        apres = gr._photo_memoire()
-        print(f"[graphe] sonde pile : pile {pile.value} → {cible} o/fil, cuCtxSetLimit rc={rc} ; hors allocateur "
-              f"{gr._hors_allocateur(avant):.2f} → {gr._hors_allocateur(apres):.2f} Gio, libre "
-              f"{avant['libre'] / 2 ** 30:.2f} → {apres['libre'] / 2 ** 30:.2f} Gio", flush=True)
-    except Exception as e:                                          # noqa: BLE001
-        print(f"[graphe] sonde pile : {type(e).__name__}: {e}", flush=True)
-
+        if cu.cuCtxSetLimit(0, ctypes.c_size_t(cible)) != 0:
+            return None
+        return (pile.value, cible)
+    except Exception:                                               # noqa: BLE001
+        return None
 
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
@@ -584,6 +587,10 @@ class GraphRunner:
             torch.cuda.empty_cache()
             photo = self._photo_memoire()
         if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
+            pile = _rendre_pile()                                    # dut : autotune d une forme nouvelle en service
+            if pile is not None and pile[0] > pile[1]:
+                photo = self._photo_memoire()
+        if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
             return (f"mémoire libre {photo['libre'] / 2 ** 20:.0f} Mio < "
                     f"{self.MEM_MIN_CAPTURE / 2 ** 20:.0f} Mio : capture refusée (interblocage possible)")
         return None
@@ -616,11 +623,13 @@ class GraphRunner:
             return
         self.memoire_avant_capture = photo
         print(f"[graphe] mémoire avant capture : {self._ligne_memoire(photo)}", flush=True)
-        # dut (27/09) : à froid, ~2,7 Gio manquent HORS de l'allocateur (réservé identique à chaud). Sonde opt-in :
-        # hypothèse = mémoire locale (pile) que le pilote garde au maximum jamais demandé par un noyau essayé à
-        # l'autotune ; reposer la limite de pile à sa valeur la ramène à cette taille. Ne change aucune sortie.
-        if os.environ.get("ACVRAM_SONDE_PILE") == "1":
-            _sonde_pile(self)
+        # dut (27/09) : la chauffe a fini l autotune ; la mémoire locale qu il a fait réserver est rendue AVANT de capturer.
+        pile = _rendre_pile()
+        if pile is not None and pile[0] > pile[1]:
+            apres = self._photo_memoire()
+            print(f"[graphe] pile locale rendue : {pile[0]} → {pile[1]} o/fil ; hors allocateur "
+                  f"{self._hors_allocateur(photo):.2f} → {self._hors_allocateur(apres):.2f} Gio", flush=True)
+            self.memoire_avant_capture = apres
 
     def _hors_allocateur(self, photo: dict) -> float:
         return (photo["total"] - photo["libre"] - photo["reserve"]) / 2 ** 30
