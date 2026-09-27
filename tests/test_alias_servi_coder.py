@@ -42,6 +42,8 @@ ALIAS_PAR_VERSION = {
     "0.7.7": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
     # 0.7.8 (27/09, t5e/9dc/73c) : garde de capture, recherche GUI, lanceurs des menus, même alias.
     "0.7.8": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.9 (27/09, dut/276 g-h) : pile CUDA rendue avant capture, tour de vision en préparation, même alias.
+    "0.7.9": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
 }
 # Formats par famille, identiques pour i8c et S1b (107 bis § 6) : ce qui distingue les deux est dans les experts
 # (calibrés ou non), pas dans les formats.

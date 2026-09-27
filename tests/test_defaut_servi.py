@@ -236,6 +236,9 @@ DEFAUTS_PAR_VERSION["0.7.6"] = ({**DEFAUTS_PAR_VERSION["0.7.5"][0], "PREFILL_TRA
 DEFAUTS_PAR_VERSION["0.7.7"] = DEFAUTS_PAR_VERSION["0.7.6"]
 # 0.7.8 (27/09, t5e/9dc/73c) : mêmes défauts — la garde de capture rend le cache avant de juger, sans variable.
 DEFAUTS_PAR_VERSION["0.7.8"] = DEFAUTS_PAR_VERSION["0.7.7"]
+# 0.7.9 (27/09, dut et 276 g/h) : pile CUDA rendue avant la capture (PILE_RENDUE=1, PILE_OCTETS=1024), tour de vision
+# dans la préparation (TOUR_PREPARATION=1), un flux annexe (TOUR_FLUX=1).
+DEFAUTS_PAR_VERSION["0.7.9"] = ({**DEFAUTS_PAR_VERSION["0.7.8"][0], "PILE_RENDUE": "1", "PILE_OCTETS": "1024", "TOUR_PREPARATION": "1", "TOUR_FLUX": "1"}, DEFAUTS_PAR_VERSION["0.7.8"][1])
 
 
 def _var(nom):

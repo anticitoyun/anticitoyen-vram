@@ -1,5 +1,31 @@
 # Journal des changements
 
+## 0.7.9 (27/09/2026)
+
+### Correctif
+
+* **27/09/2026 — bd dut (poste1, poste1-t5e ac780f62b) : le premier démarrage d'une version neuve mourait sur les
+  modèles hybrides.** À froid, l'autotune Triton fait monter la limite de pile CUDA à 12 256 octets par fil (défaut
+  1 024) et le pilote garde cette mémoire locale : 2,74 Gio hors de l'allocateur, chauffe à 1,6 Gio libres, capture
+  refusée, serveur mort — à chaque premier démarrage d'un paquet ou d'un arbre neuf. `graphs.py:_rendre_pile` ramène la
+  limite à 1 024 avant la première capture (`ACVRAM_PILE_RENDUE=1`, `ACVRAM_PILE_OCTETS=1024`). Aucune sortie ne
+  change (seul le lieu du débordement). Qwen3.8-27B mixte-i8c, froid garanti (cache Triton vide), T B B T : v0.7.7 mort
+  2/2, corrigé vivant 2/2 ; hors allocateur 3,38 → 0,64 Gio. `acvram-memoire/revue/poste1-dut-verdict-27-09.md`.
+
+### Vision
+
+* **27/09/2026 — pièces 276 g et 276 h (poste6, poste6-276h f91ccd295) : la tour de vision tourne pendant la
+  préparation de la requête.** `Engine.encoder_images` dans le fil de préparation, sur un flux CUDA annexe, image par
+  image (aucun lot), sous un verrou lecteurs/rédacteur avec la capture de graphe (`ACVRAM_TOUR_PREPARATION=1`) ;
+  `_admit` ne touche plus la tour (44,3 → 0,1 ms). Qwen3-VL-2B, 12 requêtes avec une image, échelle M G G M, arbre
+  contrôlé : **TTFT moyen −20 %** (219/217 → 173/178 ms), p50 −30 %, p95 −9 %, aucune régression sur aucun quantile ;
+  le temps du lot entier ne baisse que de 2 à 5 % (les tours restent sérielles). Identité : traits d'image au bit
+  12/12 ; jetons identiques à b = 1 ; à b = 4 et 12 la composition des lots change et 2 à 3 invites diffèrent — main
+  lui-même n'est pas reproductible à cette charge entre deux passages (276 f), le critère de jetons n'y est donc pas
+  applicable. Deux flux annexes (276 h, `ACVRAM_TOUR_FLUX=2`, optionnel) : recouvrement de 22 % seulement, TTFT moyen
+  +9 % contre un flux — défaut 1. `acvram-memoire/revue/poste6-piece276g-verdict-27-09.md`,
+  `poste6-piece276h-verdict-27-09.md`.
+
 ## 0.7.8 (27/09/2026)
 
 ### Correctifs
