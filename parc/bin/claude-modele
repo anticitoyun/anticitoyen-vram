@@ -97,9 +97,19 @@ lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ ar
   export ANTHROPIC_MODEL="$modele" ANTHROPIC_SMALL_FAST_MODEL="$modele"
   export ANTHROPIC_DEFAULT_OPUS_MODEL="$modele" ANTHROPIC_DEFAULT_SONNET_MODEL="$modele" ANTHROPIC_DEFAULT_HAIKU_MODEL="$modele"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
-  # Prompt de démarrage de claude CLI mesuré à sec (22/09, ~12 682 tokens tiktoken cl100k).
-  # Marge ×1.2 pour les variations de session (MCP, outils) + budget réponse minimal.
-  local PROMPT_BASE=15000 MIN_REPONSE=4096
+  # Fenêtre RÉELLE : acvram clampe max_model_len à ce que tient sa chauffe (Qwen3-Coder-30B : 39 936 pour 65 536
+  # demandés, t5e 27/09) ; la colonne 3 du TSV n'est qu'une demande. Moteur muet sur max_model_len : ctx inchangé.
+  local servi
+  servi=$(curl -s -m 3 -H "Authorization: Bearer $cle" "$url/v1/models" 2>/dev/null | python3 -c '
+import json, sys
+for m in json.load(sys.stdin).get("data", []):
+    if m.get("id") == sys.argv[1] and str(m.get("max_model_len", "")).isdigit():
+        print(m["max_model_len"])' "$modele" 2>/dev/null || true)
+  [ -n "$servi" ] && [ -n "$ctx" ] && [ "$servi" -lt "$ctx" ] 2>/dev/null && ctx="$servi"
+  # Prompt de démarrage de claude CLI mesuré à sec (27/09, t5e, tokenizer Qwen3 sur la requête réelle depuis ~) :
+  # 24 150 jetons avec --strict-mcp-config (40 outils) ; 61 315 sans (170 outils : les MCP globaux de l'utilisateur
+  # s'ajoutaient à mcp.json — « Prompt is too long » sur tout alias local). Budget réponse minimal en plus.
+  local PROMPT_BASE=25000 MIN_REPONSE=4096
   if [ -n "$ctx" ] && [ "$ctx" -lt $(( PROMPT_BASE + MIN_REPONSE )) ] 2>/dev/null; then
     err "alias $modele : contexte $ctx tokens insuffisant (prompt de démarrage ~${PROMPT_BASE}, réponse mini ${MIN_REPONSE} — il faut ≥ $(( PROMPT_BASE + MIN_REPONSE )) tokens)"; exit 1
   fi
@@ -107,7 +117,7 @@ lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ ar
   printf '\n%s→ claude sur %s (%s)%s\n\n' "$c_t" "$modele" "$url" "$c_0"
   # UN SEUL constructeur : --afficher imprime le tableau que l'exec reçoit (poste7 21/09) ;
   # PARC_EXEC=<programme> le reçoit à la place de claude (test à sec, quatre moteurs).
-  local CMD=("${PARC_CLAUDE/#\~/$HOME}" --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" "$@")
+  local CMD=("${PARC_CLAUDE/#\~/$HOME}" --strict-mcp-config --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" "$@")
   if [ "${AFFICHER:-0}" = 1 ]; then   # claude-modele --afficher <alias> : montre sans lancer
     env | grep -E '^(ANTHROPIC_|DISABLE_|CLAUDE_CODE_)' | sort
     printf 'commande :'; printf ' %q' "${CMD[@]}"; printf '\n'
@@ -134,8 +144,8 @@ case "$choix" in
   acvram-*)
     # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte),
     # /v1/messages (API Anthropic) expose nativement par le serveur.
-    # claude CLI charge ~19096 jetons au démarrage (PROMPT_BASE=15000 + MIN_REPONSE=4096).
-    CTX_CLIENT_MIN=19096 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    # claude CLI charge ~24 150 jetons au démarrage (t5e 27/09) : PROMPT_BASE=25000 + MIN_REPONSE=4096.
+    CTX_CLIENT_MIN=29096 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
     ctx=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f3)
     ctx_client=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f4)
     [ -n "$ctx_client" ] && [ "$ctx_client" -gt "${ctx:-0}" ] 2>/dev/null && ctx="$ctx_client"
