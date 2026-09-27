@@ -77,6 +77,7 @@ def _runner(couche, etat):
     gr.model, gr.device, gr.max_model_len = modele, "cpu", 2304
     gr.sampler_graphe, gr._last_key, gr._pool, gr.captures = False, None, None, 0
     gr.hybrid_layers = [couche]
+    gr.verrou_capture = G.VerrouCapture()      # 276 h : posé par __init__, que ce faux runner contourne
     gr._fill = lambda entry, batch: None
     return gr, pas
 
