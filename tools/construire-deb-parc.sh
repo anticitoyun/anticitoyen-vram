@@ -10,7 +10,7 @@ rm -rf "$PKG"
 install -d "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/acvram-parc/lib" "$PKG/usr/share/acvram-parc/gabarits" \
            "$PKG/usr/share/acvram-parc/systemd-user" "$PKG/usr/share/applications" \
            "$PKG/usr/share/icons/hicolor/scalable/apps" "$PKG/usr/share/icons/hicolor/256x256/apps" "$PKG/usr/share/doc/acvram-parc"
-for s in claude-modele kimi-modele claude-modeles kimi-modeles modeles-a-jour integrite-modeles telecharger-modele parc-installer; do
+for s in claude-modele kimi-modele claude-modeles kimi-modeles modeles-a-jour integrite-modeles telecharger-modele parc-installer openwebui-medias; do
     install -m 755 "parc/bin/$s" "$PKG/usr/bin/$s"
 done
 install -m 644 parc/lib/acvram_parc.py "$PKG/usr/share/acvram-parc/lib/"
@@ -19,6 +19,8 @@ for f in parc/lib/menu_modeles/*.py; do install -m 644 "$f" "$PKG/usr/share/acvr
 install -m 644 parc/share/kimi-menu.lib.sh "$PKG/usr/share/acvram-parc/"
 install -m 644 parc/share/gabarits/* "$PKG/usr/share/acvram-parc/gabarits/"
 install -m 644 parc/share/systemd-user/* "$PKG/usr/share/acvram-parc/systemd-user/"
+install -d "$PKG/usr/share/acvram-parc/openwebui"
+install -m 644 parc/share/openwebui/*.py parc/share/openwebui/*.json "$PKG/usr/share/acvram-parc/openwebui/"
 [ -f parc/share/icones/claude-modeles.svg ] && install -m 644 parc/share/icones/claude-modeles.svg "$PKG/usr/share/icons/hicolor/scalable/apps/"
 [ -f parc/share/icones/kimi-modele.png ] && install -m 644 parc/share/icones/kimi-modele.png "$PKG/usr/share/icons/hicolor/256x256/apps/"
 for d in parc/share/desktop/*.desktop; do install -m 644 "$d" "$PKG/usr/share/applications/$(basename "$d")"; done
