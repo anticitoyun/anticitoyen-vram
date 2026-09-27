@@ -238,6 +238,27 @@ def _avec_tokens(batch: "ForwardBatch", tokens: torch.Tensor) -> "ForwardBatch":
     return b2
 
 
+def _sonde_pile(gr) -> None:
+    """dut : imprime la mémoire hors allocateur et la limite de pile (API pilote), repose la limite à sa valeur
+    (le pilote rend alors la mémoire locale gardée au-delà), puis la même photo. Diagnostic opt-in (ACVRAM_SONDE_PILE=1)."""
+    import ctypes
+    try:
+        cu = ctypes.CDLL("libcuda.so.1")
+        pile = ctypes.c_size_t(0)
+        if cu.cuCtxGetLimit(ctypes.byref(pile), 0) != 0:        # 0 = CU_LIMIT_STACK_SIZE
+            print("[graphe] sonde pile : cuCtxGetLimit en échec", flush=True)
+            return
+        avant = gr._photo_memoire()
+        torch.cuda.synchronize()
+        rc = cu.cuCtxSetLimit(0, pile)
+        apres = gr._photo_memoire()
+        print(f"[graphe] sonde pile : pile {pile.value} o/fil, cuCtxSetLimit rc={rc} ; hors allocateur "
+              f"{gr._hors_allocateur(avant):.2f} → {gr._hors_allocateur(apres):.2f} Gio, libre "
+              f"{avant['libre'] / 2 ** 30:.2f} → {apres['libre'] / 2 ** 30:.2f} Gio", flush=True)
+    except Exception as e:                                          # noqa: BLE001
+        print(f"[graphe] sonde pile : {type(e).__name__}: {e}", flush=True)
+
+
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
     # ACVRAM_HYBRID_SLOTS : plafond du nombre de séquences hybrides (GDN/KDA/
@@ -594,6 +615,14 @@ class GraphRunner:
             return
         self.memoire_avant_capture = photo
         print(f"[graphe] mémoire avant capture : {self._ligne_memoire(photo)}", flush=True)
+        # dut (27/09) : à froid, ~2,7 Gio manquent HORS de l'allocateur (réservé identique à chaud). Sonde opt-in :
+        # hypothèse = mémoire locale (pile) que le pilote garde au maximum jamais demandé par un noyau essayé à
+        # l'autotune ; reposer la limite de pile à sa valeur la ramène à cette taille. Ne change aucune sortie.
+        if os.environ.get("ACVRAM_SONDE_PILE") == "1":
+            _sonde_pile(self)
+
+    def _hors_allocateur(self, photo: dict) -> float:
+        return (photo["total"] - photo["libre"] - photo["reserve"]) / 2 ** 30
 
     def _apres_echec_capture(self) -> None:
         """Même photo juste après un échec de capture, AVANT `empty_cache` :

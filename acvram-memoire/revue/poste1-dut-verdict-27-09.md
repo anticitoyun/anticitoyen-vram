@@ -28,3 +28,12 @@ serveur MORT. Le script s'arrêtait sur « SERVEUR MORT » au lieu de noter le b
 Lecture : à froid, ~3,3 Gio manquent HORS de l'allocateur PyTorch (réservé identique à chaud) — modules Triton compilés par
 l'autotune (code + mémoire locale réservée). La garde de t5e ne rend que 0,62 Gio : prédiction inchangée, mais B peut
 échouer pour cette autre part (issue « FAUX » du scellé).
+
+## Prise 2 (17 h 10-17 h 24, T B B T à froid) — scellé FAUX dans sa forme « B 0 »
+* T ×2 : 2 « capture refusée », « non tenu » (3 072), serveur mort. B ×2 : 0 capture refusée (la garde de t5e rend les 0,62 Gio),
+  mais « non tenu » quand même, serveur mort. Photo identique aux 4 bras : libre 1,57, réservé 26,41, cache non rendu 0,62.
+* Hors allocateur : 31,36 − 26,41 − 1,57 = 3,38 Gio à froid contre 0,64 à chaud (serve-1 de la 284 c). La garde de t5e ne
+  ferme donc PAS dut : la cause principale est ailleurs.
+## Sonde (hypothèse 1, scellée avant) : mémoire locale gardée par le pilote
+* Prédiction : à froid, `cuCtxSetLimit(pile, même valeur)` fait tomber « hors allocateur » de ~3,4 à ≤ 1 Gio. FAUX si < 0,5 Gio
+  rendus → hypothèse 2 (modules chargés : code des configurations d'autotune).
