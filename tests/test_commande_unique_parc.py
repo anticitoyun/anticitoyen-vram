@@ -105,3 +105,14 @@ def test_claude_modele_fenetre_servie(tmp_path, faux):
                            capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0, r.stderr[-600:]
         assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS=39936" in r.stdout, (reponse, r.stdout[-600:])
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192" in r.stdout, r.stdout[-600:]
+
+
+def test_claude_modele_sortie_dans_la_fenetre(tmp_path, faux):
+    """t5e 27/09 : claude réserve 32 000 jetons de sortie dans la fenêtre ; à 32 768 il refusait sans rien envoyer.
+    Sortie annoncée = fenêtre − PROMPT_BASE (25 000), plafonnée à 8 192."""
+    env = _poste_acvram(tmp_path, faux, 32768, '{"data":[{"id":"acvram-un"}]}')
+    r = subprocess.run(["bash", str(PARC / "bin" / "claude-modele"), "--afficher", "acvram-un"],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr[-600:]
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS=7768" in r.stdout, r.stdout[-600:]
