@@ -1,5 +1,33 @@
 # Journal des changements
 
+## 0.7.8 (27/09/2026)
+
+### Correctifs
+
+* **27/09/2026 — pièce t5e (poste1, poste1-t5e c91e0fdf5) : les menus Claude et Kimi servent les modèles locaux.**
+  (1) Garde de capture (`acvram/engine/graphs.py`, `_garde_capture`) : elle jugeait la mémoire libre sans rendre
+  d'abord le cache de PyTorch, et refusait la capture des modèles 35B (« contexte non tenu ») : 0/2 → 2/2 à
+  environnement égal. (2) `acvram-serveur` (parc) : quatre pannes — mort à la garde de VRAM sans
+  `CUDA_VISIBLE_DEVICES` (tout préchargement depuis les icônes échouait), mort muette quand le cwd est dans un
+  arbre, `source=` sur deux lignes, changement d'alias refusé (VRAM du serveur remplacé non comptée) ; rend la main
+  dès que le serveur meurt. (3) `claude-modele` : `--strict-mcp-config` (invite 61 315 → 24 150 jetons), sortie
+  bornée, fenêtre = contexte réellement servi. (4) `kimi-modele` : configuration locale sans MCP régénérée à chaque
+  lancement (`~/.kimi-code-local`), configuration de l'utilisateur intacte ; invite 29-30 k jetons. Contrôle sous
+  carte : kimi et claude répondent sur 5 alias ; les ≈Opus 35B restent au-delà du contexte tenu (pièce d19, préfill
+  par morceaux). Tests `tests/test_lanceur_source.py`, `tests/test_kimi_local_t5e.py`, rouges sur l'ancien code.
+  `acvram-memoire/revue/poste1-t5e-verdict-27-09.md`.
+
+### Interface
+
+* **27/09/2026 — pièce 9dc (poste3, poste3-9dc 868c64c88) : acvram-gui, recherche du modèle par son nom.** Le champ
+  filtre la liste à chaque frappe (sous-chaîne, sans casse ni accents) ; Échap vide, Ctrl+F et le démarrage donnent
+  le focus ; 31 traductions. Test `tests/test_gui_filtre_modele.py`.
+
+### Outillage
+
+* **27/09/2026 — bd 73c (poste3, poste3-73c) : `outils/carte-libre.sh` ne prend plus le crochet de masquage des jetons
+  pour une mesure** ; test hermétique (faux `nvidia-smi` en tête de PATH), `tests/test_carte_libre_motif_73c.py`.
+
 ## 0.7.7 (27/09/2026)
 
 ### Instrumentation de mesure

@@ -234,6 +234,8 @@ DEFAUTS_PAR_VERSION["0.7.5"] = DEFAUTS_PAR_VERSION["0.7.4"]
 DEFAUTS_PAR_VERSION["0.7.6"] = ({**DEFAUTS_PAR_VERSION["0.7.5"][0], "PREFILL_TRANCHES": "1"}, DEFAUTS_PAR_VERSION["0.7.5"][1])
 # 0.7.7 (27/09, pièces 276 f/287) : mêmes défauts — ngram toujours none, garde d'arbre inerte sans variable.
 DEFAUTS_PAR_VERSION["0.7.7"] = DEFAUTS_PAR_VERSION["0.7.6"]
+# 0.7.8 (27/09, t5e/9dc/73c) : mêmes défauts — la garde de capture rend le cache avant de juger, sans variable.
+DEFAUTS_PAR_VERSION["0.7.8"] = DEFAUTS_PAR_VERSION["0.7.7"]
 
 
 def _var(nom):
