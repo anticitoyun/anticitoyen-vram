@@ -5,9 +5,10 @@
 * régime : carte 0, -lgc 2700, Qwen3.8-27B-unsloth-mixte-i8c, contexte 4 096, max-batch 16, sans spéculation ; chaque bras : worktree
   jetable neuf + TRITON_CACHE_DIR vide (froid garanti) ; ordre T B B T
 * scellé (écrit avant la prise) : voir ci-dessous
-* mesuré : À VENIR
-* verdict : À VENIR
-* durée : prévu ≤ 25 min
+* mesuré : T/B à froid (worktree jetable + cache Triton vide) ; preuve finale T B B T sur 9a5c79c69
+* verdict : **VRAI (cause trouvée, fermée)** — pas la garde de t5e (0,62 Gio) mais la mémoire locale : pile CUDA 12 256 o/fil
+  gardée par le pilote après l'autotune à froid (2,74 Gio) ; `_rendre_pile` la ramène à 1 024 : T mort 2/2, B vivant 2/2, repli 0
+* durée : prévu ≤ 25 min ; tenu : prise 1 4 min (interrompue), prise 2 14, sondes 4 + 4, preuve 8 + 8 (carte.sh)
 
 ## Lecture à sec (avant la prise)
 Journal de A1 (`~/.cache/acvram/dumps-poste1/p284c-rejeu-serve-1.log`) : avant capture « libre 4,15 Gio, cache non rendu 0,78 » ;
@@ -49,3 +50,20 @@ ACVRAM_PILE_OCTETS (1 024). Tests à sec `tests/test_pile_rendue_dut.py` : 3 rou
 ## Scellé de la preuve à froid (défaut, sans sonde) — écrit avant
 * T (9b641ebc6) contre B (ce commit), T B B T, froid garanti. Prédiction : T meurt 2/2 ; B vit 2/2, repli_eager 0, ligne
   « pile locale rendue » présente. FAUX si un B meurt ou replie.
+
+## Preuve finale (17 h 38-17 h 58, T B + B T, défaut sans sonde) — scellé TENU
+| bras | arbre | issue | pile | b=1 t/s | b=12 t/s | repli |
+|---|---|---|---|---|---|---|
+| T | 9b641ebc6 | MORT (2 capture refusée, non tenu 3 072) | 12 256 gardée | — | — | — |
+| B | 9a5c79c69 | vivant | 12 256 → 1 024, hors alloc. 3,38 → 0,64 Gio | 46,5 | 213,5 | 0 |
+| B | 9a5c79c69 | vivant | idem | 47,6 | 205,9 | 0 |
+| T | 9b641ebc6 | MORT (idem) | 12 256 gardée | — | — | — |
+Débits donnés pour la vie du service, pas comme cellule (instrument de diagnostic, pas de certifie).
+## Leçons
+* « À froid » était une cause, pas un biais d'ordre : la première exécution d'une version (paquet neuf compris) compile et
+  autotune, et le pilote garde la mémoire locale du pire essai. Un .deb neuf = un premier démarrage à froid chez l'utilisateur.
+* Le hors-allocateur (total − libre − réservé) se journalise : sans lui, 2,7 Gio manquants passaient pour du cache.
+* Mon script de prise a échoué trois fois (arrêt sur serveur mort, `set -e` sur `[ ] && {kill}` en fin de liste) : un nettoyage
+  sous `set -e` finit par `|| true`, et un bras mort est un résultat, pas une raison d'arrêter la prise.
+## Reste
+* Identifier le noyau qui déborde (ptxas sur les configurations d'autotune) — non requis pour fermer dut.
