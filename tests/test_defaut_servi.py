@@ -239,6 +239,9 @@ DEFAUTS_PAR_VERSION["0.7.8"] = DEFAUTS_PAR_VERSION["0.7.7"]
 # 0.7.9 (27/09, dut et 276 g/h) : pile CUDA rendue avant la capture (PILE_RENDUE=1, PILE_OCTETS=1024), tour de vision
 # dans la préparation (TOUR_PREPARATION=1), un flux annexe (TOUR_FLUX=1).
 DEFAUTS_PAR_VERSION["0.7.9"] = ({**DEFAUTS_PAR_VERSION["0.7.8"][0], "PILE_RENDUE": "1", "PILE_OCTETS": "1024", "TOUR_PREPARATION": "1", "TOUR_FLUX": "1"}, DEFAUTS_PAR_VERSION["0.7.8"][1])
+# Gabarit de la version qui portera la 277e (hors défaut) : ACVRAM_SPEC_REPOS déclarée, défaut 2, inerte sous
+# --speculative none — seule différence de table avec la 0.7.9.
+DEFAUTS_PAR_VERSION["0.7.10"] = ({**DEFAUTS_PAR_VERSION["0.7.9"][0], "SPEC_REPOS": "2"}, DEFAUTS_PAR_VERSION["0.7.9"][1])
 
 
 def _var(nom):

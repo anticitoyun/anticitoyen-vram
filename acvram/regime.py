@@ -376,6 +376,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
              "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
              "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),
+    Variable("SPEC_REPOS", "2", ("acvram.engine.runner", "_SPEC_REPOS"), None,
+             "pièce 277e : pas de recouvrement après un repli du spéculatif (proposeur muet) avant de reproposer ; "
+             "0 = reproposer à chaque pas. Seulement sous --speculative ngram|mtp (none par défaut : inerte)"),
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
