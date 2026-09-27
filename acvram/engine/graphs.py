@@ -281,6 +281,11 @@ class GraphRunner:
         # rejeu, et événement enregistré après chaque rejeu
         self._prepare = None
         self.abandon_capture: Optional[str] = None     # cause d un dépassement de délai : captures suivantes refusées
+        # 276 g : une capture (mode global) et un noyau lancé d'un AUTRE fil s'invalident mutuellement (« operation not
+        # permitted when stream is capturing », graphes coupés à vie — leçon runner.py `_etat_eco`). La tour de vision hors
+        # du pas (Engine.encoder_images, fil de préparation) et la capture prennent ce verrou : jamais en même temps.
+        import threading
+        self.verrou_capture = threading.Lock()
         # Pièce 267 : `GraphRunner` est construit par TOUT `Engine`, même sur un torch CPU-only
         # (roue sans extension CUDA) où `torch.cuda.Event` est une classe factice qui lève à
         # l'instanciation — CI GitHub (runner sans CUDA) rouge sur 62 tests, tous des `Engine`
@@ -988,6 +993,12 @@ class GraphRunner:
 
     def _capture(self, b: int, ql: int, nblk: int,
                  batch: ForwardBatch) -> dict:
+        """276 g : sous `verrou_capture` — aucun noyau de la tour hors du pas pendant la capture."""
+        with self.verrou_capture:
+            return self._capture_sans_verrou(b, ql, nblk, batch)
+
+    def _capture_sans_verrou(self, b: int, ql: int, nblk: int,
+                             batch: ForwardBatch) -> dict:
         m = self.model
         d = self.device
         h = m.spec.hidden_size

@@ -37,6 +37,9 @@ from .graphs import depaqueter_logprobs, rapatriement_epingle_actif
 from ..kernels.gemm_etroit import etroites_texte
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
+# 276 g : tour de vision dans le fil de préparation (Engine.encoder_images), hors de `_admit`, recouverte avec le pas ;
+# DÉFAUT 1 si l'identité au bit tient (scellé 276 g) ; 0 = tour dans `_admit` (témoin, comportement d'avant)
+_TOUR_PREPARATION = os.environ.get("ACVRAM_TOUR_PREPARATION", "1") == "1"
 
 __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
 
@@ -1081,10 +1084,58 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     ids.update(int(x) for x in v if isinstance(x, int))
         return ids
 
+    def _positions_images(self, seq: "Sequence") -> None:
+        """M-RoPE (engine/mrope) : positions [3, T] et delta de l'invite depuis (debut, fin, supplement["image_grid_thw"])
+        de chaque image — avant la tour, elles n'en dépendent pas."""
+        if self._mrope_section is not None:
+            from .mrope import grille_de, positions_mrope
+            seq.mrope_positions, seq.rope_delta = positions_mrope(
+                len(seq.prompt_ids),
+                [(im.debut, im.fin, grille_de(im)) for im in seq.images],
+                self._mrope_merge)
+
+    def _rendus_en_traits(self, rendus: list, request_id: str, ou: str) -> tuple[list, Optional[list]]:
+        """(image_embeds, image_niveaux) depuis [(debut, fin, traits, niveaux)] — deepstack tous ou aucun ; ligne de journal."""
+        embeds = [(d, f, e) for d, f, e, _ in rendus]
+        niveaux = [(d, f, n) for d, f, _, n in rendus] if all(n is not None for *_, n in rendus) else None
+        if niveaux is None and any(n is not None for *_, n in rendus):
+            raise ValueError("tour de vision : niveaux deepstack rendus pour une partie des images seulement")
+        return embeds, niveaux
+
+    def encoder_images(self, images: Any, request_id: str = "") -> Optional[tuple[list, Optional[list]]]:
+        """276 g : la tour de vision HORS du pas moteur, appelée depuis le fil de préparation du serveur, image par
+        image (MÊME `traits_niveaux` que `_admit` : au bit), sur un flux CUDA annexe pour se recouvrir avec le pas en
+        cours, sous le verrou de capture des graphes. Rend ``(image_embeds, image_niveaux)`` à passer à `add_request`
+        (``traits=``) ; None sans image. Une tour qui échoue lève (ValueError nommée) : le serveur refuse la requête."""
+        import contextlib
+        ims = sorted((ImageRequete.depuis(i) for i in (images or [])), key=lambda i: i.debut)
+        if not ims:
+            return None
+        if self.vision is None:
+            raise SansTourVision(f"{len(ims)} image(s) pour un modèle sans tour de vision (manifeste vision: non)")
+        verrou = getattr(getattr(self, "graphs", None), "verrou_capture", None)
+        flux = None
+        if self.vision.device.type == "cuda":
+            flux = getattr(self, "_flux_tour", None)
+            if flux is None:
+                flux = self._flux_tour = torch.cuda.Stream(self.vision.device)
+        with (verrou if verrou is not None else contextlib.nullcontext()):
+            rendus = [(im.debut, im.fin,
+                       *self.vision.traits_niveaux_sur_flux(im.pixel_values, im.fin - im.debut,
+                                                            supplement=getattr(im, "supplement", None), flux=flux))
+                      for im in ims]
+        embeds, niveaux = self._rendus_en_traits(rendus, request_id, "préparation")
+        print("[engine] tour (préparation) : " + " ; ".join(
+            f"[{d},{f}) {tuple(e.shape)} sha={im.sha256[:8]} Σ={float(e.float().abs().sum()):.4g}"
+            for (d, f, e), im in zip(embeds, ims)) + f" request_id={request_id}", flush=True)
+        return embeds, niveaux
+
     def add_request(self, prompt_ids: list[int], params: SamplingParams,
-                    request_id: str = "", images: Any = None) -> Sequence:
+                    request_id: str = "", images: Any = None, traits: Any = None) -> Sequence:
         """``images`` (multimodal P1) : itérable de (debut, fin, pixel_values,
-        sha256) ou d'objets à ces attributs — voir engine/vision.ImageRequete."""
+        sha256) ou d'objets à ces attributs — voir engine/vision.ImageRequete.
+        ``traits`` (276 g) : ``(image_embeds, image_niveaux)`` déjà calculés par `encoder_images` — la tour ne
+        tourne pas dans `_admit` pour cette séquence."""
         if len(prompt_ids) >= self.max_model_len:
             raise ValueError(
                 f"invite de {len(prompt_ids)} jetons au-delà de max_model_len "
@@ -1097,6 +1148,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         verifier_plages(ims, len(prompt_ids))
         seq = Sequence(list(prompt_ids), params, request_id)
         seq.images = sorted(ims, key=lambda i: i.debut)
+        if traits is not None and seq.images:
+            embeds, niveaux = traits
+            if len(embeds) != len(seq.images) or any((d, f) != (im.debut, im.fin) for (d, f, _), im in zip(embeds, seq.images)):
+                raise ValueError("traits d'images sans rapport avec les plages de la requête (276 g)")
+            self._positions_images(seq)
+            seq.image_embeds, seq.image_niveaux = list(embeds), (list(niveaux) if niveaux is not None else None)
         if params.ignore_eos:
             self.stats.sequences_ignore_eos += 1
         with self._lock:
@@ -1145,25 +1202,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                         # M-RoPE (engine/mrope) : positions [3, T] et delta de
                         # l'invite depuis (debut, fin, supplement["image_grid_thw"])
                         # de chaque image — avant la tour, elles n'en dépendent pas
-                        if self._mrope_section is not None:
-                            from .mrope import grille_de, positions_mrope
-                            seq.mrope_positions, seq.rope_delta = positions_mrope(
-                                len(seq.prompt_ids),
-                                [(im.debut, im.fin, grille_de(im)) for im in seq.images],
-                                self._mrope_merge)
+                        self._positions_images(seq)
                         rendus = [
                             (im.debut, im.fin,
                              *self.vision.traits_niveaux(im.pixel_values, im.fin - im.debut,
                                                          supplement=getattr(im, "supplement", None)))
                             for im in seq.images]
-                        seq.image_embeds = [(d, f, e) for d, f, e, _ in rendus]
-                        # Deepstack : les niveaux suivent les traits, tous ou aucun
-                        # (une tour rend le même nombre de niveaux pour chaque image)
-                        seq.image_niveaux = ([(d, f, n) for d, f, _, n in rendus]
-                                             if all(n is not None for *_, n in rendus) else None)
-                        if seq.image_niveaux is None and any(n is not None for *_, n in rendus):
-                            raise ValueError("tour de vision : niveaux deepstack rendus pour une partie "
-                                             "des images seulement")
+                        # Deepstack : les niveaux suivent les traits, tous ou aucun (même règle que `encoder_images`)
+                        seq.image_embeds, seq.image_niveaux = self._rendus_en_traits(rendus, seq.request_id, "_admit")
                         # Le journal dit que la tour a tourné (poste2 15 h 00 : « aucune ligne tour ») —
                         # une somme des traits par image, pour qu'une image différente se voie
                         print("[engine] tour : " + " ; ".join(

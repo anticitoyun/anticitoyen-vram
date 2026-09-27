@@ -352,6 +352,10 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 269 b/c/d (DÉFAUT depuis 269 c, 0.7.3 ; 0 = opt-out ; 269 d : sans effet pour un alias vision) : 1 = la fenêtre d'admission s'ouvre aussi à UNE requête en file quand une "
              "autre est déjà entrée dans le service (gestionnaire HTTP commencé, submit pas encore fait) ; une requête seule "
              "reste sans attente (compteur à 0)"),
+    Variable("TOUR_PREPARATION", "1", ("acvram.engine.runner", "_TOUR_PREPARATION"), None,
+             "pièce 276 g (DÉFAUT si au bit — scellé 276 g ; 0 = témoin) : 1 = la tour de vision tourne dans le fil de "
+             "préparation du serveur (Engine.encoder_images, flux CUDA annexe, verrou de capture), hors de `_admit`, image "
+             "par image (même appel, aucun lot) et se recouvre avec le pas en cours ; 0 = tour dans `_admit` avant le préfill"),
     Variable("ADMISSION_FENETRE_MS", "5", None, None,
              "pièce 179 (DÉFAUT 5 depuis 179 b ; 0 = coupé) : fenêtre d'admission du serveur en ms — moteur vide et ≥ 2 "
              "requêtes en file, attendre que la file cesse de grossir avant le pas (préfill groupé d'une rafale) ; une "

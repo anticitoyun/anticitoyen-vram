@@ -77,6 +77,12 @@ _FENETRE_ADMISSION_S = float(os.environ.get("ACVRAM_ADMISSION_FENETRE_MS", "5"))
 # TTFT p50 247,4 ms contre 251,6, solo −0,7 ms) ; ACVRAM_ADMISSION_GUET=0 = opt-out, comportement d'avant.
 _GUET_ADMISSION = os.environ.get("ACVRAM_ADMISSION_GUET", "1") == "1"
 
+
+def _tour_preparation() -> bool:
+    """276 g : lue sur le module moteur (régime déclaré `ACVRAM_TOUR_PREPARATION`, défaut 1), à l'appel pour les tests."""
+    from ..engine import runner as _runner
+    return bool(getattr(_runner, "_TOUR_PREPARATION", False))
+
 class EngineService:
     """Anime le moteur depuis un fil d'arrière-plan et redistribue les résultats."""
 
@@ -214,15 +220,21 @@ class EngineService:
             self._loop.call_soon_threadsafe(q.put_nowait, exc)
 
     # -- request lifecycle -------------------------------------------------
+    def encoder_images(self, images: list) -> Any:
+        """276 g : la tour de vision dans le fil de préparation (`asyncio.to_thread` depuis le gestionnaire), hors de
+        `_admit` et recouverte avec le pas moteur — voir Engine.encoder_images. ValueError nommée → 400."""
+        self.ensure_started()
+        return self.engine.encoder_images(images)
+
     async def submit(self, prompt_ids: list[int], params: SamplingParams,
-                     images: Optional[list] = None) -> tuple[str, asyncio.Queue]:
+                     images: Optional[list] = None, traits: Any = None) -> tuple[str, asyncio.Queue]:
         self.ensure_started()
         request_id = new_id("req")
         q: asyncio.Queue = asyncio.Queue()
         with self._lock:
             self._queues[request_id] = q
         if images:
-            self.engine.add_request(prompt_ids, params, request_id, images=images)
+            self.engine.add_request(prompt_ids, params, request_id, images=images, traits=traits)
         else:
             self.engine.add_request(prompt_ids, params, request_id)
         return request_id, q
@@ -1098,16 +1110,23 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             # ils étalaient une rafale de 12 au-delà de la fenêtre d'admission ; mêmes fonctions, mêmes jetons, même ordre.
             prompt = await asyncio.to_thread(render_chat, tokenizer, messages, req.add_generation_prompt, extra)
             params = _params_from(req, 512)
-            images = None
+            images = traits = None
             if urls:
                 octets = [charger_image(u) for u in urls]           # ImageRefusee -> 400
                 prompt_ids, images = preparer_images(service.processeur_vision(), prompt, octets)
                 n_img = sum(f.n_jetons for f in images)
                 _garde_contexte(engine, prompt_ids, f" dont {n_img} jetons image ({len(images)} image(s))", params=params)
+                if _tour_preparation():
+                    # 276 g : tour de vision ici, dans un fil, hors de `_admit` — la boucle sert la requête suivante
+                    # pendant que la tour tourne sur son flux annexe, en parallèle du pas moteur
+                    try:
+                        traits = await asyncio.to_thread(service.encoder_images, images)
+                    except Exception as exc:                          # noqa: BLE001 — refus nommé, comme `_admit`
+                        raise HTTPException(400, f"tour de vision en échec ({type(exc).__name__}: {exc})") from exc
             else:
                 prompt_ids = await asyncio.to_thread(_encode, tokenizer, prompt)
                 _garde_contexte(engine, prompt_ids, params=params)
-            request_id, q = await service.submit(prompt_ids, params, images)
+            request_id, q = await service.submit(prompt_ids, params, images, traits)
 
         if req.stream:
             return StreamingResponse(
