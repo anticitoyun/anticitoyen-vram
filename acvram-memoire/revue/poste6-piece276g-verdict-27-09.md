@@ -26,7 +26,7 @@ et les positions M-RoPE — `_admit` ne touche plus la tour pour ces séquences.
   la composition des lots de préfill change, donc les arrondis — même mécanisme que main à b = 12. Inapplicable comme critère
   (scellé), publié.
 * **b = 1** (aucun effet de composition ; c'est là que « au bit » se juge sur les jetons) : cellule dédiée, 5 invites M puis G —
-  RÉSULTAT_B1.
+  **5/5 identiques** (24 jetons chacune, sous carte.sh 17:37, journaux : M « tour (_admit) » 5, G « tour (préparation) » 5) : **TENU**.
 
 ## 2. Tableau (b = 12, une image par requête, 84 requêtes par bras ; ms)
 | bras | pas de préfill par tour | `_admit` méd (≥ 2 req.) | TTFT **moyen** | p25 / p50 / p75 | p95 | **mur** max (méd) | solo |
