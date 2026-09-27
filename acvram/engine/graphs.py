@@ -552,6 +552,15 @@ class GraphRunner:
         if getattr(self, "abandon_capture", None):
             return self.abandon_capture
         photo = self._photo_memoire()
+        # Le pilote ne voit pas le cache que PyTorch garde sans l utiliser (après un préfill long : activations
+        # rendues à l allocateur, pas au pilote). Sous le seuil, on le rend avant de juger — hors capture, donc
+        # sans risque d interblocage. Sans cela (t5e 27/09) : 614 Mio « libres » à la confirmation de chauffe,
+        # capture refusée, trois baisses de contexte, service refusé sur les 35B ; et repli eager au 1er
+        # serveur à froid (dut). Ne change aucune sortie : seules les réserves de l allocateur bougent.
+        if (photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE
+                and photo["reserve"] > photo["alloue"]):
+            torch.cuda.empty_cache()
+            photo = self._photo_memoire()
         if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
             return (f"mémoire libre {photo['libre'] / 2 ** 20:.0f} Mio < "
                     f"{self.MEM_MIN_CAPTURE / 2 ** 20:.0f} Mio : capture refusée (interblocage possible)")
