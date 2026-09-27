@@ -20,3 +20,11 @@ ses activations dans le cache de l'allocateur — le mécanisme que t5e a corrig
 * Issues : T 0 et B 0 → froid non reproduit, NON CONCLU (le correctif n'est ni prouvé ni réfuté pour dut) ; T ≥ 1 et B 0 →
   même cause, fermée par la 0.7.8 ; B ≥ 1 → FAUX : autre cause (lire `replis_eager_raisons` et la photo après l'échec).
 * Alarme : un PID hors verrou au début d'un bras → REFUS (le script s'arrête).
+
+## Prise 1 (16 h 56) — interrompue par mon script au premier bras
+T à froid : chauffe 38,4 s, « 1 607 Mio libres après la passe » (à chaud : 4 969), photo avant capture « libre 1,57 Gio,
+réservé 26,41, alloué 25,79, cache non rendu 0,62 », deux « capture refusée » (920/916 Mio), puis « contexte non tenu » (3 072) :
+serveur MORT. Le script s'arrêtait sur « SERVEUR MORT » au lieu de noter le bras et de continuer → corrigé, prise rejouée.
+Lecture : à froid, ~3,3 Gio manquent HORS de l'allocateur PyTorch (réservé identique à chaud) — modules Triton compilés par
+l'autotune (code + mémoire locale réservée). La garde de t5e ne rend que 0,62 Gio : prédiction inchangée, mais B peut
+échouer pour cette autre part (issue « FAUX » du scellé).
