@@ -234,6 +234,8 @@ VARIABLES: tuple[Variable, ...] = (
              "dut (27/09) : 1 = avant la première capture (et sous le seuil de la garde), limite de pile CUDA ramenée à ACVRAM_PILE_OCTETS — rend la mémoire locale que l autotune Triton à froid avait fait réserver (2,7 Gio mesurés) ; 0 = témoin"),
     Variable("PILE_OCTETS", "1024", None, None,
              "dut (27/09) : limite de pile (o/fil) visée par ACVRAM_PILE_RENDUE ; le pilote la regrandit au lancement d un noyau qui en a besoin"),
+    Variable("GDN_MORCEAU", "4096", ("acvram.engine.gdn", "_GDN_MORCEAU"), None,
+             "d19 (27/09) : au préfill, le cœur GDN (convolution, règle delta, norme) tourne par tranches de N jetons (multiple de 64), état porté — au bit du cœur d un seul tenant ; borne sa mémoire (245 Ko/jeton sur le 35B) ; 0 = d un seul tenant (témoin)"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",

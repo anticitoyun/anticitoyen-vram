@@ -87,6 +87,10 @@ _GDN_NORME_FUSEE = os.environ.get("ACVRAM_GDN_NORME_FUSEE", "1") == "1"
 # Pièce 182 (1) : z (porte de la norme) rendu par `_projections` dans le dtype de la projection, sans cast fp32 — ses
 # consommateurs castent au chargement (exact) ; au décodage, 48 copies de moins par pas sur Qwen3.8. 0 = témoin (cast).
 _GDN_Z_BF16 = os.environ.get("ACVRAM_GDN_Z_BF16", "1") == "1"
+# d19 : tranche (jetons, multiple de 64) du cœur GDN au préfill long ; 0 = d'un seul tenant (témoin)
+_GDN_MORCEAU = int(os.environ.get("ACVRAM_GDN_MORCEAU", "4096"))
+if _GDN_MORCEAU % 64:
+    raise ValueError(f"ACVRAM_GDN_MORCEAU={_GDN_MORCEAU} : multiple de 64 exigé (bloc de fla)")
 
 
 def _fla():
@@ -393,7 +397,27 @@ class GatedDeltaNet(nn.Module):
     def _coeur(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor,
                b: torch.Tensor, a: torch.Tensor, state: Optional[tuple]):
         """Convolution, règle delta et norme gated d'UNE séquence, projections
-        faites ; rend (y avant out_proj, nouvel état)."""
+        faites ; rend (y avant out_proj, nouvel état).
+
+        d19 (27/09) : au-delà de ``_GDN_MORCEAU`` jetons, le cœur tourne par tranches (multiples de 64, le bloc de fla),
+        l'état (convolution, règle delta) porté d'une tranche à la suivante — ce que fait déjà un préfill repris à un
+        instantané. Le cœur matérialisait ~245 Ko/jeton (35B : qkv fp32, convolution, q/k répétés, internes fla) sur TOUTE
+        l'invite : 4 Gio à 16 k, la crête du préfill long. Projections et out_proj restent sur l'invite entière (mêmes M,
+        mêmes noyaux). Au bit : `tests/test_gdn_morceaux_d19.py`."""
+        t = x.shape[0]
+        m = _GDN_MORCEAU
+        if m <= 0 or t <= m or (t == 1 and state is not None):
+            return self._coeur_un(x, qkv, z, b, a, state)
+        ys = []
+        for d in range(0, t, m):
+            f = min(t, d + m)
+            y, state = self._coeur_un(x[d:f], qkv[d:f], z[d:f], b[d:f], a[d:f], state)
+            ys.append(y)
+        return torch.cat(ys), state
+
+    def _coeur_un(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor,
+                  b: torch.Tensor, a: torch.Tensor, state: Optional[tuple]):
+        """Le cœur d'une tranche (voir `_coeur`)."""
         chunk_rule, recurrent_rule = _refs()
         t = x.shape[0]
         decode = (t == 1 and state is not None)
