@@ -66,6 +66,10 @@ def chemin_moe_atteint(compteurs: list[dict]) -> str:
 # couche par couche — au bit, déquantification partagée par couche. 0 = témoin (la boucle d'avant, telle quelle).
 _PREFILL_TRANCHES = os.environ.get("ACVRAM_PREFILL_TRANCHES", "1") == "1"
 
+# Pièce 277e : pas de recouvrement gardés après un repli du spéculatif sur le pas simple (proposeur muet) avant de
+# revider pour reproposer (`_pas_speculatif`) ; 0 = reproposer à chaque pas. Sans effet sous --speculative none (défaut).
+_SPEC_REPOS = int(os.environ.get("ACVRAM_SPEC_REPOS", "2"))
+
 @dataclass
 class Sequence:
     prompt_ids: list[int]
@@ -750,7 +754,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # Pièce 277e : après un repli du spéculatif sur le pas simple (proposeur muet), rester en recouvrement ce
         # nombre de pas avant de revider pour reproposer — sinon un proposeur hésitant alterne amorce et vidage et
         # ne recouvre jamais (`_pas_speculatif`). 0 = reproposer à chaque pas.
-        self.spec_repos_max = int(os.environ.get("ACVRAM_SPEC_REPOS", "2"))
+        self.spec_repos_max = _SPEC_REPOS
         self._spec_repos = 0
         # Levier 2 : rapatriement des ids du pas par tampon hôte épinglé à
         # double parité (`_apres_echantillon`) — DÉFAUT depuis le verdict poste4

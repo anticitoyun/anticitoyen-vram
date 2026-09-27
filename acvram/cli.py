@@ -280,6 +280,7 @@ VARIABLES_LUES = {
     "ACVRAM_SANS_REPLAN",
     "ACVRAM_SEUIL_FUSION",
     "ACVRAM_SPECULATION_LOT_MAX",
+    "ACVRAM_SPEC_REPOS",        # engine/runner.py : 277e, pas de recouvrement après un repli du spéculatif (défaut 2)
     "ACVRAM_SYNC_COUCHES",
     "ACVRAM_TETE_LIEE",
     "ACVRAM_TRACEBACK",

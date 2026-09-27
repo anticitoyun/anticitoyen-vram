@@ -234,6 +234,9 @@ DEFAUTS_PAR_VERSION["0.7.5"] = DEFAUTS_PAR_VERSION["0.7.4"]
 DEFAUTS_PAR_VERSION["0.7.6"] = ({**DEFAUTS_PAR_VERSION["0.7.5"][0], "PREFILL_TRANCHES": "1"}, DEFAUTS_PAR_VERSION["0.7.5"][1])
 # 0.7.7 (27/09, pièces 276 f/287) : mêmes défauts — ngram toujours none, garde d'arbre inerte sans variable.
 DEFAUTS_PAR_VERSION["0.7.7"] = DEFAUTS_PAR_VERSION["0.7.6"]
+# Gabarit de la version qui portera la 277e (hors défaut) : ACVRAM_SPEC_REPOS déclarée, défaut 2, inerte sous
+# --speculative none — seule différence de table avec la 0.7.7.
+DEFAUTS_PAR_VERSION["0.7.8"] = ({**DEFAUTS_PAR_VERSION["0.7.7"][0], "SPEC_REPOS": "2"}, DEFAUTS_PAR_VERSION["0.7.7"][1])
 
 
 def _var(nom):
