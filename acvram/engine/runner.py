@@ -40,8 +40,9 @@ from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
 # 276 g : tour de vision dans le fil de préparation (Engine.encoder_images), hors de `_admit`, recouverte avec le pas ;
 # DÉFAUT 1 si l'identité au bit tient (scellé 276 g) ; 0 = tour dans `_admit` (témoin, comportement d'avant)
 _TOUR_PREPARATION = os.environ.get("ACVRAM_TOUR_PREPARATION", "1") == "1"
-# 276 h : flux CUDA annexes pour les tours hors du pas — N tours (une image chacune) en vol se recouvrent ; 1 = régime 276 g
-_TOUR_FLUX = max(1, int(os.environ.get("ACVRAM_TOUR_FLUX", "2") or "2"))
+# 276 h : flux CUDA annexes pour les tours hors du pas — OPT-IN (2 = deux tours en vol) : mesuré 27/09, mur −5 % mais TTFT
+# moyen +9 % contre la 276 g (les requêtes arrivent par paires, préfills plus gros, attente plus longue) ; défaut 1 = régime 276 g
+_TOUR_FLUX = max(1, int(os.environ.get("ACVRAM_TOUR_FLUX", "1") or "1"))
 _VERROU_RESERVE_FLUX = threading.Lock()
 
 __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
