@@ -196,3 +196,27 @@ def test_deux_services_partagent_la_carte_et_une_mesure_reste_refusee(tmp_path):
             break
         time.sleep(0.1)
     assert not info.exists() and _flock_libre(verrou)
+
+
+def test_mesure_sans_qui_attend_tant_qu_un_service_tient_le_verrou_partage(tmp_path):
+    """Garantie demandée par chef (27/09) : une MESURE prend le verrou en EXCLUSIF,
+    donc elle ne passe JAMAIS pendant qu'un service tient le verrou partagé — même
+    si le `.qui` a disparu (cas jxm) : elle attend, puis abandonne (3) à ATTENTE,
+    au lieu de mesurer à côté du service. Cassant si un service prenait le
+    verrou autrement qu'en flock (la mesure passerait, code 0)."""
+    verrou = tmp_path / "verrou.lock"
+    info = tmp_path / "verrou.lock.qui"
+    svc = subprocess.run(["bash", str(CARTE), "sleep", "30"],
+                         env=_env(verrou, ACVRAM_TYPE="service", ACVRAM_NOM="serveur",
+                                  ACVRAM_SERVICE_LOG=str(tmp_path / "srv.log")),
+                         capture_output=True, text=True, timeout=30)
+    pid = svc.stdout.strip()
+    try:
+        info.unlink()                       # .qui perdu : le flock seul doit protéger
+        r = subprocess.run(["bash", str(CARTE), "sleep", "1"],
+                           env=_env(verrou, ACVRAM_TYPE="mesure", ACVRAM_NOM="ma-mesure",
+                                    ACVRAM_ATTENTE="3", ACVRAM_TICKET_DESACTIVE="1"),
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 3 and "ABANDON" in r.stderr, (r.returncode, r.stderr[-300:])
+    finally:
+        subprocess.run(["kill", pid], check=False)
