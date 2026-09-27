@@ -8,7 +8,9 @@
 #   openwebui-medias [--a-sec]      --a-sec : affiche ce qui changerait, n'écrit rien
 # Jeton : administrateur de la base, signé par ~/.webui_secret_key (la clé que « openwebui start » fait lire).
 set -euo pipefail
-OWUI=${OWUI:-/mnt/AI_GENERATOR/openwebui}
+# Racine d'OWUI : celle du lanceur « openwebui » (BASE=…), sauf OWUI=<dossier> posé.
+OWUI=${OWUI:-$(sed -n 's/^BASE=//p' "$(command -v openwebui 2>/dev/null || echo /dev/null)" | head -1)}
+[ -x "${OWUI:-/nonexistent}/venv/bin/python" ] || { echo "openwebui-medias : Open WebUI introuvable (lanceur openwebui, ou OWUI=<dossier>)" >&2; exit 1; }
 ICI=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PARTAGE=${PARTAGE_OWUI:-$ICI/../share/openwebui}
 [ -f "$PARTAGE/comfyui_medias.py" ] || PARTAGE=/usr/share/acvram-parc/openwebui
