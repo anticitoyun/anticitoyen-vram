@@ -71,3 +71,27 @@ def test_moe_tranches_seulement_au_dela_du_seuil(monkeypatch):
         appels.clear(); moe.definir_seuil(seuil)
         assert torch.equal(moe.MoEBlock.forward(b, x), x * 2) and appels == attendu
     moe.definir_seuil(None)
+
+
+@CUDA
+@pytest.mark.parametrize("n", [16384, 8192 + 100])
+def test_morceaux_dimensions_reelles_35b(n, monkeypatch):
+    """Dimensions du 35B (nk 16 × 128, nv 32 × 128, conv 4, cachée 2 048) : là où la prise 5 (1) a vu main ≠ branche."""
+    import acvram.engine.gdn as GG
+    from acvram.engine.gdn import GatedDeltaNet
+    torch.manual_seed(5)
+    Hh, nk, nv, dk, dv = 2048, 16, 32, 128, 128
+
+    def lin(o, i):
+        m = torch.nn.Linear(i, o, bias=False); m.weight.data.uniform_(-0.02, 0.02); return m.to(torch.bfloat16)
+    cd = 2 * nk * dk + nv * dv
+    with torch.no_grad():
+        couche = GatedDeltaNet(qkv=lin(cd, Hh), gate=lin(nv * dv, Hh), alpha=lin(nv, Hh), beta=lin(nv, Hh), out=lin(Hh, nv * dv),
+                               conv_weight=torch.randn(cd, 4) * 0.3, dt_bias=torch.rand(nv) - 0.5, a_log=torch.rand(nv) * 3 - 2,
+                               norm_weight=torch.ones(dv), num_k_heads=nk, num_v_heads=nv, head_k_dim=dk, head_v_dim=dv).to("cuda")
+        h = (torch.randn(n, Hh) * 0.5).to("cuda", torch.bfloat16)
+        monkeypatch.setattr(GG, "_GDN_MORCEAU", 0)
+        y0, e0 = couche(h, None)
+        monkeypatch.setattr(GG, "_GDN_MORCEAU", 4096)
+        y1, e1 = couche(h, None)
+    assert torch.equal(y0, y1) and torch.equal(e0[1], e1[1]), f"max {(y0.float() - y1.float()).abs().max().item()}"
