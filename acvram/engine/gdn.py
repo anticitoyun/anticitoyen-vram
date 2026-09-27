@@ -409,10 +409,14 @@ class GatedDeltaNet(nn.Module):
         if m <= 0 or t <= m or (t == 1 and state is not None):
             return self._coeur_un(x, qkv, z, b, a, state)
         ys = []
-        for d in range(0, t, m):
-            f = min(t, d + m)
+        d = 0
+        while d < t:
+            # un reste < 64 rejoint la tranche : une tranche d UN jeton avec état prendrait la règle RÉCURRENTE
+            # (décodage), pas la règle par blocs — autre numérique (rouge à 4 097 = 64 × 64 + 1, prise 2)
+            f = t if t - (d + m) < 64 else d + m
             y, state = self._coeur_un(x[d:f], qkv[d:f], z[d:f], b[d:f], a[d:f], state)
             ys.append(y)
+            d = f
         return torch.cat(ys), state
 
     def _coeur_un(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor,

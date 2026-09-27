@@ -23,7 +23,7 @@ def _deux(couche, n, dtype, etat, monkeypatch, morceau):
 
 @CUDA
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("n", [130, 1000, 4097])
+@pytest.mark.parametrize("n", [130, 1000, 4097, 4096 + 63, 129])
 @pytest.mark.parametrize("morceau", [64, 128, 192])
 @pytest.mark.parametrize("avec", [False, True])
 def test_morceaux_au_bit(dtype, n, morceau, avec, monkeypatch):
