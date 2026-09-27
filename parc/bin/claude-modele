@@ -103,8 +103,9 @@ lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ ar
   servi=$(curl -s -m 3 -H "Authorization: Bearer $cle" "$url/v1/models" 2>/dev/null | python3 -c '
 import json, sys
 for m in json.load(sys.stdin).get("data", []):
-    if m.get("id") == sys.argv[1] and str(m.get("max_model_len", "")).isdigit():
-        print(m["max_model_len"])' "$modele" 2>/dev/null || true)
+    v = m.get("max_model_len") or (m.get("acvram") or {}).get("max_model_len")   # vLLM à plat, acvram sous « acvram »
+    if m.get("id") == sys.argv[1] and str(v or "").isdigit():
+        print(v)' "$modele" 2>/dev/null || true)
   [ -n "$servi" ] && [ -n "$ctx" ] && [ "$servi" -lt "$ctx" ] 2>/dev/null && ctx="$servi"
   # Prompt de démarrage de claude CLI mesuré à sec (27/09, t5e, tokenizer Qwen3 sur la requête réelle depuis ~) :
   # 24 150 jetons avec --strict-mcp-config (40 outils) ; 61 315 sans (170 outils : les MCP globaux de l'utilisateur

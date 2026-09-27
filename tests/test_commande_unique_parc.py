@@ -73,7 +73,7 @@ def test_claude_modele_imprime_ce_qu_il_execute_pour_les_quatre_moteurs(tmp_path
 
 def _poste_acvram(tmp_path, faux, ctx_tsv, reponse_models):
     home = Path(os.environ["HOME"]); tsv = home / "TSV"; tsv.mkdir()
-    dossier = tmp_path / "modele"; dossier.mkdir()
+    dossier = tmp_path / "modele"; dossier.mkdir(exist_ok=True)
     (tsv / "acvram-chemins.tsv").write_text(f"acvram-un\t{dossier}\t{ctx_tsv}\n")
     _exe(faux / "acvram-serveur", "#!/bin/bash\nexit 0\n")
     _exe(faux / "curl", "#!/bin/bash\ncase \"$*\" in *-w*) printf 200 ;; *models*) printf '%s' '" + reponse_models + "' ;; esac\n")
@@ -96,8 +96,12 @@ def test_claude_modele_mcp_strict(tmp_path, faux):
 def test_claude_modele_fenetre_servie(tmp_path, faux):
     """La fenêtre annoncée à claude est celle que le moteur TIENT (max_model_len de /v1/models, clampé par la
     chauffe), pas la demande du TSV — sinon claude remplit 65 536 et le moteur rend 400 au-delà de 39 936."""
-    env = _poste_acvram(tmp_path, faux, 65536, '{"data":[{"id":"acvram-un","max_model_len":39936}]}')
-    r = subprocess.run(["bash", str(PARC / "bin" / "claude-modele"), "--afficher", "acvram-un"],
-                       capture_output=True, text=True, env=env, timeout=60)
-    assert r.returncode == 0, r.stderr[-600:]
-    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS=39936" in r.stdout, r.stdout[-600:]
+    # forme réelle d'acvram (app.py : /v1/models → data[0].acvram.max_model_len), puis forme vLLM (à plat)
+    for reponse in ('{"data":[{"id":"acvram-un","acvram":{"max_model_len":39936}}]}',
+                    '{"data":[{"id":"acvram-un","max_model_len":39936}]}'):
+        home = Path(os.environ["HOME"]); import shutil; shutil.rmtree(home / "TSV", ignore_errors=True)
+        env = _poste_acvram(tmp_path, faux, 65536, reponse)
+        r = subprocess.run(["bash", str(PARC / "bin" / "claude-modele"), "--afficher", "acvram-un"],
+                           capture_output=True, text=True, env=env, timeout=60)
+        assert r.returncode == 0, r.stderr[-600:]
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS=39936" in r.stdout, (reponse, r.stdout[-600:])
