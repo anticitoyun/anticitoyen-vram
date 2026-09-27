@@ -88,13 +88,16 @@ VARIABLES_LUES = {
     "ACVRAM_KV_INT8_CANAL",
     "ACVRAM_KV_CANAL_RANGS",
     "ACVRAM_ARBRE_LIBRE",       # garde d'import (__init__.py) : contournement nommé, arbre ≠ cwd
+    "ACVRAM_ARBRE",             # garde d'import (__init__.py) : arbre attendu du bras d'une prise A/B (276 f)
     "ACVRAM_DEPAQUETAGE",       # kernels/marlin_port/__init__.py : auto | cuda | triton | torch
     "ACVRAM_GDN_PREFILL_LOT",   # engine/couches.py : lot au préfill GDN
+    "ACVRAM_GDN_COEUR_LOT",     # engine/couches.py : 245, cœur GDN du préfill en longueurs variables (opt-in, au bit)
     "ACVRAM_GDN_ETAT_EN_PLACE", # engine/gdn.py : 156 F4, état GDN mis à jour en place (défaut 1)
     "ACVRAM_GDN_AB",            # engine/gdn.py : 175, portes α‖β bf16 en un appel (auto défaut | separe témoin | concat | triton)
     "ACVRAM_GDN_CONV_FUSEE",    # engine/gdn.py : 156 F2, conv de décodage fusionnée (défaut 1)
     "ACVRAM_ADMISSION_FENETRE_MS",  # server/app.py : 179, fenêtre d'admission (défaut 5 ms, en rafale)
     "ACVRAM_ADMISSION_GUET",    # server/app.py : 269 b, porte de la fenêtre à 1 requête si une autre est entrée (opt-in, défaut 0)
+    "ACVRAM_PREFILL_TRANCHES",  # engine/runner.py : 284 b, préfill par lot coupé à la frontière d'instantané des hybrides (défaut 1)
     "ACVRAM_DEPAQ_PARTAGE",     # kernels : 172, poids déquantifié partagé par la boucle par séquence (défaut 1, au bit)
     "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (défaut 1, ± ulp)
     "ACVRAM_GDN_NORME_FUSEE",   # engine/gdn.py : 156 F3, norme gated Triton (défaut 1, ± ulp)

@@ -16,7 +16,7 @@ La surface publique est la ligne de commande (`acvram`) et le serveur
 compatible avec l'API OpenAI.
 """
 
-__version__ = "0.7.5"
+__version__ = "0.7.7"
 
 # Segments extensibles de l'allocateur CUDA, sur demande seulement. Posé ici
 # parce que la variable n'est lue qu'une fois, à la première allocation, avant
@@ -52,6 +52,16 @@ def _garde_arbre() -> None:
     if _os.environ.get("ACVRAM_ARBRE_LIBRE") == "1":
         return
     ici = _os.path.realpath(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    # 276 f (27/09) : un ABBA entre DEUX arbres pose ACVRAM_ARBRE=<arbre du bras> ; l'import d'un autre arbre est
+    # refusé ici, à la source, quel que soit le sys.path du script (la trace 262 mettait le cwd en tête : les bras
+    # « main » des 276 c/d/e ont tourné le code B sans qu'aucune garde ne le voie, cwd et import concordaient).
+    # La ligne « ARBRE <chemin> » est imprimée pour que la prise la contrôle dans le journal du serveur.
+    voulu = _os.environ.get("ACVRAM_ARBRE")
+    if voulu:
+        voulu = _os.path.realpath(voulu)
+        if voulu != ici:
+            raise ImportError(f"acvram importé depuis {ici} alors que ACVRAM_ARBRE demande {voulu}")
+        print(f"ARBRE {ici}", flush=True)
     try:
         d = _os.path.realpath(_os.getcwd())
     except OSError:

@@ -335,15 +335,9 @@ class GatedDeltaNet(nn.Module):
             d = f
         return self.out_proj(torch.cat(ys).to(x.dtype)), etats_new
 
-    def _coeur(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor,
-               b: torch.Tensor, a: torch.Tensor, state: Optional[tuple]):
-        """Convolution, règle delta et norme gated d'UNE séquence, projections
-        faites ; rend (y avant out_proj, nouvel état)."""
-        chunk_rule, recurrent_rule = _refs()
-        t = x.shape[0]
-        decode = (t == 1 and state is not None)
-
-        # convolution causale depthwise, avec état (kernel-1 colonnes)
+    def _conv(self, qkv: torch.Tensor, state: Optional[tuple]):
+        """Convolution causale depthwise d'UNE séquence, avec état (kernel-1 colonnes) ; rend ([1, t, conv_dim], nouvel
+        état de convolution). Isolée pour `coeur_lot` (245) : même code, donc mêmes arrondis que `_coeur`."""
         seq = qkv.t().unsqueeze(0)                          # [1, conv_dim, t]
         if state is not None:
             conv_state = state[0]
@@ -353,9 +347,58 @@ class GatedDeltaNet(nn.Module):
         new_conv_state = seq[0, :, -(self.kernel - 1):].detach().clone()
         conv = F.conv1d(seq, self.conv_weight.unsqueeze(1),
                         groups=self.conv_dim)               # [1, conv_dim, t]
-        conv = F.silu(conv)
+        return F.silu(conv).transpose(1, 2), new_conv_state
 
-        mixed = conv.transpose(1, 2)                        # [1, t, conv_dim]
+    def coeur_lot_possible(self, x: torch.Tensor) -> bool:
+        """245 : fla sur carte (la règle par blocs en longueurs variables) ; sinon la boucle."""
+        return x.is_cuda and _voie_fla(x) and _fla() is not None
+
+    def coeur_lot(self, h: torch.Tensor, etats: list, query_lens: list[int]) -> tuple[list, list]:
+        """Pièce 245 : préfill de plusieurs séquences (aucune en décodage). Projections, convolution et out_proj PAR
+        SÉQUENCE (même M, même noyau, mêmes arrondis que `forward`) ; portes (ponctuelles), règle delta en UN appel fla
+        `cu_seqlens` (blocs de 64 recommencés à chaque séquence, état initial [N, HV, K, V], zéros pour une séquence
+        sans état : même départ que None) et norme gated (par ligne) sur les Σ t lignes. Rend ([y_i après out_proj], états)."""
+        convs, zs, bs, as_, conv_etats, h0 = [], [], [], [], [], []
+        d = 0
+        for ql, etat in zip(query_lens, etats):
+            qkv, z, b, a = self._projections(h[d:d + ql])
+            mixed, ce = self._conv(qkv, etat)
+            convs.append(mixed); zs.append(z); bs.append(b); as_.append(a); conv_etats.append(ce)
+            h0.append(etat[1] if etat is not None else
+                      torch.zeros(1, self.nv, self.dk, self.dv, dtype=torch.float32, device=h.device))
+            d += ql
+        t = d
+        mixed = torch.cat(convs, dim=1)                     # [1, Σt, conv_dim]
+        q, k, v = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        q = q.reshape(1, t, self.nk, self.dk)
+        k = k.reshape(1, t, self.nk, self.dk)
+        v = v.reshape(1, t, self.nv, self.dv)
+        beta = torch.cat(bs).sigmoid().unsqueeze(0)
+        g = (-self.a_log.exp() * F.softplus(torch.cat(as_) + self.dt_bias)).unsqueeze(0)
+        if self.nv // self.nk > 1:
+            q = q.repeat_interleave(self.nv // self.nk, dim=2)
+            k = k.repeat_interleave(self.nv // self.nk, dim=2)
+        bornes = [0]
+        for ql in query_lens:
+            bornes.append(bornes[-1] + ql)
+        cu = torch.tensor(bornes, dtype=torch.long, device=h.device)
+        core, s_new = _fla()[0](q.contiguous(), k.contiguous(), v.contiguous(), g=g.contiguous(),
+                                beta=beta.contiguous(), initial_state=torch.cat(h0).contiguous(),
+                                output_final_state=True, use_qk_l2norm_in_kernel=True, cu_seqlens=cu)
+        y = self._norm_gated(core.reshape(-1, self.dv), torch.cat(zs).reshape(-1, self.dv), h.dtype)
+        y = y.reshape(t, self.value_dim)
+        ys = [self.out_proj(y[bornes[i]:bornes[i + 1]].to(h.dtype)) for i in range(len(query_lens))]
+        return ys, [(ce, s_new[i:i + 1]) for i, ce in enumerate(conv_etats)]
+
+    def _coeur(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor,
+               b: torch.Tensor, a: torch.Tensor, state: Optional[tuple]):
+        """Convolution, règle delta et norme gated d'UNE séquence, projections
+        faites ; rend (y avant out_proj, nouvel état)."""
+        chunk_rule, recurrent_rule = _refs()
+        t = x.shape[0]
+        decode = (t == 1 and state is not None)
+
+        mixed, new_conv_state = self._conv(qkv, state)      # [1, t, conv_dim]
         q, k, v = torch.split(
             mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
         q = q.reshape(1, t, self.nk, self.dk)

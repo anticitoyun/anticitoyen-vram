@@ -359,6 +359,12 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
              "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
              "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),
+    Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
+             "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
+             "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
+    Variable("GDN_COEUR_LOT", "0", ("acvram.engine.couches", "_GDN_COEUR_LOT"), "0",
+             "pièce 245 (opt-in) : 1 = au préfill de plusieurs séquences, cœur Gated DeltaNet (portes, fla cu_seqlens, "
+             "norme) en un appel ; projections, convolution et out_proj par séquence ; au bit de la boucle (test 245)"),
     Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
              "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
              "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),
@@ -397,6 +403,7 @@ HORS_REGIME = frozenset({
     "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
     "ACVRAM_KERNELS_PRECOMPILES",                                                # 240 : dossier d'un .so précompilé — un chemin ; le .so servi est nommé par son empreinte
     "ACVRAM_ARCHS",                                                              # 070a (241) : architectures de compilation des noyaux précompilés, sans effet sur le calcul servi
+    "ACVRAM_ARBRE",                                                               # 276 f : arbre attendu du bras d'une prise A/B (garde d'import), aucun chemin de calcul
     "ACVRAM_ARBRE_LIBRE",                                                         # garde d'import (a86fa1dd) : quel arbre est importé, aucun chemin de calcul
     "ACVRAM_TRACE_CRENEAUX", "ACVRAM_TRACE_ENTREES", "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_ROUTAGE_PT", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
