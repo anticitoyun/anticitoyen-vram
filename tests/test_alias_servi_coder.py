@@ -38,6 +38,8 @@ ALIAS_PAR_VERSION = {
     "0.7.5": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
     # 0.7.6 (27/09, pièces 284 b/275 d) : préfill par tranches pour les hybrides, même alias.
     "0.7.6": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.7 (27/09, pièces 276 f/287) : garde d'arbre, même alias.
+    "0.7.7": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
 }
 # Formats par famille, identiques pour i8c et S1b (107 bis § 6) : ce qui distingue les deux est dans les experts
 # (calibrés ou non), pas dans les formats.

@@ -83,6 +83,13 @@ if [ "$DEPUIS" -le 3 ]; then
     echo "REFUS : $NOTES introuvable — écrire les notes de cette release avant de la sortir" >&2
     exit 66
   }
+  # Pièce 287 (chef, 27/09) : notes bilingues obligatoires (utilisateur) — code
+  # distinct de 66 (absence de fichier) pour distinguer « rien écrit » de
+  # « écrit, mais français seul ».
+  grep -q '^## English' "$NOTES" && grep -q '^## Français' "$NOTES" || {
+    echo "REFUS : $NOTES sans « ## English » ET « ## Français » — notes non bilingues" >&2
+    exit 73
+  }
 
   echo "== 3. tag annoté $V, poussé sur GitLab"
   if git rev-parse -q --verify "refs/tags/$V" >/dev/null; then

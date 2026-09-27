@@ -15,7 +15,8 @@ V = "0.7.3"
 VNUM = "0.7.3"
 
 
-def _depot_jetable(tmp_path: pathlib.Path, *, version: str = VNUM, avec_notes: bool = True) -> pathlib.Path:
+def _depot_jetable(tmp_path: pathlib.Path, *, version: str = VNUM, avec_notes: bool = True,
+                    bilingue: bool = True) -> pathlib.Path:
     d = tmp_path / "depot"
     d.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(d)], check=True)
@@ -31,7 +32,8 @@ def _depot_jetable(tmp_path: pathlib.Path, *, version: str = VNUM, avec_notes: b
     # (les refus précèdent, ou --simule les trace sans les exécuter) — pas besoin de vrais fichiers.
     if avec_notes:
         notes = d / "docs" / "notes"; notes.mkdir(parents=True)
-        (notes / f"release-v{version}-github.md").write_text("notes", encoding="utf-8")
+        corps = "## English\n\ntext\n\n## Français\n\ntexte\n" if bilingue else "notes"
+        (notes / f"release-v{version}-github.md").write_text(corps, encoding="utf-8")
     subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(d), "commit", "-q", "-m", "initial"], check=True)
     return d
@@ -68,6 +70,14 @@ def test_refuse_si_notes_github_absentes(tmp_path):
     d = _depot_jetable(tmp_path, avec_notes=False)
     r = _lancer(d, f"v{V}")
     assert r.returncode == 66 and f"release-v{V}-github.md introuvable" in r.stderr, r.stderr
+
+
+def test_refuse_si_notes_non_bilingues(tmp_path):
+    """287 (chef) : des notes présentes mais sans « ## English » ET « ## Français »
+    (français seul, ou l'inverse) sont un refus distinct de 66 (fichier absent)."""
+    d = _depot_jetable(tmp_path, bilingue=False)
+    r = _lancer(d, f"v{V}")
+    assert r.returncode == 73 and "sans « ## English » ET « ## Français »" in r.stderr, r.stderr
 
 
 def test_refuse_si_le_tag_existe_deja(tmp_path):
