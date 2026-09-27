@@ -1545,6 +1545,18 @@ class MoEBlock(nn.Module):
 
     def forward(self, x: torch.Tensor,
                valid: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """d19 (27/09) : au préfill long (t > ACVRAM_MOE_MORCEAU), le bloc tourne par tranches de lignes — ses tampons
+        (≈ 100 Ko/jeton sur le 35B : lignes rassemblées × top-k, sorties d experts) ne grandissent plus avec l invite.
+        Chaque jeton ne dépend que de sa ligne ; les noyaux, eux, peuvent choisir d autres tuiles pour un autre M : au
+        bit : NON (prise 4) — d où l engagement au-delà du seul tenu d un seul tenant (`_MOE_SEUIL`)."""
+        m, seuil = _MOE_MORCEAU, _MOE_SEUIL
+        if (m > 0 and seuil is not None and valid is None and x.shape[0] > max(seuil, m)
+                and not (x.is_cuda and torch.cuda.is_current_stream_capturing())):
+            return torch.cat([self._forward_un(x[d:d + m]) for d in range(0, x.shape[0], m)])
+        return self._forward_un(x, valid)
+
+    def _forward_un(self, x: torch.Tensor,
+                    valid: Optional[torch.Tensor] = None) -> torch.Tensor:
         t, h = x.shape
         # topw reste en fp32 : il sort du routage ainsi et y retourne pour la
         # réduction pondérée ; l'aller-retour en bf16 coûtait deux copies par
@@ -1754,6 +1766,17 @@ class MoEBlock(nn.Module):
 # coûte ~0,6 ms par expert visité, la GEMV groupée relit les poids de
 # l'expert pour chaque jeton — croisement mesuré vers quelques milliers.
 _MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "32"))
+# d19 : tranche de lignes du bloc MoE au préfill long ; 0 = jamais (témoin). Engagée SEULEMENT au-delà de `_MOE_SEUIL`,
+# le tenu d un seul tenant prouvé par la chauffe (contexte.py) : en dessous, rien ne change (ni sortie ni temps).
+# Pas au bit (prise 4 de d19 : max |Δlogit| 0,35 à 16 k, 16 jetons égaux) : les tuiles des noyaux dépendent de M.
+_MOE_MORCEAU = int(os.environ.get("ACVRAM_MOE_MORCEAU", "4096"))
+_MOE_SEUIL: Optional[int] = None
+
+
+def definir_seuil(n: Optional[int]) -> None:
+    """Lignes au-delà desquelles le bloc MoE tourne par tranches (None : jamais) ; posé par la chauffe."""
+    global _MOE_SEUIL
+    _MOE_SEUIL = n
 # Jetons par expert au-delà desquels le prefill repasse de la GEMM groupée
 # NVFP4 à la déquantification en bf16 suivie de torch._grouped_mm.
 # Mesuré le 13/09/2026, Qwen3-Coder-30B-A3B-nvfp4 (8 actifs / 128), RTX 5090,

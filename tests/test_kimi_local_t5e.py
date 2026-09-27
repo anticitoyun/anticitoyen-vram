@@ -37,7 +37,12 @@ def _exe(p: Path, corps: str) -> Path:
     p.write_text(corps); p.chmod(p.stat().st_mode | stat.S_IEXEC); return p
 
 
-def test_kimi_local_sans_mcp_et_contexte_servi(tmp_path):
+import pytest
+
+
+@pytest.mark.parametrize("servi,mcp", [(39936, False), (65536, True)])
+def test_kimi_local_sans_mcp_et_contexte_servi(tmp_path, servi, mcp):
+    """d19 (décision chef) : MCP gardés ssi le contexte servi ≥ 65 536 (l'invite MCP fait 58-64 k)."""
     home = tmp_path / "home"; kimi_dir = home / ".kimi-code"; kimi_dir.mkdir(parents=True)
     (kimi_dir / "config.toml").write_text(CONFIG)
     (kimi_dir / "mcp.json").write_text('{"mcpServers": {"tokensave": {}, "icm": {}}}')
@@ -47,7 +52,7 @@ def test_kimi_local_sans_mcp_et_contexte_servi(tmp_path):
     b = tmp_path / "bin"; b.mkdir()
     _exe(b / "acvram-serveur", "#!/bin/bash\nexit 0\n")
     _exe(b / "curl", "#!/bin/bash\ncase \"$*\" in *models*) printf '%s' "
-         "'{\"data\":[{\"id\":\"acvram-un\",\"acvram\":{\"max_model_len\":39936}}]}' ;; esac\n")
+         "'{\"data\":[{\"id\":\"acvram-un\",\"acvram\":{\"max_model_len\":" + str(servi) + "}}]}' ;; esac\n")
     _exe(b / "faux-kimi", "#!/bin/bash\necho \"HOME_KIMI=$KIMI_CODE_HOME\"; printf 'recu :'; printf ' %q' \"$@\"; echo\n")
     cfg = tmp_path / "parc.toml"
     cfg.write_text(f'[chemins]\nkimi_dir = "{kimi_dir}"\ntsv_dir = "{tsv}"\nbin = "{b}"\nsecrets = "{tmp_path}/absent.env"\n'
@@ -59,10 +64,20 @@ def test_kimi_local_sans_mcp_et_contexte_servi(tmp_path):
     assert r.returncode == 0, r.stdout[-400:] + r.stderr[-600:]
     local = home / ".kimi-code-local"
     assert f"HOME_KIMI={local}" in r.stdout and "-m acvram-un -p OK" in r.stdout, r.stdout
-    assert (local / "mcp.json").read_text().strip() == '{"mcpServers": {}}'
+    if mcp:
+        assert (local / "mcp.json").resolve() == (kimi_dir / "mcp.json").resolve()   # les MCP de l'utilisateur, par lien
+    else:
+        assert (local / "mcp.json").read_text().strip() == '{"mcpServers": {}}' and not (local / "mcp.json").is_symlink()
     assert (local / "AGENTS.md").resolve() == (kimi_dir / "AGENTS.md").resolve()
     copie = (local / "config.toml").read_text()
     # seul l'alias lancé prend le contexte servi ; le distant et l'autre alias local sont intacts
-    assert copie == CONFIG.replace('model = "acvram-un"\nmax_context_size = 32768', 'model = "acvram-un"\nmax_context_size = 39936')
+    assert copie == CONFIG.replace('model = "acvram-un"\nmax_context_size = 32768', f'model = "acvram-un"\nmax_context_size = {servi}')
     assert (kimi_dir / "config.toml").read_text() == CONFIG                     # config de l'utilisateur intacte
     assert "tokensave" in (kimi_dir / "mcp.json").read_text()
+    if mcp:   # repasser SANS MCP après un lien : le mcp.json de l'utilisateur ne doit jamais être écrasé à travers le lien
+        _exe(b / "curl", "#!/bin/bash\ncase \"$*\" in *models*) printf '%s' "
+             "'{\"data\":[{\"id\":\"acvram-un\",\"acvram\":{\"max_model_len\":39936}}]}' ;; esac\n")
+        r2 = subprocess.run(["bash", str(PARC / "bin" / "kimi-modele"), "acvram-un", "-p", "OK"],
+                            capture_output=True, text=True, env=env, timeout=60)
+        assert r2.returncode == 0, r2.stderr[-400:]
+        assert "tokensave" in (kimi_dir / "mcp.json").read_text() and not (local / "mcp.json").is_symlink()

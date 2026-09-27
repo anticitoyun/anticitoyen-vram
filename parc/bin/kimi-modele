@@ -106,10 +106,18 @@ fi
 # 25-42 k. kimi n'a pas d'option MCP par session : un KIMI_CODE_HOME dédié, régénéré à chaque lancement (mcp.json vide,
 # AGENTS.md lié, config = copie de celle de l'utilisateur, seul max_context_size de l'alias mis au contexte SERVI).
 # La config de l'utilisateur et ses sessions distantes ne sont pas touchées.
+# d19 (27/09, décision chef) : les MCP sont GARDÉS pour un alias dont le contexte SERVI tient l'invite MCP avec marge
+# (≥ KIMI_MCP_CTX_MIN, 65 536 : invite 58-64 k) — 35B, 30B, 27B depuis le préfill par tranches ; sans MCP en dessous, et
+# quand le moteur ne dit pas son contexte (choix prudent : une invite de 58 k sur 32 k servis rend 400).
 kimi_local() {  # $1 alias  [$2 contexte servi]
   local d="${PARC_KIMI_LOCAL:-$HOME/.kimi-code-local}" src; src=$(dirname "$CONFIG")
   mkdir -p "$d" || return 1
-  printf '{"mcpServers": {}}\n' > "$d/mcp.json"
+  if [ -n "${2:-}" ] && [ "$2" -ge "${KIMI_MCP_CTX_MIN:-65536}" ] 2>/dev/null && [ -e "$src/mcp.json" ]; then
+    rm -f "$d/mcp.json"; ln -s "$src/mcp.json" "$d/mcp.json"
+    printf '%skimi : MCP gardés (contexte servi %s ≥ %s)%s\n' "$c_d" "$2" "${KIMI_MCP_CTX_MIN:-65536}" "$c_0" >&2
+  else
+    rm -f "$d/mcp.json"; printf '{"mcpServers": {}}\n' > "$d/mcp.json"
+  fi
   [ -e "$src/AGENTS.md" ] && ln -sfn "$src/AGENTS.md" "$d/AGENTS.md"
   python3 - "$CONFIG" "$d/config.toml" "$1" "${2:-}" <<'PY' || return 1
 import re, sys
