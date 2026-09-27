@@ -285,6 +285,8 @@ VARIABLES_LUES = {
     "ACVRAM_SEUIL_FUSION",
     "ACVRAM_SPECULATION_LOT_MAX",
     "ACVRAM_SPEC_REPOS",        # engine/runner.py : 277e, pas de recouvrement après un repli du spéculatif (défaut 2)
+    "ACVRAM_GDN_MORCEAU",       # engine/gdn.py : d19, tranches GDN au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
+    "ACVRAM_MOE_MORCEAU",       # engine/moe.py : d19, tranches MoE au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
     "ACVRAM_SYNC_COUCHES",
     "ACVRAM_TETE_LIEE",
     "ACVRAM_TRACEBACK",

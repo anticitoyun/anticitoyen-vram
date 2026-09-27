@@ -241,7 +241,7 @@ DEFAUTS_PAR_VERSION["0.7.8"] = DEFAUTS_PAR_VERSION["0.7.7"]
 DEFAUTS_PAR_VERSION["0.7.9"] = ({**DEFAUTS_PAR_VERSION["0.7.8"][0], "PILE_RENDUE": "1", "PILE_OCTETS": "1024", "TOUR_PREPARATION": "1", "TOUR_FLUX": "1"}, DEFAUTS_PAR_VERSION["0.7.8"][1])
 # Gabarit de la version qui portera la 277e (hors défaut) : ACVRAM_SPEC_REPOS déclarée, défaut 2, inerte sous
 # --speculative none — seule différence de table avec la 0.7.9.
-DEFAUTS_PAR_VERSION["0.7.10"] = ({**DEFAUTS_PAR_VERSION["0.7.9"][0], "SPEC_REPOS": "2"}, DEFAUTS_PAR_VERSION["0.7.9"][1])
+DEFAUTS_PAR_VERSION["0.7.10"] = ({**DEFAUTS_PAR_VERSION["0.7.9"][0], "SPEC_REPOS": "2", "GDN_MORCEAU": "4096", "MOE_MORCEAU": "4096"}, DEFAUTS_PAR_VERSION["0.7.9"][1])
 
 
 def _var(nom):

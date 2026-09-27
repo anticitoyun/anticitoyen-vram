@@ -1,5 +1,30 @@
 # Journal des changements
 
+## 0.7.10 (27/09/2026)
+
+### Contexte long
+
+* **27/09/2026 — pièce d19 (poste1, poste1-d19 c48296915) : préfill par tranches, 65 536 jetons de contexte.** La crête
+  du préfill long est le cœur GDN (245 Ko/jeton, 4 Gio à 16 k) puis le MoE (~100 Ko/jeton). Tranches GDN (état porté
+  d'une tranche à l'autre) et MoE, engagées SEULEMENT au-delà de ce qu'un préfill d'un seul tenant tient
+  (`ACVRAM_GDN_MORCEAU`, `ACVRAM_MOE_MORCEAU`, défaut 4096, `0` = témoin ; ligne de régime « tranches>N »). **Sous ce
+  seuil, sortie identique au bit** (35B à 16 k et 24 k, écart max 0,0). Contexte tenu : ≈Opus 35B 27 648 → 65 536,
+  Coder-30B et Fable-27B 39 936 → 65 536, 80B → 65 536 (exilé 31/48, plan inchangé) ; budget KV inchangé. Préfill du 35B :
+  16 k 1,04 s (inchangé), 32 k 2,40 s, 61 k 5,27 s. **Au-delà du seuil — invites refusées (400) jusqu'ici — la sortie
+  n'est PAS identique à un préfill d'un seul tenant** (le GDN par tranches n'est au bit qu'aux petites dimensions) :
+  PPL égale (ΔNLL −0,0008 ± 0,0009) mais KL moyen 7,9e-3 et top-1 95,7 %, sous le seuil scellé de 99 % — servi quand
+  même (une réponse de PPL égale plutôt qu'un refus), écart dit ici tel quel ; pièce suivante : tranches MoE à routage
+  calculé sur l'invite entière. `kimi-modele` garde les serveurs MCP de l'utilisateur pour un alias dont le contexte
+  servi atteint 65 536 (`KIMI_MCP_CTX_MIN`), sans MCP en dessous ; le fichier de l'utilisateur n'est jamais écrit.
+  `acvram-memoire/revue/poste1-d19-verdict-27-09.md`.
+
+### Spéculation (optionnelle)
+
+* **27/09/2026 — pièce 277 e (poste5, poste5-277e ebefa34f2) : le ngram corrigé fait moins de pas ; défaut inchangé
+  (`none`).** Après un rejet, le proposeur se met au repos quelques pas (`ACVRAM_SPEC_REPOS`, défaut 2, variable de
+  régime). Sortie identique au bit à `--speculative none` sur le mixte ; temps contre `none` : Coder 1,049 ×, mixte
+  0,977 × — le ngram ne revient pas au défaut, question close. `acvram-memoire/revue/poste5-piece277e-verdict-27-09.md`.
+
 ## 0.7.9 (27/09/2026)
 
 ### Correctif

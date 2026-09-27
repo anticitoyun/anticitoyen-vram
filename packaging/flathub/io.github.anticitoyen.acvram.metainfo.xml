@@ -40,6 +40,7 @@
   <supports><control>pointing</control><control>keyboard</control></supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.10" date="2026-09-27"><description><p>Long prompts: 65,536-token context on the 35B, Coder-30B, Fable-27B and 80B models (prefill split into slices beyond what a single pass holds; unchanged output below). Kimi keeps its MCP tools on models serving 64k or more.</p></description></release>
     <release version="0.7.9" date="2026-09-27"><description><p>Fixes the first start of every new install on hybrid models (CUDA stack limit inflated by Triton autotuning). Vision models: images are encoded while the request is prepared (time-to-first-token −20 % at 12 requests with images).</p></description></release>
     <release version="0.7.8" date="2026-09-27"><description><p>Graph capture no longer refuses large models because of unreturned PyTorch cache (35B aliases serve again). acvram-gui: type a model name to filter the list. Local model launchers for Claude Code and Kimi fixed.</p></description></release>
     <release version="0.7.7" date="2026-09-27"><description><p>Measurement tooling: an A/B arm now refuses to import code from another tree. Release notes are checked to be bilingual.</p></description></release>
