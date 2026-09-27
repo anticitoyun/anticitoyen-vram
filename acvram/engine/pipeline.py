@@ -120,6 +120,35 @@ class PipelineDecodage:
         return self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"],
                                epingle=pend.get("epingle"), tops=pend.get("tops"))
 
+    def _pas_speculatif(self, decodable: list[Sequence], b_reel: int) -> list[GenerationOutput]:
+        """Un pas de `step()` quand la spéculation est éligible (pièce 277e).
+
+        La 277fix vidait le pas simple en vol dans un pas de `step()` à lui seul, puis spéculait au pas suivant ; un
+        proposeur muet y retombait sur une amorce (0 jeton livré) : deux pas par jeton, 24 à 55 pas pour 32 jetons
+        (none : 32). Ici le vidage et la spéculation partagent le pas, et un repli qui ne livre rien enchaîne la
+        suite du pipeline dans le même pas : chaque pas livre au moins un jeton. Hystérésis : après un repli, rester
+        `spec_repos_max` pas en recouvrement avant de revider pour reproposer. Seules changent les positions
+        vérifiées par la cible plutôt que décodées simplement ; toute spéculation part d'un état vidé (277fix)."""
+        outputs: list[GenerationOutput] = []
+        if self._pipeline_pendiente is not None:
+            if self._spec_repos > 0:
+                # proposeur muet récemment : poursuivre le recouvrement plutôt que vider pour reproposer aussitôt
+                self._spec_repos -= 1
+                return self._plain_decode_pipeline(decodable)
+            outputs += self._pipeline_vider()
+            decodable = [s for s in decodable if not s.finished]
+            if not decodable:
+                return outputs
+        n0 = self.stats.decode_tokens
+        outputs += self._speculative_decode(decodable)
+        self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
+        if self._pipeline_pendiente is not None:
+            # repli sur le pas simple : une amorce est en vol
+            self._spec_repos = self.spec_repos_max
+            if not outputs:
+                outputs += self._plain_decode_pipeline([s for s in decodable if not s.finished])
+        return outputs
+
     def _pipeline_amorcer(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         """Un pas NORMAL (synchrone, comme `_plain_decode_sync`), qui pose ou
         REPOSE l'état du pipeline plutôt que de le poursuivre en
