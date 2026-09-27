@@ -40,6 +40,9 @@ from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
 # 276 g : tour de vision dans le fil de préparation (Engine.encoder_images), hors de `_admit`, recouverte avec le pas ;
 # DÉFAUT 1 si l'identité au bit tient (scellé 276 g) ; 0 = tour dans `_admit` (témoin, comportement d'avant)
 _TOUR_PREPARATION = os.environ.get("ACVRAM_TOUR_PREPARATION", "1") == "1"
+# 276 h : flux CUDA annexes pour les tours hors du pas — N tours (une image chacune) en vol se recouvrent ; 1 = régime 276 g
+_TOUR_FLUX = max(1, int(os.environ.get("ACVRAM_TOUR_FLUX", "2") or "2"))
+_VERROU_RESERVE_FLUX = threading.Lock()
 
 __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
 
@@ -1102,6 +1105,23 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             raise ValueError("tour de vision : niveaux deepstack rendus pour une partie des images seulement")
         return embeds, niveaux
 
+    def _reserve_flux_tour(self) -> Any:
+        """276 h : la réserve (queue.Queue) des `_TOUR_FLUX` flux CUDA annexes des tours hors du pas, créée une fois ;
+        None sans CUDA (la tour tourne sur le flux courant, `traits_niveaux_sur_flux` sans flux)."""
+        if self.vision is None or self.vision.device.type != "cuda":
+            return None
+        reserve = getattr(self, "_flux_tours", None)
+        if reserve is None:
+            with _VERROU_RESERVE_FLUX:
+                reserve = getattr(self, "_flux_tours", None)
+                if reserve is None:
+                    import queue
+                    reserve = queue.Queue()
+                    for _ in range(_TOUR_FLUX):
+                        reserve.put(torch.cuda.Stream(self.vision.device))
+                    self._flux_tours = reserve
+        return reserve
+
     def encoder_images(self, images: Any, request_id: str = "") -> Optional[tuple[list, Optional[list]]]:
         """276 g : la tour de vision HORS du pas moteur, appelée depuis le fil de préparation du serveur, image par
         image (MÊME `traits_niveaux` que `_admit` : au bit), sur un flux CUDA annexe pour se recouvrir avec le pas en
@@ -1114,16 +1134,19 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         if self.vision is None:
             raise SansTourVision(f"{len(ims)} image(s) pour un modèle sans tour de vision (manifeste vision: non)")
         verrou = getattr(getattr(self, "graphs", None), "verrou_capture", None)
-        flux = None
-        if self.vision.device.type == "cuda":
-            flux = getattr(self, "_flux_tour", None)
-            if flux is None:
-                flux = self._flux_tour = torch.cuda.Stream(self.vision.device)
-        with (verrou if verrou is not None else contextlib.nullcontext()):
-            rendus = [(im.debut, im.fin,
-                       *self.vision.traits_niveaux_sur_flux(im.pixel_values, im.fin - im.debut,
-                                                            supplement=getattr(im, "supplement", None), flux=flux))
-                      for im in ims]
+        # 276 h : lecteur (N tours en vol) quand le verrou le sait, sinon le verrou tel quel (un seul en vol)
+        garde = contextlib.nullcontext() if verrou is None else (verrou.lecteur() if hasattr(verrou, "lecteur") else verrou)
+        reserve = self._reserve_flux_tour()
+        flux = reserve.get() if reserve is not None else None        # bloque quand les N flux sont tous en vol
+        try:
+            with garde:
+                rendus = [(im.debut, im.fin,
+                           *self.vision.traits_niveaux_sur_flux(im.pixel_values, im.fin - im.debut,
+                                                                supplement=getattr(im, "supplement", None), flux=flux))
+                          for im in ims]
+        finally:
+            if reserve is not None:
+                reserve.put(flux)
         embeds, niveaux = self._rendus_en_traits(rendus, request_id, "préparation")
         print("[engine] tour (préparation) : " + " ; ".join(
             f"[{d},{f}) {tuple(e.shape)} sha={im.sha256[:8]} Σ={float(e.float().abs().sum()):.4g}"

@@ -36,9 +36,10 @@ seul son contenu change) reste capturable ; `_eligible()` le distingue.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
-from typing import Optional
+from typing import Any, Iterator, Optional
 
 import torch
 
@@ -238,6 +239,55 @@ def _avec_tokens(batch: "ForwardBatch", tokens: torch.Tensor) -> "ForwardBatch":
     return b2
 
 
+class VerrouCapture:
+    """276 g/h : une capture de graphe (mode global) et un noyau lancé d'un AUTRE fil s'invalident mutuellement. 276 g :
+    un seul verrou, donc une seule tour de vision en vol — les 12 tours d'une rafale restaient sérielles (mur non tenu).
+    276 h : lecteurs / rédacteur — `with verrou.lecteur():` = une tour en vol, plusieurs coexistent ; `with verrou:` =
+    la capture, seule, qui attend la fin des tours en vol et fait attendre les suivantes (priorité au rédacteur : une
+    rafale de tours ne peut pas repousser une capture sans fin)."""
+
+    def __init__(self) -> None:
+        import threading
+        self._cond = threading.Condition(threading.Lock())
+        self._lecteurs = 0
+        self._redacteur = False
+        self._redacteurs_en_attente = 0
+        self.lecteurs_max = 0          # observé : tours simultanées (journal, tests)
+
+    def __enter__(self) -> "VerrouCapture":
+        with self._cond:
+            self._redacteurs_en_attente += 1
+            while self._redacteur or self._lecteurs:
+                self._cond.wait()
+            self._redacteurs_en_attente -= 1
+            self._redacteur = True
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        with self._cond:
+            self._redacteur = False
+            self._cond.notify_all()
+
+    def locked(self) -> bool:
+        with self._cond:
+            return self._redacteur or self._lecteurs > 0
+
+    @contextlib.contextmanager
+    def lecteur(self) -> Iterator[None]:
+        with self._cond:
+            while self._redacteur or self._redacteurs_en_attente:
+                self._cond.wait()
+            self._lecteurs += 1
+            self.lecteurs_max = max(self.lecteurs_max, self._lecteurs)
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._lecteurs -= 1
+                if self._lecteurs == 0:
+                    self._cond.notify_all()
+
+
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
     # ACVRAM_HYBRID_SLOTS : plafond du nombre de séquences hybrides (GDN/KDA/
@@ -284,8 +334,7 @@ class GraphRunner:
         # 276 g : une capture (mode global) et un noyau lancé d'un AUTRE fil s'invalident mutuellement (« operation not
         # permitted when stream is capturing », graphes coupés à vie — leçon runner.py `_etat_eco`). La tour de vision hors
         # du pas (Engine.encoder_images, fil de préparation) et la capture prennent ce verrou : jamais en même temps.
-        import threading
-        self.verrou_capture = threading.Lock()
+        self.verrou_capture = VerrouCapture()      # 276 h : N tours en vol (lecteurs), une capture (rédacteur)
         # Pièce 267 : `GraphRunner` est construit par TOUT `Engine`, même sur un torch CPU-only
         # (roue sans extension CUDA) où `torch.cuda.Event` est une classe factice qui lève à
         # l'instanciation — CI GitHub (runner sans CUDA) rouge sur 62 tests, tous des `Engine`
