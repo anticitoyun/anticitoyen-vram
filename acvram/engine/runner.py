@@ -61,6 +61,11 @@ def chemin_moe_atteint(compteurs: list[dict]) -> str:
     return "atteint=" + "+".join(ordre)
 
 
+
+# Pièce 284 b (DÉFAUT) : préfill « une par une » (hybride + frontière d'instantané, ou toute séquence hors lot) réordonné
+# couche par couche — au bit, déquantification partagée par couche. 0 = témoin (la boucle d'avant, telle quelle).
+_PREFILL_TRANCHES = os.environ.get("ACVRAM_PREFILL_TRANCHES", "1") == "1"
+
 @dataclass
 class Sequence:
     prompt_ids: list[int]
@@ -164,6 +169,7 @@ class EngineStats:
     prefill_tokens: int = 0
     decode_tokens: int = 0
     prefill_seconds: float = 0.0
+    prefill_tranches: int = 0      # 284 b : pas de préfill passés couche par couche (preuve de prise)
     decode_seconds: float = 0.0
     running: int = 0
     waiting: int = 0
@@ -219,6 +225,7 @@ class EngineStats:
         return {
             "steps": self.steps,
             "pas_avec_prefill": self.pas_avec_prefill,
+            "prefill_tranches": self.prefill_tranches,
             "prefill_tokens": self.prefill_tokens,
             "decode_tokens": self.decode_tokens,
             "decode_tok_s": round(self.decode_tok_s, 2),
@@ -1235,6 +1242,52 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             return f"(coupé@{self._pas_insta})"
         return ""
 
+    def _prefill_tranches(self, seqs: list) -> Optional[list]:
+        """Pièce 284 b : la boucle « une par une » ci-dessous, réordonnée COUCHE PAR COUCHE (`forward_tranches`) —
+        une première vague porte chaque séquence jusqu'à sa frontière d'instantané, puis les instantanés (comme
+        avant, séquence par séquence), puis une seconde vague porte chaque séquence au bout de son invite. Chaque
+        tranche est la même qu'avant (mêmes `_build_batch`, même coupe) : au bit ; la déquantification d'une couche
+        est faite une fois par vague au lieu d'une fois par tranche (284 : 56 % du préfill du mixte, refaite × 2 b).
+        None = non applicable (image, deepstack, tête MTP…) : la boucle d'avant prend la main, inchangée."""
+        mtp_lue = getattr(self.speculator, "name", None) == "mtp"
+        if any(seq.images for seq in seqs) or not self.model.tranches_possibles([], mtp_lue):
+            return None                      # contrôlé AVANT tout `_build_batch` (qui réserve des blocs)
+        coupes = []
+        for seq in seqs:
+            coupe = self._frontiere_insta(seq) if seq.prefill_len == seq.cached_len else None
+            if coupe is not None and self._eviter_coupe_image(seq, coupe) != coupe:
+                return None
+            coupes.append(coupe)
+        t0 = time.perf_counter()
+        debuts = [seq.prefill_len for seq in seqs]
+        vague1 = [(seq, c) for seq, c in zip(seqs, coupes) if c is not None]
+        if vague1:
+            b1 = [self._build_batch([seq], prefill=True, limite=c) for seq, c in vague1]
+            if not self.model.tranches_possibles(b1, mtp_lue):
+                raise RuntimeError("préfill par tranches : un lot de la première vague porte image ou deepstack")
+            self.model.forward_tranches(b1)
+            for seq, c in vague1:
+                self._photographier(seq, c)
+                seq.cached_len = c
+                seq.prefill_len = c
+        b2 = [self._build_batch([seq], prefill=True) for seq in seqs]
+        if not self.model.tranches_possibles(b2, mtp_lue):
+            raise RuntimeError("préfill par tranches : la seconde vague n'est plus applicable après la première")
+        logits = self.model.forward_tranches(b2)
+        if os.environ.get("ACVRAM_CHRONO_SYNC"):
+            torch.cuda.synchronize()
+        self.stats.prefill_seconds += time.perf_counter() - t0
+        self.stats.prefill_tranches += 1
+        sorties = []
+        for seq, debut, lg in zip(seqs, debuts, logits):
+            fin = len(seq.prompt_ids)
+            self.stats.prefill_tokens += fin - debut
+            seq.prefill_len = fin
+            if seq.prefilled:
+                sorties += self._emit(lg, [seq])
+            self._register_complete_blocks(seq)
+        return sorties
+
     def _frontiere_insta(self, seq: Sequence) -> Optional[int]:
         """Position où couper le prefill pour photographier l'état, ou None.
 
@@ -1603,6 +1656,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # On précalcule les séquences nouvellement admises une par une.
             # Mêler une longue invite à un lot de décodage bloquerait derrière
             # elle toutes les séquences en cours.
+            if not budget and len(a_prefiller) > 1 and _PREFILL_TRANCHES:
+                faits = self._prefill_tranches(a_prefiller)
+                if faits is not None:
+                    outputs += faits
+                    a_prefiller = []
             for seq in a_prefiller:
                 t0 = time.perf_counter()
                 debut = seq.prefill_len

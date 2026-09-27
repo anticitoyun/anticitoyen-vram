@@ -190,6 +190,10 @@ class ACVRamModel(nn.Module):
                     raise RuntimeError(f"faute CUDA après la couche {i} "
                                        f"({type(layer).__name__} sur {layer.device}) : {exc}") from exc
 
+        return self._sortie(x, delta, batch, return_hidden, logits_positions)
+
+    def _sortie(self, x, delta, batch, return_hidden: bool = False, logits_positions=None):
+        """Norme finale, tête MTP, logits du dernier jeton — la fin de `forward`, partagée avec `forward_tranches` (284 b)."""
         if delta is None:
             brut = x
             x = self.norm(x.to(self.norm.weight.device))
@@ -262,6 +266,45 @@ class ACVRamModel(nn.Module):
                       "une entree fp32 : le noyau de la tete impose son type, "
                       "et le gain de resolution n'est pas acquis.", flush=True)
         return self._logits_finaux(logits)
+
+    @torch.inference_mode()
+    def forward_tranches(self, batches: list) -> list:
+        """Pièce 284 b : le préfill de plusieurs tranches (une par séquence ou par morceau de séquence, chacune comme
+        `forward` la recevrait seule) COUCHE PAR COUCHE : pour chaque couche, chaque tranche passe seule — mêmes lignes,
+        mêmes appels, mêmes chemins que `forward(batch)` —, dans une portée qui partage les poids déquantifiés de la
+        couche (seuil GEMV inchangé). Au bit de `[forward(b) for b in batches]` : seul l'ordre d'exécution change, et
+        les poids déquantifiés, identiques, ne sont fabriqués qu'une fois par couche au lieu d'une fois par tranche.
+        Réservé aux lots sans image ni deepstack (vérifié par `tranches_possibles`)."""
+        xs = []
+        for b in batches:
+            _moe_mod._EN_PREFILL[0] = bool(b.is_prefill)
+            x = F.embedding(b.tokens.to(self.embed_tokens.device), self.embed_tokens).to(self.dtype)
+            if self.spec.embedding_multiplier != 1.0:
+                x = x * self.spec.embedding_multiplier
+            xs.append(x)
+        current = None
+        for i, layer in enumerate(self.layers):
+            if layer.device != current:
+                xs = [x.to(layer.device, non_blocking=True) for x in xs]
+                current = layer.device
+            if i + 1 < len(self.layers):
+                self.layers[i + 1].prefetch()
+            with kernels.depaquetage_partage(seuil_partage=False):
+                xs = [layer(x, b, self.caches.get(i)) for x, b in zip(xs, batches)]
+            _trace_couche("forward", i, layer)
+        return [self._sortie(x, None, b) for x, b in zip(xs, batches)]
+
+    def tranches_possibles(self, batches: list, mtp_lue: bool = True) -> bool:
+        """Le chemin par tranches ne couvre que ce que `forward` fait sans détour : ni image, ni deepstack, ni
+        résidu différé (`prefill_compact("residu")` sur des couches denses), ni synchronisation de diagnostic."""
+        # Tête MTP : `_sortie` garde l'état caché dans l'ordre des appels, que seul le proposeur MTP relit
+        # (speculative.py, `_mtp_hidden`/`_mtp_prefill`) — refus seulement s'il est actif (`mtp_lue`).
+        if _SYNC_COUCHES or (self.mtp is not None and mtp_lue) or any(
+                b.images is not None or b.deepstack is not None for b in batches):
+            return False
+        return not (kernels.prefill_compact("residu") and all(
+            type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
+            and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers))
 
     def _tete(self, x: torch.Tensor) -> torch.Tensor:
         """L'entrée de ``lm_head`` en fp32 sur l'appareil de la tête — LE MÊME

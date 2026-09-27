@@ -40,6 +40,8 @@
   <supports><control>pointing</control><control>keyboard</control></supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.7" date="2026-09-27"><description><p>Measurement tooling: an A/B arm now refuses to import code from another tree. Release notes are checked to be bilingual.</p></description></release>
+    <release version="0.7.6" date="2026-09-27"><description><p>Faster first token on hybrid models under load: batched prefill is split at the recurrent-state snapshot boundary instead of falling back to one request at a time (Qwen3.8-27B mixte, 12 requests: 5.50 s to 2.55 s), bit-identical output.</p></description></release>
     <release version="0.7.5" date="2026-09-26"><description><p>Speculative decoding bug 277 fixed (the decode pipeline is now flushed before a speculative step; no more repeated tokens). Speculation stays off by default. Release checks: missing cited assets and a stale Flatpak are now refused.</p></description></release>
     <release version="0.7.4" date="2026-09-26"><description><p>Admission gate switched off for vision aliases (image preparation exceeds the window: +10 ms TTFT p50, +25 ms p95 at 4 requests with images); unchanged for text.</p></description></release>
     <release version="0.7.3" date="2026-09-26"><description><p>Admission gate on by default (ACVRAM_ADMISSION_GUET=1): a burst of 12 requests is served in one prefill step 21/21 times (15/21 before), TTFT p50 247.4 ms vs 251.6, no cost for a single request.</p></description></release>
