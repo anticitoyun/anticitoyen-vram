@@ -42,7 +42,7 @@ def _ctx_texte(engine) -> str:
     demande = getattr(engine, "ctx_demande", v)
     txt = f" ctx_tenu={v}" if demande == v else f" ctx_tenu={v}(demandé {demande})"
     seuil = getattr(engine, "moe_seuil", None)
-    return txt + (f" moe_tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
+    return txt + (f" tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
 
 
 class ChauffeContexte:
@@ -88,9 +88,11 @@ class ChauffeContexte:
         self.reserve_chauffe = (libre, seuil)
         return True
 
-    def _a_des_moe(self) -> bool:
-        from .moe import MoEBlock
-        return any(isinstance(m, MoEBlock) for m in self.model.modules())
+    def _a_des_tranches(self) -> bool:
+        """Un bloc que la chauffe peut passer par tranches au-delà du seul tenant (d19) : MoE ou GDN, morceau non nul."""
+        from . import gdn as _gdn, moe as _moe
+        return any((isinstance(m, _moe.MoEBlock) and _moe._MOE_MORCEAU > 0)
+                   or (isinstance(m, _gdn.GatedDeltaNet) and _gdn._GDN_MORCEAU > 0) for m in self.model.modules())
 
     def _libre_apres_chauffe(self) -> tuple[int, int]:
         """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
@@ -164,21 +166,25 @@ class ChauffeContexte:
                     haut = milieu
             return bas
 
-        from . import moe as _moe
-        _moe.definir_seuil(None)
+        from . import gdn as _gdn, moe as _moe
+
+        def seuils(v):
+            _moe.definir_seuil(v); _gdn.definir_seuil(v)
+        seuils(None)
         self.moe_seuil: Optional[int] = None
         tenu: Optional[int] = n if essai(n) else dichotomie(0, n)
-        # d19 : au-delà du tenu d un seul tenant, le bloc MoE par tranches (tampons bornés). Engagé SEULEMENT au-delà :
-        # toute invite qui tenait garde sa sortie et son temps ; au-delà, elle recevait un 400. Pas au bit du seul tenant.
-        if tenu < n and _moe._MOE_MORCEAU > 0 and self._a_des_moe():
-            _moe.definir_seuil(max(tenu, pas))
+        # d19 : au-delà du tenu d un seul tenant, cœur GDN et bloc MoE par tranches (tampons bornés). Engagés SEULEMENT
+        # au-delà : toute invite qui tenait garde sa sortie au bit et son temps ; au-delà, elle recevait un 400. Pas au bit
+        # du seul tenant (prise 5 de d19 : PPL égale, KL moyen 7e-3).
+        if tenu < n and self._a_des_tranches():
+            seuils(max(tenu, pas))
             tenu2 = n if essai(n) else dichotomie(tenu, n)
             if tenu2 > tenu:
-                print(f"[acvram] MoE par tranches ({_moe._MOE_MORCEAU} lignes) au-delà de {tenu} jetons : "
-                      f"{tenu2} tenus", flush=True)
+                print(f"[acvram] préfill par tranches (GDN {_gdn._GDN_MORCEAU}, MoE {_moe._MOE_MORCEAU}) au-delà de "
+                      f"{tenu} jetons : {tenu2} tenus", flush=True)
                 self.moe_seuil, tenu = tenu, tenu2
             else:
-                _moe.definir_seuil(None)
+                seuils(None)
         self._oublier_la_chauffe()
         self.graphs = graphes
         self.ctx_demande = n

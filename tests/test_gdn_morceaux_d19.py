@@ -1,5 +1,6 @@
-"""d19 (27/09) : cœur GDN par tranches (ACVRAM_GDN_MORCEAU), état porté d'une tranche à l'autre, AU BIT du cœur d'un seul
-tenant (sortie et état final) — c'est ce qui l'autorise par défaut. Cassant : un état NON porté entre tranches doit rendre faux."""
+"""d19 (27/09) : cœur GDN par tranches (ACVRAM_GDN_MORCEAU), état porté d'une tranche à l'autre. AU BIT du cœur d'un seul tenant
+aux PETITES dimensions (même mathématique, état porté exact) ; aux dimensions réelles, 1 ulp bf16 (fla choisit ses noyaux selon T) :
+d'où l'engagement au-delà du seul tenu d'un seul tenant (`_GDN_SEUIL`, posé par la chauffe). Cassant : état NON porté → faux."""
 import pytest
 import torch
 
@@ -16,7 +17,7 @@ def _deux(couche, n, dtype, etat, monkeypatch, morceau):
     h = torch.randn(n, H, generator=g).to("cuda", dtype)
     monkeypatch.setattr(G, "_GDN_MORCEAU", 0)
     y0, e0 = couche(h, etat)
-    monkeypatch.setattr(G, "_GDN_MORCEAU", morceau)
+    monkeypatch.setattr(G, "_GDN_MORCEAU", morceau); monkeypatch.setattr(G, "_GDN_SEUIL", 0)
     y1, e1 = couche(h, etat)
     return torch.equal(y0, y1) and torch.equal(e0[0], e1[0]) and torch.equal(e0[1], e1[1])
 
@@ -44,7 +45,7 @@ def test_cassant_etat_non_porte(monkeypatch):
     h = torch.randn(1000, H, generator=g).to("cuda", torch.float32)
     monkeypatch.setattr(G, "_GDN_MORCEAU", 0)
     y0, _ = couche(h, None)
-    monkeypatch.setattr(G, "_GDN_MORCEAU", 128)
+    monkeypatch.setattr(G, "_GDN_MORCEAU", 128); monkeypatch.setattr(G, "_GDN_SEUIL", 0)
     y1, _ = couche(h, None)
     assert not torch.equal(y0, y1)
 
@@ -76,7 +77,8 @@ def test_moe_tranches_seulement_au_dela_du_seuil(monkeypatch):
 @CUDA
 @pytest.mark.parametrize("n", [16384, 8192 + 100])
 def test_morceaux_dimensions_reelles_35b(n, monkeypatch):
-    """Dimensions du 35B (nk 16 × 128, nv 32 × 128, conv 4, cachée 2 048) : là où la prise 5 (1) a vu main ≠ branche."""
+    """Dimensions du 35B (nk 16 × 128, nv 32 × 128, conv 4, cachée 2 048) : PAS au bit (prise 5 d : 0,00098 = 1 ulp bf16), mais
+    borné — un écart plus grand trahirait un état mal porté, pas un choix de noyau."""
     import acvram.engine.gdn as GG
     from acvram.engine.gdn import GatedDeltaNet
     torch.manual_seed(5)
@@ -92,6 +94,21 @@ def test_morceaux_dimensions_reelles_35b(n, monkeypatch):
         h = (torch.randn(n, Hh) * 0.5).to("cuda", torch.bfloat16)
         monkeypatch.setattr(GG, "_GDN_MORCEAU", 0)
         y0, e0 = couche(h, None)
-        monkeypatch.setattr(GG, "_GDN_MORCEAU", 4096)
+        monkeypatch.setattr(GG, "_GDN_MORCEAU", 4096); monkeypatch.setattr(GG, "_GDN_SEUIL", 0)
         y1, e1 = couche(h, None)
-    assert torch.equal(y0, y1) and torch.equal(e0[1], e1[1]), f"max {(y0.float() - y1.float()).abs().max().item()}"
+    assert (y0.float() - y1.float()).abs().max().item() <= 4e-3
+
+
+def test_gdn_tranches_seulement_au_dela_du_seuil(monkeypatch):
+    """_coeur : sans seuil ou sous le seuil, UN appel de _coeur_un (au bit de main par construction) ; au-delà, tranches. À sec."""
+    from acvram.engine.gdn import GatedDeltaNet
+    c = GatedDeltaNet.__new__(GatedDeltaNet)
+    appels = []
+    c._coeur_un = lambda x, qkv, z, b, a, st: (appels.append(x.shape[0]), (x, st))[1]
+    x = torch.zeros(300, 2)
+    monkeypatch.setattr(G, "_GDN_MORCEAU", 128)
+    for seuil, attendu in ((None, [300]), (300, [300]), (200, [128, 172])):
+        appels.clear(); G.definir_seuil(seuil)
+        GatedDeltaNet._coeur(c, x, x, x, x, x, None)
+        assert appels == attendu, (seuil, appels)
+    G.definir_seuil(None)

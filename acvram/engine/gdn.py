@@ -87,8 +87,17 @@ _GDN_NORME_FUSEE = os.environ.get("ACVRAM_GDN_NORME_FUSEE", "1") == "1"
 # Pièce 182 (1) : z (porte de la norme) rendu par `_projections` dans le dtype de la projection, sans cast fp32 — ses
 # consommateurs castent au chargement (exact) ; au décodage, 48 copies de moins par pas sur Qwen3.8. 0 = témoin (cast).
 _GDN_Z_BF16 = os.environ.get("ACVRAM_GDN_Z_BF16", "1") == "1"
-# d19 : tranche (jetons, multiple de 64) du cœur GDN au préfill long ; 0 = d'un seul tenant (témoin)
+# d19 : tranche (jetons, multiple de 64) du cœur GDN au préfill long ; 0 = jamais (témoin). Engagée SEULEMENT au-delà de
+# `_GDN_SEUIL` (tenu d un seul tenant, posé par la chauffe) : aux dimensions réelles, fla choisit ses noyaux selon T et la
+# sortie diffère d 1 ulp bf16 (prise 5 d : 35B, 0,00098) — au bit aux petites dimensions seulement.
 _GDN_MORCEAU = int(os.environ.get("ACVRAM_GDN_MORCEAU", "4096"))
+_GDN_SEUIL: Optional[int] = None
+
+
+def definir_seuil(n: Optional[int]) -> None:
+    """Jetons au-delà desquels le cœur GDN tourne par tranches (None : jamais) ; posé par la chauffe."""
+    global _GDN_SEUIL
+    _GDN_SEUIL = n
 if _GDN_MORCEAU % 64:
     raise ValueError(f"ACVRAM_GDN_MORCEAU={_GDN_MORCEAU} : multiple de 64 exigé (bloc de fla)")
 
@@ -403,10 +412,11 @@ class GatedDeltaNet(nn.Module):
         l'état (convolution, règle delta) porté d'une tranche à la suivante — ce que fait déjà un préfill repris à un
         instantané. Le cœur matérialisait ~245 Ko/jeton (35B : qkv fp32, convolution, q/k répétés, internes fla) sur TOUTE
         l'invite : 4 Gio à 16 k, la crête du préfill long. Projections et out_proj restent sur l'invite entière (mêmes M,
-        mêmes noyaux). Au bit : `tests/test_gdn_morceaux_d19.py`."""
+        mêmes noyaux). Au bit aux petites dimensions (`tests/test_gdn_morceaux_d19.py`), 1 ulp bf16 aux réelles : d où
+        l engagement au-delà du seul tenu d un seul tenant (`_GDN_SEUIL`)."""
         t = x.shape[0]
-        m = _GDN_MORCEAU
-        if m <= 0 or t <= m or (t == 1 and state is not None):
+        m, seuil = _GDN_MORCEAU, _GDN_SEUIL
+        if m <= 0 or seuil is None or t <= max(m, seuil) or (t == 1 and state is not None):
             return self._coeur_un(x, qkv, z, b, a, state)
         ys = []
         d = 0
