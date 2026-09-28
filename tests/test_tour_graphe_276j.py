@@ -110,3 +110,12 @@ def test_variables_de_regime_declarees():
     from acvram import regime
     noms = {v.nom for v in regime.VARIABLES}
     assert {"TOUR_GRAPHE", "TOUR_GRAPHE_MAX"} <= noms
+
+
+def test_le_graphe_garde_ses_annexes_precalculees():
+    """Les annexes précalculées sont des entrées du graphe (adresses lues à chaque rejeu) : GrapheTour les retient —
+    sinon libérées, réattribuées, gather hors bornes au 2e rejeu en service (28/09)."""
+    import inspect
+    assert "annexes" in GrapheTour.__dataclass_fields__
+    src = inspect.getsource(TourVision._capturer)
+    assert "annexes=kw" in src

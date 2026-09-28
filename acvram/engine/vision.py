@@ -125,6 +125,10 @@ class GrapheTour:
     entree: torch.Tensor
     pooler: tuple
     deepstack: list
+    # Les annexes précalculées (indices d'interpolation, position_ids…) sont des ENTRÉES du graphe : il lit leurs adresses
+    # à chaque rejeu. Libérées, leur mémoire est réattribuée et le gather lit n'importe quoi (assertion CUDA « index out of
+    # bounds » au 2e rejeu en service, 28/09 06 h 36 — l'identité en process l'avait manqué par chance : rien n'avait réalloué).
+    annexes: dict = field(default_factory=dict)
 
 
 def sorties_statiques(out: Any) -> tuple[tuple, list]:
@@ -272,7 +276,7 @@ class TourVision:
             self.graphes_captures += 1
             print(f"[vision] graphe capturé : forme {cle[0]} annexes {[c[0] for c in cle[2:]]} "
                   f"traits {tuple(pooler[0].shape)} niveaux {len(deepstack)} ({self.graphes_captures} graphe(s))", flush=True)
-            return GrapheTour(graphe, entree, pooler, deepstack)
+            return GrapheTour(graphe, entree, pooler, deepstack, annexes=kw)
         except Exception as exc:                                    # noqa: BLE001
             self.graphes_refuses += 1
             print(f"[vision] graphe non capturé ({type(exc).__name__}: {str(exc)[:200]}) ; forme {cle[0]} eager", flush=True)
