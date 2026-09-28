@@ -104,3 +104,10 @@ def test_le_device_du_modele_est_celui_des_embeddings(converted, monkeypatch):
     assert 'getattr(getattr(self.model, "embed_tokens", None), "device"' in src
     e = _moteur(converted)
     assert e.model.embed_tokens.device.type == "cpu" and not hasattr(e.model, "device")
+
+
+def test_engine_service_sans_moteur_ne_pose_pas_le_crochet():
+    """Les fixtures serveur (test_protocol_400_corps) construisent EngineService(None, …) : aucun crochet, aucun AttributeError."""
+    from acvram.server.app import EngineService
+    svc = EngineService(None, None, "m")
+    assert svc.engine is None
