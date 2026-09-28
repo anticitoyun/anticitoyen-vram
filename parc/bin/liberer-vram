@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# liberer-vram — libère la mémoire des cartes en tuant les serveurs d'inférence
+# ORPHELINS, c'est-à-dire ceux qui tiennent de la VRAM sans plus servir personne.
+#
+#   liberer-vram              tue les orphelins (aucun port en écoute)
+#   liberer-vram --etat       montre qui occupe quoi, ne tue rien
+#   liberer-vram --tout       tue AUSSI les moteurs actifs (libère tout le GPU0)
+#
+# Motif : un llama-server dont le lanceur a été interrompu garde son modèle en
+# VRAM. Le démarrage suivant échoue alors en « cudaMalloc failed: out of memory »
+# alors que rien ne tourne visiblement. C'est arrivé trois fois en une journée.
+#
+# Prudence : ne touche jamais à ComfyUI ni à un processus qui écoute encore sur
+# un port de service — ceux-là servent peut-être une requête en cours.
+#
+# anticitoyen-vram-51x (28/09) : le guetteur de la campagne 290 (poste2) a
+# appelé liberer-vram, qui a tué le pytest d'une prise de MESURE de chef
+# (06:41:18, SIGTERM) — aucun port en écoute, donc « orphelin » aux yeux de
+# l'ancien script, alors que la carte était tenue par carte.sh. Un processus
+# ou un pgid porté par le `.qui` de carte.sh (mesure, etat, service ou
+# partage — un service compte) n'est JAMAIS tué, même sous --tout : ce
+# verrou-là prime toujours sur ce script. Journalisé, PID et ligne de
+# commande, que le processus soit protégé ou tué.
+set -uo pipefail
+
+MODE="${1:-}"
+c_v=$'\e[32m'; c_j=$'\e[33m'; c_d=$'\e[2m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_v=''; c_j=''; c_d=''; c_r=''; c_0=''; }
+
+# processus à ne jamais tuer : ils ont leur propre cycle de vie
+PROTEGES='ComfyUI|comfyui|SwarmUI|Xorg|cinnamon|rustdesk|python3.*Jan'
+# ports dont l'écoute signifie « ce serveur est en service »
+PORTS='8000|8080|8081|8082|8083|8884|5000|5010'
+
+# Motif des .qui de carte.sh : le VERROU ($VERROU.qui) et le SHARE
+# ($VERROU.share.*.qui) de chaque carte. Surchargeable pour les tests (à sec,
+# jamais les vrais /tmp/acvram-carte-*).
+VERROUS_GLOB="${LIBERER_VRAM_VERROUS:-/tmp/acvram-carte-*.lock}"
+JOURNAL="${LIBERER_VRAM_JOURNAL:-$HOME/.cache/acvram/liberer-vram.journal}"
+mkdir -p "$(dirname "$JOURNAL")" 2>/dev/null || true
+
+ports_du_pid() {
+  ss -tlnp 2>/dev/null | grep -oP "pid=$1," >/dev/null && return 0
+  return 1
+}
+
+pgid_du_pid() {
+  ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
+}
+
+# PIDS_PROTEGES / PGIDS_PROTEGES : tout ce qu'un .qui de carte.sh nomme
+# vivant — mesure, etat, service (une ligne par service vivant) et partage
+# (un fichier par job, $VERROU.share.<pid>.qui). Contrat 4 champs
+# `<pid> <epoch> <nom> <type>` + un 5e champ optionnel (pgid) pour
+# mesure/etat (carte.sh:479). Un pid mort n'est pas protégé (kill -0).
+PIDS_PROTEGES=" "
+PGIDS_PROTEGES=" "
+for f in $VERROUS_GLOB.qui $VERROUS_GLOB.share.*.qui; do
+  [ -e "$f" ] || continue
+  while read -r p _ _ _ pg _; do
+    [ -n "${p:-}" ] || continue
+    kill -0 "$p" 2>/dev/null || continue
+    PIDS_PROTEGES="$PIDS_PROTEGES$p "
+    [ -n "${pg:-}" ] && case "$pg" in ''|*[!0-9]*) ;; *) PGIDS_PROTEGES="$PGIDS_PROTEGES$pg " ;; esac
+  done < "$f"
+done
+
+protege_par_prise() {
+  local pid=$1 pg
+  case "$PIDS_PROTEGES" in *" $pid "*) return 0 ;; esac
+  pg=$(pgid_du_pid "$pid")
+  [ -n "$pg" ] || return 1
+  case "$PGIDS_PROTEGES" in *" $pg "*) return 0 ;; esac
+  return 1
+}
+
+journal() {
+  printf '%s\t%s\t%s\t%s\n' "$(date +%FT%T)" "$1" "$2" "$3" >> "$JOURNAL" 2>/dev/null || true
+}
+
+TUES=0; GARDES=0
+printf '%sMémoire des cartes avant :%s\n' "$c_d" "$c_0"
+nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader | sed 's/^/  GPU /'
+echo
+
+while IFS=, read -r pid nom vram; do
+  pid=$(echo "$pid" | xargs); nom=$(echo "$nom" | xargs); vram=$(echo "$vram" | xargs)
+  [ -z "$pid" ] && continue
+  court=$(basename "$nom")
+
+  if echo "$nom" | grep -qE "$PROTEGES"; then
+    printf '%s  protégé   %-28s pid %-8s %s%s\n' "$c_d" "${court:0:28}" "$pid" "$vram" "$c_0"
+    GARDES=$((GARDES+1)); continue
+  fi
+
+  if protege_par_prise "$pid"; then
+    printf '%s  protégé (prise carte.sh) %-15s pid %-8s %s%s\n' "$c_v" "${court:0:28}" "$pid" "$vram" "$c_0"
+    journal "$pid" "$nom" "protégé (prise carte.sh)"
+    GARDES=$((GARDES+1)); continue
+  fi
+
+  # un processus qui écoute encore sur un port de service est EN SERVICE
+  ecoute=$(ss -tlnp 2>/dev/null | grep -E "127.0.0.1:($PORTS)" | grep -c "pid=$pid," || true)
+  if [ "${ecoute:-0}" -gt 0 ] && [ "$MODE" != "--tout" ]; then
+    printf '%s  en service %-27s pid %-8s %s%s\n' "$c_v" "${court:0:28}" "$pid" "$vram" "$c_0"
+    GARDES=$((GARDES+1)); continue
+  fi
+
+  if [ "$MODE" = "--etat" ]; then
+    printf '%s  ORPHELIN  %-28s pid %-8s %s%s\n' "$c_j" "${court:0:28}" "$pid" "$vram" "$c_0"
+    continue
+  fi
+
+  printf '%s  arrêt     %-28s pid %-8s %s%s\n' "$c_j" "${court:0:28}" "$pid" "$vram" "$c_0"
+  journal "$pid" "$nom" "tué"
+  kill "$pid" 2>/dev/null
+  for _ in $(seq 1 12); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  kill -9 "$pid" 2>/dev/null
+  TUES=$((TUES+1))
+done < <(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null)
+
+[ "$MODE" = "--etat" ] && exit 0
+
+sleep 3
+echo
+printf '%sMémoire des cartes après :%s\n' "$c_d" "$c_0"
+nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader | sed 's/^/  GPU /'
+printf '\n%s%d processus arrêté(s), %d conservé(s).%s\n' "$c_v" "$TUES" "$GARDES" "$c_0"
