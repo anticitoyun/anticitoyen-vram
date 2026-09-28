@@ -317,9 +317,11 @@ On acvram va per davant: models MLA (GLM-4.7-Flash) en NVFP4 natiu sm_120, que v
 
 ## Estat
 
-Versió 0.6.38. Tot funciona a la 5090: nuclis CUDA compilats per a `sm_120a` (FP4 natiu) i `sm_86`, grafs CUDA, quantificació NVFP4/INT8/INT4, servidor HTTP. Salvaguardes en marxa: la targeta és invisible per a les sessions de treball (`CUDA_VISIBLE_DEVICES` buit) i només `outils/carte.sh` la presta, sota clau, a una mesura alhora; un vigilant registra qualsevol accés fora de clau; una mesura d'energia que cobreix més d'una targeta o menys de 10 s s'invalida; un model carregat en règim degradat ho diu i no entra en un duel.
+Versió 0.7.10. Tot funciona a la 5090: nuclis CUDA compilats per a `sm_120a` (FP4 natiu) i `sm_86`, grafs CUDA, quantificació NVFP4/INT8/INT4, servidor HTTP. Salvaguardes en marxa: la targeta és invisible per a les sessions de treball (`CUDA_VISIBLE_DEVICES` buit) i només `outils/carte.sh` la presta, sota clau, a una mesura alhora; un vigilant registra qualsevol accés fora de clau; una mesura d'energia que cobreix més d'una targeta o menys de 10 s s'invalida; un model carregat en règim degradat ho diu i no entra en un duel.
 
-4 107 proves (`pytest --collect-only -q`, un minut en processador; les proves GPU només s'executen sota `carte.sh`). Seguiment del treball: `acvram-memoire/` (regles, directori, quaderns, revisió de diverses centenes de notes).
+Recentment: publicat en paquet Debian/Ubuntu (.deb), Arch (AUR), Fedora (RPM) i Flatpak, a més de la font (vegeu «Instal·lar»); el mirall públic de GitHub porta ara l'historial complet (filtrat). L'especulació `ngram` ja no s'activa per defecte (un error de tokens repetits en el pas de simple a especulatiu està corregit; `--speculative ngram` continua disponible sota petició explícita). El prefill per trams sosté ara fins a 65 536 tokens de context en els models grans. Els models amb visió codifiquen les seves imatges durant la preparació, no durant la descodificació. La primera arrencada d'un paquet o arbre nou ja no mor en la captura de grafs CUDA.
+
+6 752 proves (`pytest --collect-only -q`, un minut en processador; les proves GPU només s'executen sota `carte.sh`). Seguiment del treball: `acvram-memoire/` (regles, directori, quaderns, revisió de diverses centenes de notes).
 
 ---
 
