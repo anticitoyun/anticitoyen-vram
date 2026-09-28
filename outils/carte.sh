@@ -246,13 +246,24 @@ if [ "$TYPE" = partage ]; then
   printf '%s %s %s %s\n' "$$" "$(date +%s)" "$NOM" partage > "$QP"
   _pris=$(date +%s)
   printf '%s prise   %-8s %-32s partage\n' "$(date +%FT%T)" "$$" "$NOM" >> "$JOURNAL" 2>/dev/null || true
-  trap 'rm -f "$QP"; printf "%s rendue  %-8s %-32s partage tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true' EXIT
+  # 7gb (27/09, ordre chef) : un descendant encore accroche au GPU a la
+  # restitution (setsid tue mais pas assez vite, ou reparente avant coup) ne
+  # doit pas survivre a la prise et contaminer la suivante — meme reaper que
+  # la classe mesure (marque ACVRAM_CARTE_TENUE, jamais un pid etranger).
+  trap 'rm -f "$QP"; _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; printf "%s rendue  %-8s %-32s partage tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true' EXIT
+  # ked (27/09) : sans setsid ni trap TERM/INT/HUP ici, un signal externe sur
+  # CE script (un `.terminate()` de pytest, un `kill` de session) le tuait
+  # sans jamais toucher la commande — orphelin (« carte.sh sleep N ») reparente
+  # a init/systemd. Meme remede que la classe mesure (setsid + _244_signal).
   if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
-    CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- &
   else
-    CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 8>&- &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 8>&- &
   fi
   _fils=$!
+  trap '_244_signal 15' TERM
+  trap '_244_signal 2' INT
+  trap '_244_signal 1' HUP
   wait "$_fils"; exit $?
 fi
 
