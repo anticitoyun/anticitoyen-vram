@@ -1978,6 +1978,56 @@ def _plus_grosse_nvfp4_marlin_bytes(manifest: dict) -> int:
     return plus_gros * 2                                            # bf16 dequant
 
 
+def _mlp_exiles(plan: Plan) -> int:
+    return sum(1 for l in plan.layers if l.mlp_storage == "cpu")
+
+
+def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, planifier) -> bool:
+    """a5v (28/09, pièce 294 de poste5) : un modèle DENSE dont la réserve de préfill d un seul tenant exile des MLP
+    (Devstral 24B à 32 768 : 13,41 Gio réservés, 10/40 MLP en RAM hôte, graphes coupés, 7,9 tok/s contre 94,5) garde ses
+    poids si son MLP passe par tranches au-delà d un plafond : on cherche le PLUS GRAND plafond (multiple de 1 024,
+    ≥ `_MLP_MORCEAU`) qui n exile pas plus qu un plafond minimal. Rien ne change quand la réserve pleine n exile pas plus
+    (tous les modèles qui tenaient : réserve, KV et sortie identiques). Pose `spec.mlp_prefill_plafond` ; vrai si posé.
+    Le seuil servi est ensuite prouvé par la chauffe (`contexte.py`), pas par ce calcul."""
+    import contextlib
+    import io
+    from . import attention as _att
+    m = _att._MLP_MORCEAU
+    ctx = int(max_model_len or 0)
+    if (m <= 0 or ctx <= m or spec.num_experts or any("linear" in t for t in spec.layer_types)
+            or spec.mlp_prefill_plafond is not None):
+        return False
+    plein = _mlp_exiles(plan)
+    if plein == 0:
+        return False
+
+    def exiles(c: int) -> int:
+        spec.mlp_prefill_plafond = c
+        with contextlib.redirect_stdout(io.StringIO()):
+            p = planifier()
+        return plein if p is None else _mlp_exiles(p)
+    plancher = exiles(m)
+    if plancher >= plein:
+        spec.mlp_prefill_plafond = None
+        return False
+    bas, haut = m, ctx                                              # exiles(bas) == plancher ; exiles(ctx) == plein
+    while haut - bas > 1024:
+        milieu = (bas + haut) // 2 // 1024 * 1024
+        if milieu <= bas:
+            break
+        if exiles(milieu) <= plancher:
+            bas = milieu
+        else:
+            haut = milieu
+    spec.mlp_prefill_plafond = None
+    seul = spec.activations_prefill_bytes(ctx)
+    spec.mlp_prefill_plafond = bas
+    print(f"[acvram] MLP dense par tranches au-delà de {bas} jetons : activations de préfill réservées "
+          f"{spec.activations_prefill_bytes(ctx) / 2**30:.2f} Gio au lieu de {seul / 2**30:.2f} (seul tenant à {ctx} : "
+          f"{plein} MLP exilés ; plafonnée : {plancher})", flush=True)
+    return True
+
+
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
                      plan: Optional[Plan] = None) -> int:
     """Octets transitoires à retirer des budgets (KV, exil) :
@@ -2013,12 +2063,21 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
     if spec is not None:
-        neuf = _replanifier(manifest, spec, max_model_len=max_model_len,
-                            max_concurrent_seqs=max_concurrent_seqs)
+        def planifier():
+            p = _replanifier(manifest, spec, max_model_len=max_model_len, max_concurrent_seqs=max_concurrent_seqs)
+            if p is not None:
+                _reajuster_plan(p, manifest, top_k=spec.num_experts_per_tok or 8,
+                                reserve=_reserve_prefill(spec, max_model_len, manifest, p),
+                                kv_min={d: _kv_plancher(p, spec, max_model_len, d) for d in (p.kv_budget or {})})
+            return p
+        neuf = planifier()
+        if neuf is not None and _plafonner_mlp_prefill(spec, max_model_len, neuf, planifier):
+            neuf = planifier()
+        # a5v : sans chauffe (Engine direct, eval), une invite au-delà du plafond passerait d un seul tenant dans une
+        # réserve qui ne la couvre plus — le seuil est posé ici ; la chauffe le remplace par le tenu prouvé. None sinon.
+        from . import attention as _att
+        _att.definir_seuil(spec.mlp_prefill_plafond)
         if neuf is not None:
-            _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8,
-                            reserve=_reserve_prefill(spec, max_model_len, manifest, neuf),
-                            kv_min={d: _kv_plancher(neuf, spec, max_model_len, d) for d in (neuf.kv_budget or {})})
             _exil_demande(neuf)
             _exil_experts_demande(neuf, manifest)
             return neuf

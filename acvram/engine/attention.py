@@ -56,6 +56,15 @@ __all__ = ["Attention", "MLP", "MLP2", "SEUIL_FUSION", "_ROPE_KV", "_multi_proje
 # stable et mesure, au-dela il faudrait le mesurer par modele et par taille.
 # `ACVRAM_SEUIL_FUSION` permet de l'explorer sans toucher au code.
 SEUIL_FUSION = int(os.environ.get("ACVRAM_SEUIL_FUSION", "256"))
+# a5v : tranche de lignes du MLP dense au préfill long ; 0 = jamais (témoin). Engagée SEULEMENT au-delà de `_MLP_SEUIL`.
+_MLP_MORCEAU = int(os.environ.get("ACVRAM_MLP_MORCEAU", "4096"))
+_MLP_SEUIL: Optional[int] = None
+
+
+def definir_seuil(n: Optional[int]) -> None:
+    """Lignes au-delà desquelles le MLP dense tourne par tranches (None : jamais) ; posé par la chauffe."""
+    global _MLP_SEUIL
+    _MLP_SEUIL = n
 
 # Poste F, fusion (3a) : normes + RoPE + kv_write en un noyau Triton — RÉFUTÉ
 # (verdict-f3a-finale-17-09 : corrompt le cache sous graphe, ou codes ≠
@@ -614,6 +623,16 @@ class MLP(nn.Module):
         return self.gate_up is not None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """a5v (28/09) : au préfill d un modèle dense au-delà du seuil posé par la chauffe (`_MLP_SEUIL`, jamais posé
+        pour un MoE ni un hybride GDN), tranches de `_MLP_MORCEAU` lignes : gate/up/act (≈ 320 Ko/jeton sur Devstral)
+        ne grandissent plus avec l invite. Chaque ligne ne dépend que d elle-même. Sous le seuil : inchangé."""
+        m, seuil = _MLP_MORCEAU, _MLP_SEUIL
+        if (m > 0 and seuil is not None and x.dim() == 2 and x.shape[0] > max(seuil, m)
+                and not (x.is_cuda and torch.cuda.is_current_stream_capturing())):
+            return torch.cat([self._forward_un(x[d:d + m]) for d in range(0, x.shape[0], m)])
+        return self._forward_un(x)
+
+    def _forward_un(self, x: torch.Tensor) -> torch.Tensor:
         if self.gate_up is not None and x.shape[0] <= SEUIL_FUSION:
             gu = self.gate_up(x)
             # SiLU et le produit sont deux lancements elementaires pour un
