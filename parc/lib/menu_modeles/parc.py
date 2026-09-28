@@ -119,6 +119,40 @@ class Modele(GObject.Object):
                          " ".join(self.capacites), " ".join(lisibles)]).lower()
 
 
+def _alias_canonique(dossier):
+    """Même formule que la « na » de outils/renommer-convertis.py (l'alias
+    neuf qu'il écrit à chaque renommage de conversion) : acvram-<basename
+    slugifié>. Dupliquée ici à dessein — outils/ n'est pas embarqué dans le
+    paquet parc, et cette formule ne doit dépendre d'aucun import externe."""
+    base = os.path.basename(dossier.rstrip("/"))
+    return "acvram-" + re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
+
+
+def _dedoublonner_par_dossier(parc):
+    """t5e (poste1, 27/09, revue/poste1-t5e-verdict-27-09.md §11) : plusieurs
+    alias de config.toml pointent parfois le MÊME dossier — renommer-
+    convertis.py ajoute un alias neuf à chaque renommage et garde l'ancien, à
+    dessein (compat des scripts qui le référencent déjà). Ordre de chef
+    (28/09) : ne JAMAIS retirer un alias de config.toml pour ça — seul
+    l'AFFICHAGE se resserre à une ligne par dossier ; l'alias masqué reste
+    dans le parc complet et utilisable en ligne de commande (claude-modele
+    <alias>, kimi-modele <alias>)."""
+    par_dossier = {}
+    for m in parc:
+        if m.dossier:
+            par_dossier.setdefault(m.dossier, []).append(m)
+    masques = set()
+    for dossier, ms in par_dossier.items():
+        if len(ms) < 2:
+            continue
+        canon = _alias_canonique(dossier)
+        garde = next((m for m in ms if m.alias == canon), None) or sorted(ms, key=lambda m: m.alias)[-1]
+        for m in ms:
+            if m is not garde:
+                masques.add(id(m))
+    return [m for m in parc if id(m) not in masques]
+
+
 def lire_tsv(chemin, mini=2):
     d = {}
     try:
@@ -191,6 +225,7 @@ def charger_parc():
         parc.append(Modele(alias, p, m.get("model", "?"), m.get("max_context_size", 0),
                            n[0], n[1], n[2], n[3], dossier, ctx_service, gab,
                            m.get("capabilities", []), vs))
+    parc = _dedoublonner_par_dossier(parc)
     parc.sort(key=lambda x: (ORDRE_MOTEUR.get(x.provider, 9), x.alias))
     # S1/S3 (poste7-menus-cloture-19-09) : le compte est le contrôle, pas la lecture
     print(f"parc : {len(parc)} modèles, {len(sans_fiche)} alias sans fiche, "

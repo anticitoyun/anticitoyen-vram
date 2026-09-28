@@ -22,13 +22,29 @@ une entrée `[models.<alias>]`, de `config.toml` — sans réécriture TOML
 rien d'autre ne bouge.
 
 Écrit un journal de retour AVANT d'agir. --appliquer pour exécuter.
+
+Réservé pour plus tard (ordre chef, 28/09) : le dédoublonnage réel se fait
+à l'AFFICHAGE (parc/lib/menu_modeles/parc.py::_dedoublonner_par_dossier),
+jamais en retirant un alias de config.toml — ce script reste une option, pas
+lancé sur un poste réel tant que rien ne l'exige.
 """
 import re
 import sys
 from pathlib import Path
 
-ALIAS_TSV_PAR_DEFAUT = Path.home() / ".kimi-code" / "acvram-chemins.tsv"
-CONFIG_PAR_DEFAUT = Path.home() / ".kimi-code" / "config.toml"
+_ICI = Path(__file__).resolve().parent
+sys.path.insert(0, str(_ICI.parent / "parc" / "lib"))
+from acvram_parc import charger as _charger_parc  # noqa: E402
+
+# 28/09 (chef) : ~/.kimi-code/acvram-chemins.tsv N'EXISTE PAS sur le poste —
+# les TSV vivent sous PARC.tsv_dir (~/TSV par défaut), le config.toml sous
+# PARC.kimi_dir (~/.kimi-code) ; deux racines distinctes. Un chemin en dur
+# ici avait fait rendre « aucun doublon » silencieusement là où 67 dossiers
+# étaient dupliqués — mêmes constantes que menu_modeles/config.py, jamais
+# redevinées.
+_PARC = _charger_parc()
+ALIAS_TSV_PAR_DEFAUT = _PARC.tsv("acvram")
+CONFIG_PAR_DEFAUT = _PARC.config_kimi
 
 
 def canonique(dossier):
@@ -108,6 +124,10 @@ def executer(tsv, config, appliquer, journal):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     appliquer = "--appliquer" in argv
+    if not ALIAS_TSV_PAR_DEFAUT.exists():
+        print(f"dedoublonner-alias : {ALIAS_TSV_PAR_DEFAUT} introuvable — "
+              f"rien à lire, ce n'est PAS « aucun doublon » (correction chef, 28/09)", file=sys.stderr)
+        return 1
     total, plan = executer(ALIAS_TSV_PAR_DEFAUT, CONFIG_PAR_DEFAUT, appliquer,
                            Path(__file__).with_name("dedoublonnages.tsv"))
     if not plan:

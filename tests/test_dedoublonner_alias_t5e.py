@@ -17,7 +17,10 @@ un module), il scanne le vrai parc de modèles dès l'import. La formule
 DOIVENT rester identiques ; c'est ce que ce fichier documente, pas un
 import croisé risqué."""
 import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 DEPOT = Path(__file__).resolve().parent.parent
@@ -102,3 +105,43 @@ def test_appliquer_retire_du_tsv_et_du_toml_sans_toucher_au_reste(tmp_path):
     assert "[models.acvram-huihui-src-i1-q4km]" not in toml_apres
     assert "[models.acvram-solo-13b]" in toml_apres      # non concerné, intact
     assert "# fiche d'un modele quelconque, ecrite a la main" in toml_apres  # commentaire intact
+
+
+DEPOT = Path(__file__).resolve().parent.parent
+SCRIPT = DEPOT / "outils" / "dedoublonner-alias.py"
+
+
+def _lancer_cli(tmp_path, ecrire_tsv):
+    """28/09 (correction chef) : le vrai TSV vit sous PARC.tsv_dir (~/TSV
+    par défaut), pas sous ~/.kimi-code — un chemin en dur avait fait dire
+    « aucun doublon » alors que le fichier réel n'était jamais lu. On passe
+    ici par un vrai parc.toml (ACVRAM_PARC_CONFIG), comme le fait le menu."""
+    parc_toml = tmp_path / "parc.toml"
+    tsv_dir = tmp_path / "TSV"
+    kimi_dir = tmp_path / "kimi"
+    tsv_dir.mkdir()
+    parc_toml.write_text(f'[chemins]\ntsv_dir = "{tsv_dir}"\nkimi_dir = "{kimi_dir}"\n')
+    if ecrire_tsv:
+        (tsv_dir / "acvram-chemins.tsv").write_text(TSV)
+    env = {**os.environ, "ACVRAM_PARC_CONFIG": str(parc_toml)}
+    return subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True, env=env, timeout=30)
+
+
+def test_cli_echoue_bruyamment_si_le_tsv_reel_est_absent(tmp_path):
+    r = _lancer_cli(tmp_path, ecrire_tsv=False)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "introuvable" in r.stderr, r.stderr
+    assert "aucun doublon" not in r.stdout, r.stdout
+
+
+def test_cli_trouve_les_doublons_via_le_vrai_parc_toml(tmp_path):
+    # journal écrit à côté du SCRIPT réel (même convention que renommer-
+    # convertis.py) : jamais dans tmp_path, donc nettoyé explicitement pour
+    # ne pas polluer le dépôt à chaque lancement de la suite.
+    journal = SCRIPT.with_name("dedoublonnages.tsv")
+    try:
+        r = _lancer_cli(tmp_path, ecrire_tsv=True)
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        assert "1 alias en doublon" in r.stdout, r.stdout
+    finally:
+        journal.unlink(missing_ok=True)
