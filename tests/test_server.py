@@ -524,3 +524,42 @@ def test_filtre_appels_bloc_illisible_reste_texte():
     blocs, a_appel = blocs_anthropic(f.total, True)
     assert not a_appel
     assert sortie + f.reste() == "avant <tool_call>{pas du json}</tool_call>"
+
+
+def test_messages_system_hors_tete_joint_au_user():
+    """iqm : Claude Code envoie [user, system] dans ``messages`` (crochets SessionStart). Un gabarit qui
+    n'accepte le système qu'en tête (KAT) levait → repli ChatML SANS outils. Le système tardif est joint au user."""
+    from acvram.server.chat import Tokenizer, messages_anthropic, outils_anthropic, render_chat
+    req = {"system": "Agent.", "tools": [_OUTIL_LIRE],
+           "messages": [{"role": "user", "content": [{"type": "text", "text": "Lis a"}]},
+                        {"role": "system", "content": [{"type": "text", "text": "Contexte du crochet."}]}]}
+    m = messages_anthropic(req)
+    assert m == [{"role": "system", "content": "Agent."},
+                 {"role": "user", "content": "Lis a\n\nContexte du crochet."}]
+    tmpl = ("{% for x in messages %}{% if x.role == 'system' and not loop.first %}"
+            "{{ raise_exception('System message must be at the beginning.') }}{% endif %}"
+            "<{{ x.role }}>{{ x.content }}{% endfor %}"
+            "{% if tools %}<T>{% for t in tools %}{{ t.function.name }}{% endfor %}</T>{% endif %}")
+    tk = Tokenizer(backend=None, config={}, template=tmpl, template_source="test")
+    r = render_chat(tk, m, True, {"tools": outils_anthropic(req["tools"])})
+    assert "<T>Read</T>" in r and "Contexte du crochet." in r
+    # système tardif après un assistant : joint au user suivant ; en queue : devient un user
+    m = messages_anthropic({"messages": [
+        {"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
+        {"role": "system", "content": "s1"}, {"role": "user", "content": "c"}, {"role": "system", "content": "s2"},
+        {"role": "assistant", "content": "d"}, {"role": "system", "content": "s3"}]})
+    assert m == [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
+                 {"role": "user", "content": "s1\n\nc\n\ns2"}, {"role": "assistant", "content": "d"},
+                 {"role": "user", "content": "s3"}]
+
+
+def test_gabarit_tojson_comme_transformers():
+    """iqm : GLM-4.7 écrit ``tools | tojson(ensure_ascii=False)`` ; le filtre de Jinja levait TypeError → repli
+    ChatML sans outils. Et le rendu doit être celui de transformers (sans échappement HTML)."""
+    from acvram.server.chat import Tokenizer, render_chat
+    tmpl = ("{% for t in tools %}{{ t | tojson(ensure_ascii=False) }}{% endfor %}"
+            "{% for x in messages %}{{ x.content }}{% endfor %}")
+    tk = Tokenizer(backend=None, config={}, template=tmpl, template_source="test")
+    outil = {"name": "grep", "description": "motif <regex> & 'é'"}
+    r = render_chat(tk, [{"role": "user", "content": "?"}], False, {"tools": [outil]})
+    assert r == json.dumps(outil, ensure_ascii=False) + "?"

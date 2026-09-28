@@ -156,6 +156,14 @@ class Tokenizer:
                     env = Environment(trim_blocks=True, lstrip_blocks=True)
                     env.globals["raise_exception"] = raise_exception
                     env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
+
+                    # iqm : le `tojson` de transformers (chat_template_utils), que vLLM sert aussi. Celui de Jinja
+                    # refuse `ensure_ascii`/`separators` (GLM-4.7 : TypeError → repli ChatML SANS outils) et
+                    # échappe < > & ' en \u003c… : un schéma d'outil ne se rendait pas comme chez HF.
+                    def tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
+                        return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent,
+                                          separators=separators, sort_keys=sort_keys)
+                    env.filters["tojson"] = tojson
                     self._templates: dict[str, object] = {}
                     self._env = env
         # Le Template COMPILE est mis en cache, pas seulement l'Environment.
@@ -400,6 +408,30 @@ def messages_anthropic(req: dict) -> list[dict]:
                                for b in appels]
             noms.update((b.get("id"), b.get("name")) for b in appels)
         out.append(d)
+    return _joindre_systemes_tardifs(out)
+
+
+def _joindre_systemes_tardifs(messages: list[dict]) -> list[dict]:
+    """Claude Code glisse des messages « system » dans ``messages`` (contexte des
+    crochets SessionStart : 17 Ko mesurés, iqm 28/09). La plupart des gabarits
+    n'acceptent le système qu'en tête — KAT lève « System message must be at the
+    beginning », le rendu se replie sur ChatML et les outils DISPARAISSENT sans
+    bruit. Chaque système hors tête est joint au user qui le précède (ou au
+    suivant, ou devient un user) : l'ordre du texte est gardé, seule la fin change."""
+    out, attente = [], []
+    for i, m in enumerate(messages):
+        if m["role"] == "system" and i > 0:
+            if out and out[-1]["role"] == "user" and not attente:
+                out[-1] = {**out[-1], "content": f"{out[-1]['content']}\n\n{m['content']}"}
+            else:
+                attente.append(m["content"])
+            continue
+        if attente and m["role"] == "user":
+            m = {**m, "content": "\n\n".join(attente + [m["content"]])}
+            attente = []
+        out.append(m)
+    if attente:
+        out.append({"role": "user", "content": "\n\n".join(attente)})
     return out
 
 

@@ -1,77 +1,71 @@
-"""D2 — lancer_claude refuse les alias dont le contexte est trop petit pour claude CLI.
+"""D2 puis iqm — ``mode_outils`` de claude-modele : jeu d'outils selon la fenêtre servie, refus nommé si trop petite.
 
-Mesure à sec du prompt de démarrage : ~24 150 jetons (tokenizer Qwen3, --strict-mcp-config, t5e 27/09).
-Constantes dans le script : PROMPT_BASE=25000, MIN_REPONSE=4096 → seuil=29096.
-
-Les tests extraient et testent directement la logique de vérification sans
-sourcer l'initialisation complète du script (qui requiert acvram_parc.py).
+Depuis sf2, acvram rend les outils au gabarit : l'invite de démarrage de claude pèse 24 593-26 076 jetons avec ses
+40 outils, 12 107-13 335 avec l'essentiel (mesures à sec, scratchpad/poste1-iqm-28-09). Complet à partir d'une
+fenêtre de 45 000 (chef 28/09), essentiel en dessous. Les tests exécutent la fonction EXTRAITE du script (pas une
+copie) : une constante changée dans le script se voit ici.
 """
+import re
 import subprocess
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent.parent / "parc" / "bin" / "claude-modele"
 
 
-# Logique de vérification extraite du script — doit rester synchronisée.
-# Cassure si PROMPT_BASE ou MIN_REPONSE changent sans mettre à jour ce test.
-_VERIF_CTX = r"""
-err() { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
-PROMPT_BASE=25000; MIN_REPONSE=4096
-ctx="$1"; modele="$2"
-if [ -n "$ctx" ] && [ "$ctx" -lt $(( PROMPT_BASE + MIN_REPONSE )) ] 2>/dev/null; then
-    err "alias $modele : contexte $ctx tokens insuffisant (prompt de démarrage ~${PROMPT_BASE}, réponse mini ${MIN_REPONSE} — il faut ≥ $(( PROMPT_BASE + MIN_REPONSE )) tokens)"; exit 1
-fi
-echo "ok"
-"""
+def _fonctions() -> str:
+    texte = SCRIPT.read_text()
+    err = re.search(r"^err\(\) \{.*\}$", texte, re.M).group(0)
+    mode = re.search(r"^mode_outils\(\) \{.*?^\}$", texte, re.M | re.S).group(0)
+    return f"c_r=; c_0=\n{err}\n{mode}\n"
 
 
-def _verif(ctx: int, alias: str = "mon-alias") -> tuple[int, str]:
-    r = subprocess.run(
-        ["bash", "-c", _VERIF_CTX, "--", str(ctx), alias],
-        capture_output=True, text=True, timeout=5
-    )
+def _mode(ctx: str, *args: str) -> tuple[int, str]:
+    prog = _fonctions() + ('mode_outils "$@" || exit 1\n'
+                           'printf "%s|%s|%s|%s\\n" "$MODE_OUTILS" "$PROMPT_BASE" "${OUTILS_ARGS[*]}" "$LIGNE_OUTILS"\n')
+    r = subprocess.run(["bash", "-c", prog, "--", ctx, "mon-alias", *args],
+                       capture_output=True, text=True, timeout=5)
     return r.returncode, r.stdout + r.stderr
 
 
-def test_contexte_trop_petit_refuse():
-    """ctx=10000 < 29096 → refus avec le chiffre."""
-    rc, out = _verif(10000)
-    assert rc != 0, f"doit échouer pour ctx=10000"
-    assert "10000" in out, f"le chiffre ctx doit apparaître : {out}"
-    assert "29096" in out, f"le seuil 29096 doit apparaître : {out}"
+def test_fenetre_45k_complet():
+    rc, out = _mode("65536")
+    assert rc == 0 and out.startswith("complet|27000||complet (fenêtre 65536 ≥ 45000)")
 
 
-def test_contexte_suffisant_passe():
-    """ctx=32768 ≥ 29096 → ok."""
-    rc, out = _verif(32768)
-    assert rc == 0, f"ne doit pas échouer pour ctx=32768 : {out}"
-    assert "ok" in out
-
-
-def test_contexte_limite_inferieur_refuse():
-    """ctx=29095 = seuil-1 → refus."""
-    rc, out = _verif(29095)
-    assert rc != 0
-    assert "29095" in out
-
-
-def test_contexte_limite_exact_passe():
-    """ctx=29096 = seuil exact → ok."""
-    rc, out = _verif(29096)
+def test_fenetre_32k_essentiel():
+    """32 768 : l'invite complète (≥ 24,6 k) plus la sortie ne tiendrait pas — jeu essentiel, dit à l'écran."""
+    rc, out = _mode("32768")
     assert rc == 0
+    mode, base, args, ligne = out.strip().split("|")
+    assert (mode, base, args) == ("essentiel", "14000", "--tools Read,Edit,Bash,Grep")
+    assert ligne == "essentiel Read, Edit, Bash, Grep (fenêtre 32768 < 45000)"
 
 
-def test_contexte_absent_passe():
-    """ctx vide (modèle sans limite) → pas de refus."""
-    rc, out = _verif.__wrapped__ if hasattr(_verif, '__wrapped__') else (None, None)
-    # Appel direct avec ctx=""
-    r = subprocess.run(
-        ["bash", "-c", _VERIF_CTX, "--", "", "alias-sans-ctx"],
-        capture_output=True, text=True, timeout=5
-    )
-    assert r.returncode == 0, f"ctx vide ne doit pas refuser : {r.stdout + r.stderr}"
+def test_seuil_complet_exact():
+    assert _mode("45000")[1].startswith("complet|")
+    assert _mode("44999")[1].startswith("essentiel|")
 
 
-def test_constantes_synchronisees_avec_le_script():
-    """La logique ci-dessus est une copie : elle ne vaut que si le script porte les mêmes constantes."""
-    assert "local PROMPT_BASE=25000 MIN_REPONSE=4096" in SCRIPT.read_text()
+def test_fenetre_trop_petite_refusee():
+    """Essentiel : 14 000 + 4 096 = 18 096 au moins ; en dessous, refus avec les chiffres."""
+    rc, out = _mode("18095")
+    assert rc != 0 and "18095" in out and "18096" in out and "essentiel" in out
+    assert _mode("18096")[0] == 0
+
+
+def test_fenetre_inconnue_complet():
+    rc, out = _mode("")
+    assert rc == 0 and out.startswith("complet|27000||complet (fenêtre inconnue")
+
+
+def test_tools_utilisateur_prime():
+    rc, out = _mode("32768", "-p", "x", "--tools", "Read")
+    assert rc == 0 and out.startswith("utilisateur|27000||")
+
+
+def test_commande_porte_les_outils_du_mode():
+    """Le jeu choisi atteint la commande claude (et --afficher la montre)."""
+    texte = SCRIPT.read_text()
+    assert '"${OUTILS_ARGS[@]}" "$@")' in texte
+    assert 'mode_outils "$ctx" "$modele" "$@" || exit 1' in texte
+    assert "outils : %s" in texte
