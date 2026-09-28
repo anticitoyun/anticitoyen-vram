@@ -55,6 +55,7 @@ from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
 from .chat import Tokenizer, render_chat
 from .chat import extraire_appels, messages_pour_gabarit
+from .chat import FiltreAppels, blocs_anthropic, messages_anthropic, outils_anthropic
 from .chat import ProcesseurVision, charger_processeur_vision, preparer_images
 from .protocol import (ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
                        ChatCompletionResponse, ChoiceMessage, ChunkChoice,
@@ -1157,28 +1158,21 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # -- API Anthropic (/v1/messages) --------------------------------------
     # Claude Code parle cette API-là, pas celle d'OpenAI : l'exposer permet
     # aux menus locaux de brancher Claude directement sur ce serveur. Champs
-    # couverts : system, messages (texte ou blocs), stop_sequences,
+    # couverts : system, messages (texte ou blocs), tools / tool_use /
+    # tool_result (sf2), tool_choice « none », stop_sequences,
     # temperature/top_p/top_k, stream (evenements message_start,
     # content_block_delta, message_delta, message_stop).
     @app.post("/v1/messages")
     async def anthropic_messages(raw: Request):
         with service.entree():                       # 269 b : compte les requêtes entrées non soumises
             req = await raw.json()
-            messages = []
-            sys_prompt = req.get("system")
-            if sys_prompt:
-                if isinstance(sys_prompt, list):
-                    sys_prompt = "".join(b.get("text", "") for b in sys_prompt)
-                messages.append({"role": "system", "content": sys_prompt})
-            for m in req.get("messages", []):
-                contenu = m.get("content", "")
-                if isinstance(contenu, list):
-                    contenu = "".join(b.get("text", "") for b in contenu
-                                      if isinstance(b, dict)
-                                      and b.get("type") == "text")
-                messages.append({"role": m.get("role", "user"),
-                                 "content": contenu})
-            prompt = render_chat(tokenizer, messages, True)
+            messages = messages_anthropic(req)
+            # sf2 : outils rendus au gabarit (même chemin que /v1/chat/completions) ;
+            # tool_choice « none » les décrit sans relire d'appel.
+            tools = outils_anthropic(req.get("tools"))
+            outils = bool(tools) and (req.get("tool_choice") or {}).get("type") != "none"
+            prompt = await asyncio.to_thread(render_chat, tokenizer, messages, True,
+                                             {"tools": tools} if tools else None)
             prompt_ids = _encode(tokenizer, prompt)
             params = SamplingParams(
                 temperature=float(req.get("temperature", 1.0)),
@@ -1208,17 +1202,37 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                          {"type": "content_block_start", "index": 0,
                           "content_block": {"type": "text", "text": ""}})
                 n_out, raison = 0, "end_turn"
+                filtre = FiltreAppels() if outils else None
                 async for out in service.collect(request_id, q):
                     n_out = out.completion_tokens
-                    if out.text_delta:
+                    delta = filtre.pousser(out.text_delta) if filtre else out.text_delta
+                    if delta:
                         yield ev("content_block_delta",
                                  {"type": "content_block_delta", "index": 0,
                                   "delta": {"type": "text_delta",
-                                            "text": out.text_delta}})
+                                            "text": delta}})
                     if out.finished:
                         raison = stop_reason(out.finish_reason or "stop")
+                appels = []
+                if filtre:
+                    blocs, a_appel = blocs_anthropic(filtre.total, True)
+                    appels = [b for b in blocs if b["type"] == "tool_use"]
+                    reste = "" if a_appel else filtre.reste()
+                    if reste:
+                        yield ev("content_block_delta",
+                                 {"type": "content_block_delta", "index": 0,
+                                  "delta": {"type": "text_delta", "text": reste}})
                 yield ev("content_block_stop",
                          {"type": "content_block_stop", "index": 0})
+                for i, b in enumerate(appels, start=1):
+                    yield ev("content_block_start", {"type": "content_block_start", "index": i,
+                             "content_block": {**b, "input": {}}})
+                    yield ev("content_block_delta", {"type": "content_block_delta", "index": i,
+                             "delta": {"type": "input_json_delta",
+                                       "partial_json": json.dumps(b["input"], ensure_ascii=False)}})
+                    yield ev("content_block_stop", {"type": "content_block_stop", "index": i})
+                if appels:
+                    raison = "tool_use"
                 yield ev("message_delta", {"type": "message_delta",
                          "delta": {"stop_reason": raison,
                                    "stop_sequence": None},
@@ -1235,8 +1249,11 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             n_out = out.completion_tokens
             if out.finished:
                 raison = stop_reason(out.finish_reason or "stop")
+        blocs, a_appel = blocs_anthropic(text, outils)
+        if a_appel:
+            raison = "tool_use"
         return {"id": mid, "type": "message", "role": "assistant",
-                "content": [{"type": "text", "text": text}],
+                "content": blocs,
                 "model": model_name, "stop_reason": raison,
                 "stop_sequence": None,
                 "usage": {"input_tokens": len(prompt_ids),

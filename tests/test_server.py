@@ -378,3 +378,149 @@ def test_flux_sans_include_usage_ne_porte_pas_d_usage_210b(client, monkeypatch):
     avec = fragments({**base, "stream_options": {"include_usage": True}})
     assert "usage" not in avec[0], avec[0]
     assert avec[-1]["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}, avec[-1]
+
+
+# -- sf2 : outils sur /v1/messages (API Anthropic, Claude Code) ---------------
+_APPEL_LIRE = ('Je lis le fichier.\n<tool_call>\n{"name": "Read", "arguments": '
+               '{"file_path": "/tmp/a.txt"}}\n</tool_call>')
+_OUTIL_LIRE = {"name": "Read", "description": "Lit un fichier.",
+               "input_schema": {"type": "object",
+                                "properties": {"file_path": {"type": "string"}},
+                                "required": ["file_path"]}}
+
+
+def _moteur_factice(monkeypatch, texte):
+    """Le modèle minuscule ne sait pas appeler d'outil : on remplace la
+    génération par un texte fixé, la route (gabarit, relecture, blocs) reste vraie."""
+    from acvram.engine.runner import GenerationOutput
+    from acvram.server.app import EngineService
+    vu = {}
+
+    async def submit(self, prompt_ids, params, *a, **k):
+        vu["prompt_ids"] = prompt_ids
+        return "req-sf2", None
+
+    async def collect(self, request_id, q):
+        for i, morceau in enumerate((texte[:7], texte[7:30], texte[30:])):
+            yield GenerationOutput(0, request_id, [], text_delta=morceau,
+                                   completion_tokens=i + 1)
+        yield GenerationOutput(0, request_id, [], finished=True,
+                               finish_reason="stop", completion_tokens=4)
+    monkeypatch.setattr(EngineService, "submit", submit)
+    monkeypatch.setattr(EngineService, "collect", collect)
+    return vu
+
+
+def test_messages_tools_rend_tool_use(client, monkeypatch):
+    """Requête avec tools -> bloc tool_use et stop_reason tool_use (avant sf2 :
+    texte brut « <tool_call>… », end_turn — Claude Code n'avait aucun outil)."""
+    _moteur_factice(monkeypatch, _APPEL_LIRE)
+    d = client.post("/v1/messages", json={
+        "model": "m", "max_tokens": 64, "tools": [_OUTIL_LIRE],
+        "messages": [{"role": "user", "content": "Lis /tmp/a.txt"}]}).json()
+    assert d["stop_reason"] == "tool_use"
+    assert d["content"][0] == {"type": "text", "text": "Je lis le fichier."}
+    appel = d["content"][1]
+    assert appel["type"] == "tool_use" and appel["name"] == "Read"
+    assert appel["input"] == {"file_path": "/tmp/a.txt"}
+    assert appel["id"].startswith("toolu_")
+    # sans tools : le même texte reste du texte (rien d'inventé)
+    d = client.post("/v1/messages", json={
+        "model": "m", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "Lis /tmp/a.txt"}]}).json()
+    assert d["stop_reason"] == "end_turn" and d["content"] == [{"type": "text", "text": _APPEL_LIRE}]
+
+
+def test_messages_tools_flux(client, monkeypatch):
+    """En flux : le texte avant l'appel sort, la balise jamais ; le tool_use
+    arrive en bloc 1 (input_json_delta), message_delta porte tool_use."""
+    _moteur_factice(monkeypatch, _APPEL_LIRE)
+    with client.stream("POST", "/v1/messages", json={
+            "model": "m", "max_tokens": 64, "stream": True, "tools": [_OUTIL_LIRE],
+            "messages": [{"role": "user", "content": "Lis /tmp/a.txt"}]}) as r:
+        data = [json.loads(l[6:]) for l in r.iter_lines() if l.startswith("data: ")]
+    texte = "".join(e["delta"]["text"] for e in data
+                    if e["type"] == "content_block_delta" and e["delta"]["type"] == "text_delta")
+    assert texte.strip() == "Je lis le fichier." and "<tool_call>" not in texte
+    debut = [e for e in data if e["type"] == "content_block_start" and e["index"] == 1]
+    assert debut and debut[0]["content_block"]["type"] == "tool_use"
+    assert debut[0]["content_block"]["name"] == "Read"
+    json_partiel = "".join(e["delta"]["partial_json"] for e in data
+                           if e["type"] == "content_block_delta" and e["index"] == 1)
+    assert json.loads(json_partiel) == {"file_path": "/tmp/a.txt"}
+    fin = [e for e in data if e["type"] == "message_delta"][0]
+    assert fin["delta"]["stop_reason"] == "tool_use"
+    assert data[-1]["type"] == "message_stop"
+
+
+def test_messages_tool_result_suite(client, monkeypatch):
+    """tool_result -> la suite : l'appel et son résultat atteignent le gabarit
+    (message tool après l'appel), la réponse redevient du texte."""
+    import acvram.server.app as app_mod
+    _moteur_factice(monkeypatch, "Le fichier contient 42.")
+    gabarit = {}
+    vrai_rendu = app_mod.render_chat
+
+    def rendu(tk, messages, agp=True, extra=None):
+        gabarit.update(messages=messages, extra=extra)
+        return vrai_rendu(tk, messages, agp, extra)
+    monkeypatch.setattr(app_mod, "render_chat", rendu)
+    d = client.post("/v1/messages", json={
+        "model": "m", "max_tokens": 64, "tools": [_OUTIL_LIRE],
+        "messages": [
+            {"role": "user", "content": "Lis /tmp/a.txt"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Je lis."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read",
+                 "input": {"file_path": "/tmp/a.txt"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1",
+                 "content": [{"type": "text", "text": "42"}]}]}]}).json()
+    assert d["stop_reason"] == "end_turn"
+    assert d["content"] == [{"type": "text", "text": "Le fichier contient 42."}]
+    roles = [m["role"] for m in gabarit["messages"]]
+    assert roles == ["user", "assistant", "tool"]
+    assert gabarit["messages"][1]["tool_calls"][0]["id"] == "toolu_1"
+    assert gabarit["messages"][2]["content"] == "42"
+    assert gabarit["extra"]["tools"][0]["function"]["name"] == "Read"
+
+
+def test_messages_anthropic_vers_gabarit():
+    from acvram.server.chat import Tokenizer, messages_anthropic, outils_anthropic, render_chat
+    req = {"system": [{"type": "text", "text": "Sois bref."}],
+           "messages": [
+               {"role": "user", "content": [{"type": "text", "text": "Lis a"}]},
+               {"role": "assistant", "content": [
+                   {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "a"}}]},
+               {"role": "user", "content": [
+                   {"type": "tool_result", "tool_use_id": "toolu_1", "content": "42"},
+                   {"type": "text", "text": "Et alors ?"}]}]}
+    m = messages_anthropic(req)
+    assert [x["role"] for x in m] == ["system", "user", "assistant", "tool", "user"]
+    assert m[2]["tool_calls"][0]["function"] == {"name": "Read", "arguments": {"file_path": "a"}}
+    assert m[3] == {"role": "tool", "content": "42", "tool_call_id": "toolu_1", "name": "Read"}
+    assert m[4] == {"role": "user", "content": "Et alors ?"}
+    # sans bloc d'outil : exactement la forme d'avant sf2
+    assert messages_anthropic({"messages": [{"role": "user", "content": "x"}]}) == [
+        {"role": "user", "content": "x"}]
+    outils = outils_anthropic([_OUTIL_LIRE, {"type": "web_search_20250305", "name": "web_search"}])
+    assert [o["function"]["name"] for o in outils] == ["Read"]
+    assert outils[0]["function"]["parameters"] == _OUTIL_LIRE["input_schema"]
+    tmpl = ("{% if tools %}<T>{% for t in tools %}{{ t.function.name }}{% endfor %}</T>{% endif %}"
+            "{% for x in messages %}<{{ x.role }}>{{ x.content }}"
+            "{% for c in x.tool_calls or [] %}[{{ c.function.name }} {{ c.function.arguments | tojson }}]"
+            "{% endfor %}{% endfor %}")
+    tk = Tokenizer(backend=None, config={}, template=tmpl, template_source="test")
+    r = render_chat(tk, m, False, {"tools": outils})
+    assert r.startswith("<T>Read</T>") and '[Read {"file_path": "a"}]<tool>42<user>Et alors ?' in r
+
+
+def test_filtre_appels_bloc_illisible_reste_texte():
+    """Un « <tool_call> » dont le JSON ne se lit pas ressort en texte à la fin,
+    jamais perdu (le flux OpenAI le perdait : pend vidé une fois retenu)."""
+    from acvram.server.chat import FiltreAppels, blocs_anthropic
+    f = FiltreAppels()
+    sortie = "".join(f.pousser(x) for x in ("avant ", "<tool", "_call>{pas du json}</tool_call>"))
+    blocs, a_appel = blocs_anthropic(f.total, True)
+    assert not a_appel
+    assert sortie + f.reste() == "avant <tool_call>{pas du json}</tool_call>"
