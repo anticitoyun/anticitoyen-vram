@@ -391,6 +391,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
+    Variable("PREFILL_FILE", "0", ("acvram.engine.runner", "_PREFILL_FILE"), None,
+             "pièce 276 k (OPT-IN) : 1 = dans le pas groupé, un forward par séquence dans l'ordre d'admission, jeton rapatrié "
+             "après le lancement du forward suivant (copie épinglée + événement) et émis aussitôt (Engine.emettre) : le premier "
+             "jeton ne dépend plus de la composition du lot ; 0 = un forward packé pour tout le groupe"),
     Variable("GDN_COEUR_LOT", "0", ("acvram.engine.couches", "_GDN_COEUR_LOT"), "0",
              "pièce 245 (opt-in) : 1 = au préfill de plusieurs séquences, cœur Gated DeltaNet (portes, fla cu_seqlens, "
              "norme) en un appel ; projections, convolution et out_proj par séquence ; au bit de la boucle (test 245)"),

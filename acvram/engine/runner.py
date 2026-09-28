@@ -72,6 +72,10 @@ def chemin_moe_atteint(compteurs: list[dict]) -> str:
 # Pièce 284 b (DÉFAUT) : préfill « une par une » (hybride + frontière d'instantané, ou toute séquence hors lot) réordonné
 # couche par couche — au bit, déquantification partagée par couche. 0 = témoin (la boucle d'avant, telle quelle).
 _PREFILL_TRANCHES = os.environ.get("ACVRAM_PREFILL_TRANCHES", "1") == "1"
+# Pièce 276 k (OPT-IN tant que non mesuré) : dans le pas groupé, un forward PAR séquence dans l'ordre d'admission, le jeton de
+# chacune rapatrié (copie épinglée + événement) APRÈS le lancement du forward suivant et ÉMIS aussitôt (`Engine.emettre`) — le
+# coût fixe du pas est payé une fois par groupe, la 4e requête n'attend plus la 7e (276 j : pas [1, 1, 3, 7], p50 +17 ms).
+_PREFILL_FILE = os.environ.get("ACVRAM_PREFILL_FILE", "0") == "1"
 
 # Pièce 277e : pas de recouvrement gardés après un repli du spéculatif sur le pas simple (proposeur muet) avant de
 # revider pour reproposer (`_pas_speculatif`) ; 0 = reproposer à chaque pas. Sans effet sous --speculative none (défaut).
@@ -178,6 +182,7 @@ class EngineStats:
     # bras d'une campagne n'etaient pas instrumentes pareil.
     pas_avec_prefill: int = 0
     prefill_tokens: int = 0
+    prefills_en_file: int = 0          # 276 k : séquences préfillées en file dans un pas groupé
     decode_tokens: int = 0
     prefill_seconds: float = 0.0
     prefill_tranches: int = 0      # 284 b : pas de préfill passés couche par couche (preuve de prise)
@@ -758,6 +763,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # porte `pipeline=1|0`.
         self._pipeline_pendiente: Optional[dict] = None
         self.pipeline_actif = os.environ.get("ACVRAM_PIPELINE", "1") not in ("0", "")
+        # 276 k : sorties émises PENDANT le pas (préfill en file) ; posé par AsyncEngine (`_deliver`), None = rendues à la fin
+        self.emettre: Optional[Callable[[list], None]] = None
         # Pièce 277e : après un repli du spéculatif sur le pas simple (proposeur muet), rester en recouvrement ce
         # nombre de pas avant de revider pour reproposer — sinon un proposeur hésitant alterne amorce et vidage et
         # ne recouvre jamais (`_pas_speculatif`). 0 = reproposer à chaque pas.
@@ -1714,6 +1721,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                            and s not in new] + a_prefiller
 
         if new and not budget and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
+                and all(self._frontiere_insta(s) is None for s in new) and _PREFILL_FILE and len(new) > 1:
+            outputs += self._prefill_en_file(new)
+        elif new and not budget and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
                 and all(self._frontiere_insta(s) is None for s in new):
             t0 = time.perf_counter()
             batch = self._build_batch(new, prefill=True)
@@ -1807,6 +1817,60 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         self.stats.waiting = len(self.waiting)
         self.stats.kv_blocks_free = self.allocator.num_free
         self._repin_pass()
+        return outputs
+
+    def _prefill_en_file(self, new: list["Sequence"]) -> list[GenerationOutput]:
+        """276 k : préfill EN FILE dans le pas — un forward par séquence dans l'ordre d'admission (même forward que le
+        chemin groupé à n = 1 : le premier jeton ne dépend plus de la composition du lot, GEMM à M fixe, 276 i), le jeton de
+        la séquence k rapatrié (copie épinglée + événement) APRÈS le lancement du forward k + 1 — l'hôte garde la carte
+        occupée, comme `_plain_decode_pipeline` — puis consommé et ÉMIS aussitôt par `self.emettre` quand le serveur l'a
+        posé (sinon rendu à la fin du pas). Rend les sorties NON émises."""
+        outputs: list[GenerationOutput] = []
+        en_vol: Optional[dict] = None
+        cuda = torch.cuda.is_available() and getattr(self.model, "device", torch.device("cpu")).type == "cuda"
+
+        def rapatrier(v: dict) -> list[GenerationOutput]:
+            if v["event"] is not None:
+                v["event"].synchronize()
+            sorties = self._consommer(v["tokens"], v["logprobs"], [v["seq"]], tops=v["tops"])
+            v["seq"].prefill_len = len(v["seq"].prompt_ids)
+            self._register_complete_blocks(v["seq"])
+            return sorties
+
+        for seq in new:
+            t0 = time.perf_counter()
+            batch = self._build_batch([seq], prefill=True)
+            logits = self.model(batch)
+            tokens, logprobs = self._sample_only(logits, [seq])
+            tops = self._tops_si_demande(logits, [seq])           # synchrone, seulement si `logprobs` demandé
+            event = None
+            if cuda and tokens.device.type == "cuda":
+                # copie asynchrone vers l'hôte AVANT de lancer le forward suivant : `.tolist()` sur ces tenseurs hôte n'attend
+                # ni ce forward-ci (l'événement le fait) ni le suivant (qui n'est pas dans la dépendance)
+                th = torch.empty_like(tokens, device="cpu", pin_memory=True)
+                lh = torch.empty_like(logprobs, device="cpu", pin_memory=True)
+                th.copy_(tokens, non_blocking=True)
+                lh.copy_(logprobs, non_blocking=True)
+                event = torch.cuda.Event()
+                event.record()
+                tokens, logprobs = th, lh
+            self.stats.prefill_seconds += time.perf_counter() - t0
+            self.stats.prefill_tokens += len(seq.prompt_ids) - seq.cached_len
+            suivant = {"seq": seq, "tokens": tokens, "logprobs": logprobs, "tops": tops, "event": event}
+            if en_vol is not None:
+                sorties = rapatrier(en_vol)                          # le forward de `seq` est déjà lancé : recouvrement
+                if self.emettre is not None and sorties:
+                    self.emettre(sorties)
+                else:
+                    outputs += sorties
+            en_vol = suivant
+        if en_vol is not None:
+            sorties = rapatrier(en_vol)
+            if self.emettre is not None and sorties:
+                self.emettre(sorties)
+            else:
+                outputs += sorties
+        self.stats.prefills_en_file += len(new)
         return outputs
 
     def _repin_pass(self) -> None:
