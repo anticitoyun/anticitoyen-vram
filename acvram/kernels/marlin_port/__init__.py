@@ -209,9 +209,12 @@ def facteur_nvfp4(marlin_scales: torch.Tensor) -> float:
     """Puissance de 2 telle que toute échelle non nulle × 2⁷ soit ≥ 2 en bf16
     (le bit de poids fort de la représentation S0E5M3 toujours à 1)."""
     ws = marlin_scales.float() * (2 ** 7)
-    nz = ws > 0
-    if nz.any():
-        mx = ws[nz].max()
+    # bd 7x8 : `ws[nz].max()` passait par nonzero, soit 8 o × ndim d'indices par élément (Coder-30B : 24 × 128·768·128
+    # = 288 Mio) alloués au chargement sur une carte déjà remplie par le KV → OOM. Même max, sans index : les non-positifs
+    # (et NaN, que le masque écartait aussi) mis à 0, puis amax.
+    ws.masked_fill_(~(ws > 0), 0)
+    mx = ws.amax()
+    if mx > 0:
         if mx < 448 * (2 ** 7):
             return (448 * (2 ** 7) / mx).log2().floor().exp2().item()
     return 1.0
