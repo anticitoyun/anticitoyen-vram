@@ -35,20 +35,24 @@ MODELES = {
     "wan22": {"nom": "Vidéo · Wan 2.2 TI2V-5B", "type": "video",
               "fichier": "Wan Video 2.2 TI2V-5B/wanVideo22_ti2v5BFp16.safetensors", "taille": (832, 480), "pas": 20},
     # Pièce 296 : workflows testés fournis par poste6 (parc/share/openwebui/videos/<gabarit>.{api,noeuds}.json),
-    # inlinés dans GABARITS par openwebui-medias. `entree` : pièce jointe exigée (image, controle = vidéo ou image
-    # de pose) ou facultative (image?) ; `multiple` : longueur = multiple·k + 1 images.
+    # inlinés dans GABARITS par openwebui-medias. `entree` : pièces jointes exigées (image ; video+image : vidéo de
+    # contrôle ET image du sujet, les deux obligatoires dans le graphe VACE) ; `multiple` : longueur = multiple·k + 1.
+    # Pas ni négatif : ceux du workflow testé (LTX distillé : 8 sigmas fixes, sans pas).
     "wan22_i2v": {"nom": "Vidéo · Wan 2.2 14B image → vidéo", "type": "gabarit", "gabarit": "wan22-14b-i2v",
                   "usage": "Joignez une image et décrivez le mouvement : l'image ouvre la vidéo. Meilleure qualité, lent.",
                   "entree": "image", "taille": (832, 480), "fps": 16, "multiple": 4, "duree": 5.0},
     "wan22_t2v": {"nom": "Vidéo · Wan 2.2 14B texte → vidéo", "type": "gabarit", "gabarit": "wan22-14b-t2v",
                   "usage": "Décrivez la scène ; « 1280x720 » ou « 3 s » dans le message règlent taille et durée.",
                   "entree": None, "taille": (832, 480), "fps": 16, "multiple": 4, "duree": 5.0},
-    "wan_vace": {"nom": "Vidéo · Wan VACE (contrôle)", "type": "gabarit", "gabarit": "wan-vace",
-                 "usage": "Joignez une vidéo ou une pose de référence : le mouvement suit la référence, l'invite décrit le reste.",
-                 "entree": "controle", "taille": (832, 480), "fps": 16, "multiple": 4, "duree": 5.0},
-    "ltx23": {"nom": "Vidéo · LTX-2.3 (rapide)", "type": "gabarit", "gabarit": "ltx23",
-              "usage": "Texte → vidéo, ou image → vidéo si une image est jointe. Rapide, qualité moindre que Wan 14B.",
-              "entree": "image?", "taille": (768, 512), "fps": 24, "multiple": 8, "duree": 5.0},
+    "wan_vace": {"nom": "Vidéo · Wan VACE (contrôle par référence)", "type": "gabarit", "gabarit": "wan-vace",
+                 "usage": "Joignez une vidéo de référence (mouvement, pose) ET une image du sujet : le sujet reprend le mouvement.",
+                 "entree": "video+image", "taille": (832, 480), "fps": 16, "multiple": 4, "duree": 5.0},
+    "ltx23": {"nom": "Vidéo · LTX-2.3 image → vidéo (rapide)", "type": "gabarit", "gabarit": "ltx23",
+              "usage": "Joignez une image et décrivez la scène : rapide (secondes à chaud), avec son ; qualité sous Wan 14B.",
+              "entree": "image", "taille": (1024, 576), "fps": 24, "multiple": 8, "duree": 5.0},
+    "ltx23_t2v": {"nom": "Vidéo · LTX-2.3 texte → vidéo (rapide)", "type": "gabarit", "gabarit": "ltx23-t2v",
+                  "usage": "Décrivez la scène : rapide (secondes à chaud), avec son ; qualité sous Wan 14B.",
+                  "entree": None, "taille": (1024, 576), "fps": 24, "multiple": 8, "duree": 5.0},
 }
 
 # {gabarit: {"graphe": workflow API ComfyUI, "noeuds": [{"type", "node_ids", "key"}]}} — REMPLI À L'INSTALLATION par
@@ -157,9 +161,9 @@ def types_du_gabarit(gabarit):
     return {n["type"] for n in gabarit["noeuds"]}
 
 
-def construire(cle, texte, graine, entree=None):
-    """(graphe, description) pour le modèle `cle` du manifold ; `entree` = (type, nom ComfyUI) de la pièce jointe
-    téléversée ("image" ou "video"), None sans pièce jointe."""
+def construire(cle, texte, graine, entrees=()):
+    """(graphe, description) pour le modèle `cle` du manifold ; `entrees` = [(type, nom ComfyUI)] des pièces jointes
+    téléversées ("image" ou "video")."""
     m = MODELES[cle]
     invite, l, h, duree = lire_options(texte, m["taille"], m.get("duree", 2.0))
     if m["type"] == "klein":
@@ -174,10 +178,10 @@ def construire(cle, texte, graine, entree=None):
             raise KeyError(f"gabarit {m['gabarit']} absent : réinstaller par openwebui-medias")
         valeurs = {"prompt": invite, "width": l, "height": h, "seed": graine, "fps": m["fps"],
                    "length": longueur_images(duree, m["fps"], m["multiple"])}
-        if entree:
-            if entree[0] not in types_du_gabarit(gab):
-                raise KeyError(f"{m['nom']} ne prend pas de {entree[0]} en entrée")
-            valeurs[entree[0]] = entree[1]
+        for genre, nom in entrees:
+            if genre not in types_du_gabarit(gab):
+                raise KeyError(f"{m['nom']} ne prend pas de {genre} en entrée")
+            valeurs[genre] = nom
         g = appliquer(gab, valeurs)
     video = m["type"] in ("video", "gabarit")
     pas = f" · {m['pas']} pas" if "pas" in m else ""
@@ -214,18 +218,16 @@ def references_jointes(messages, fichiers):
 
 
 def choisir_entree(m, refs):
-    """(type, référence) que le modèle `m` consomme parmi `refs`, ou None ; lève ValueError si l'entrée est exigée
-    et absente."""
-    voulu = m.get("entree")
-    if not voulu:
-        return None
-    for r in refs:
-        genre = "video" if r["mime"].startswith("video/") else "image"
-        if (voulu.rstrip("?") == "image" and genre == "image") or voulu == "controle":
-            return genre, r
-    if voulu.endswith("?"):
-        return None
-    raise ValueError(m["usage"])
+    """[(type, référence)] que le modèle `m` consomme parmi `refs` (la première de chaque type exigé) ; ValueError
+    portant la ligne d'usage si une pièce exigée manque."""
+    voulu = (m.get("entree") or "").split("+") if m.get("entree") else []
+    choix = []
+    for genre in voulu:
+        r = next((r for r in refs if r["mime"].startswith(genre + "/")), None)
+        if r is None:
+            raise ValueError(m["usage"])
+        choix.append((genre, r))
+    return choix
 
 
 def corps_multipart(nom, octets, mime):
@@ -332,16 +334,16 @@ class Pipe:
             choix = choisir_entree(m, references_jointes(body.get("messages"), (__metadata__ or {}).get("files")))
         except ValueError as e:
             return f"{m['nom']} : {e}"
-        entree = None
-        if choix:
-            octets, mime = await self._octets(choix[1], user)
+        entrees = []
+        for genre, ref in choix:
+            octets, mime = await self._octets(ref, user)
             ext = {"video/webm": ".webm", "image/jpeg": ".jpg", "image/webp": ".webp"}.get(
-                mime, ".mp4" if choix[0] == "video" else ".png")
+                mime, ".mp4" if genre == "video" else ".png")
             nom = await asyncio.to_thread(self._televerser, f"owui-{uuid.uuid4().hex[:12]}{ext}", octets, mime)
-            entree = (choix[0], nom)
+            entrees.append((genre, nom))
         graine = random.randint(0, 2**48)
         try:
-            graphe, desc = construire(cle, texte, graine, entree)
+            graphe, desc = construire(cle, texte, graine, entrees)
         except KeyError as e:
             return f"{m['nom']} : {e.args[0]}"
         video = m["type"] in ("video", "gabarit")

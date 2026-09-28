@@ -38,18 +38,18 @@ def gabarits(monkeypatch):
     vid = {"graphe": _GRAPHE, "noeuds": _NOEUDS + [{"type": "video", "node_ids": ["6"], "key": "file"},
                                                    {"type": "image", "node_ids": ["1"], "key": "image"}]}
     monkeypatch.setattr(cm, "GABARITS", {"wan22-14b-i2v": img, "wan22-14b-t2v": {"graphe": _GRAPHE, "noeuds": _NOEUDS},
-                                         "wan-vace": vid, "ltx23": img})
+                                         "wan-vace": vid, "ltx23": img, "ltx23-t2v": {"graphe": _GRAPHE, "noeuds": _NOEUDS}})
 
 
 def test_quatre_modeles_distincts_au_selecteur_avec_usage():
     ids = [p["id"] for p in cm.Pipe().pipes()]
-    for k in ("wan22_i2v", "wan22_t2v", "wan_vace", "ltx23"):
+    for k in ("wan22_i2v", "wan22_t2v", "wan_vace", "ltx23", "ltx23_t2v"):
         assert k in ids and cm.MODELES[k]["usage"] and cm.MODELES[k]["nom"].startswith("Vidéo · ")
     assert len({cm.MODELES[k]["nom"] for k in ids}) == len(ids)
 
 
 def test_i2v_pose_l_image_jointe_la_duree_et_la_taille():
-    g, desc = cm.construire("wan22_i2v", "un chat qui saute 1280x720 3 s", 7, ("image", "owui-ab.png"))
+    g, desc = cm.construire("wan22_i2v", "un chat qui saute 1280x720 3 s", 7, [("image", "owui-ab.png")])
     assert g["1"]["inputs"]["image"] == "owui-ab.png" and g["2"]["inputs"]["text"] == "un chat qui saute"
     assert (g["3"]["inputs"]["width"], g["3"]["inputs"]["height"], g["3"]["inputs"]["length"]) == (1280, 720, 49)
     assert g["4"]["inputs"]["seed"] == 7 and g["5"]["inputs"]["fps"] == 16
@@ -60,7 +60,7 @@ def test_i2v_pose_l_image_jointe_la_duree_et_la_taille():
 def test_longueur_multiple_plus_un():
     assert cm.longueur_images(5, 16, 4) == 81 and cm.longueur_images(5, 24, 8) == 121
     assert cm.longueur_images(0.1, 16, 4) == 5
-    g, _ = cm.construire("ltx23", "mer", 1)
+    g, _ = cm.construire("ltx23_t2v", "mer", 1)
     assert (g["3"]["inputs"]["length"] - 1) % 8 == 0 and g["5"]["inputs"]["fps"] == 24
 
 
@@ -69,23 +69,25 @@ def test_entree_exigee_facultative_ou_absente():
     vid = [{"mime": "video/mp4", "id": "f1"}]
     with pytest.raises(ValueError, match="Joignez une image"):
         cm.choisir_entree(cm.MODELES["wan22_i2v"], vid)                  # une vidéo n'est pas l'image de départ
+    for refs in ([], vid, img):                                          # VACE : vidéo ET image, toutes deux
+        with pytest.raises(ValueError, match="vidéo de référence"):
+            cm.choisir_entree(cm.MODELES["wan_vace"], refs)
+    assert [g for g, _ in cm.choisir_entree(cm.MODELES["wan_vace"], img + vid)] == ["video", "image"]
     with pytest.raises(ValueError):
-        cm.choisir_entree(cm.MODELES["wan_vace"], [])
-    assert cm.choisir_entree(cm.MODELES["wan_vace"], vid)[0] == "video"
-    assert cm.choisir_entree(cm.MODELES["wan_vace"], img)[0] == "image"   # pose de référence
-    assert cm.choisir_entree(cm.MODELES["ltx23"], []) is None
-    assert cm.choisir_entree(cm.MODELES["ltx23"], img)[0] == "image"
-    assert cm.choisir_entree(cm.MODELES["wan22_t2v"], img) is None
+        cm.choisir_entree(cm.MODELES["ltx23"], [])
+    assert cm.choisir_entree(cm.MODELES["ltx23"], img)[0][0] == "image"
+    assert cm.choisir_entree(cm.MODELES["wan22_t2v"], img) == []
+    assert cm.choisir_entree(cm.MODELES["ltx23_t2v"], vid) == []
 
 
 def test_entree_hors_gabarit_et_noeud_absent_sont_des_erreurs():
     with pytest.raises(KeyError, match="ne prend pas de video"):
-        cm.construire("wan22_i2v", "x", 1, ("video", "v.mp4"))
+        cm.construire("wan22_i2v", "x", 1, [("video", "v.mp4")])
     with pytest.raises(KeyError, match="nœud 8.text absent"):
         cm.appliquer({"graphe": _GRAPHE, "noeuds": [{"type": "prompt", "node_ids": ["8"], "key": "text"}]}, {"prompt": "x"})
-    cm.GABARITS.pop("ltx23")
+    cm.GABARITS.pop("ltx23-t2v")
     with pytest.raises(KeyError, match="réinstaller"):
-        cm.construire("ltx23", "x", 1)
+        cm.construire("ltx23_t2v", "x", 1)
 
 
 def test_references_jointes_data_fichier_owui_et_video():
@@ -118,3 +120,28 @@ def test_l_installateur_peut_inliner_gabarits():
     espace = {}
     exec(compile(source.replace("\nGABARITS = {}\n", "\nGABARITS = " + repr(gab) + "\n"), "pipe", "exec"), espace)
     assert espace["GABARITS"] == gab
+
+
+@pytest.mark.parametrize("cle", [k for k, m in cm.MODELES.items() if m["type"] == "gabarit"])
+def test_vrais_gabarits_d_poste6(cle, monkeypatch):
+    """Les workflows testés (videos/) : chaque type de la table pointe dans le graphe, l'entrée exigée y a son nœud,
+    la longueur et le fps du modèle arrivent à TOUS leurs nœuds."""
+    import json
+    m = cm.MODELES[cle]
+    d = RACINE / "videos"
+    gab = {"graphe": json.loads((d / f"{m['gabarit']}.api.json").read_text()),
+           "noeuds": json.loads((d / f"{m['gabarit']}.noeuds.json").read_text())}
+    monkeypatch.setattr(cm, "GABARITS", {m["gabarit"]: gab})
+    entrees = [(g, f"owui-x.{'mp4' if g == 'video' else 'png'}") for g in (m["entree"] or "").split("+") if g]
+    g, _ = cm.construire(cle, "un phare sous la pluie", 5, entrees)
+    for n in gab["noeuds"]:
+        for nid in n["node_ids"]:
+            v = g[nid]["inputs"][n["key"]]
+            if n["type"] == "length":
+                assert v == cm.longueur_images(m["duree"], m["fps"], m["multiple"])
+            elif n["type"] == "fps":
+                assert v == m["fps"]
+            elif n["type"] == "prompt":
+                assert v == "un phare sous la pluie"
+    for genre, nom in entrees:
+        assert any(g[nid]["inputs"][n["key"]] == nom for n in gab["noeuds"] if n["type"] == genre for nid in n["node_ids"])
