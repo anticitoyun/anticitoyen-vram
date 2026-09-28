@@ -120,3 +120,40 @@ def test_un_fichier_en_defaut_n_empeche_pas_les_autres(tmp_path):
     assert fr in plan and "Version 0.7.11." in plan[fr]
     assert casse not in plan
     assert len(refus) == 1 and refus[0][0] == casse
+
+
+# ---- journal (chef, 28/09, sur la 0.7.11 réelle) : jamais dans l'arbre du dépôt --------------
+
+def test_journal_par_defaut_hors_de_larbre(tmp_path):
+    """CLI réel, versions introuvables (0.0.0/0.0.1 ne matchent rien) : chaque
+    fichier réel refuse en « absente », donc rien n'est jamais écrit — seul le
+    JOURNAL est sous contrôle ici. HOME simulé pour ne jamais écrire dans le
+    vrai ~/.cache de la session."""
+    import os
+    import subprocess
+
+    faux_home = tmp_path / "home"
+    r = subprocess.run(
+        ["python3", str(DEPOT / "outils" / "bumper-version-readme.py"), "0.0.0", "0.0.1"],
+        cwd=DEPOT, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "HOME": str(faux_home)},
+    )
+    assert r.returncode == 1, r.stdout + r.stderr   # 32 refus (« absente »), aucun fichier basculé
+    journal = faux_home / ".cache" / "acvram" / "bumper-version-readme.journal.tsv"
+    assert journal.exists(), r.stdout + r.stderr
+    assert not (DEPOT / "outils" / "bumper-version-readme.journal.tsv").exists(), (
+        "le journal est retombé dans l'arbre du dépôt")
+
+
+def test_journal_option_surchargeable(tmp_path):
+    import os
+    import subprocess
+
+    cible = tmp_path / "ailleurs" / "j.tsv"
+    r = subprocess.run(
+        ["python3", str(DEPOT / "outils" / "bumper-version-readme.py"), "0.0.0", "0.0.1",
+         "--journal", str(cible)],
+        cwd=DEPOT, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "HOME": str(tmp_path / "home-inutilise")},
+    )
+    assert cible.exists(), r.stdout + r.stderr
