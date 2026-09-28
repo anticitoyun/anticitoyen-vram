@@ -521,6 +521,14 @@ def _hote_texte() -> str:
     return hote_texte()
 
 
+def _falaise_texte(f: Optional[dict]) -> str:
+    """`falaise=8%<25%(ctx_sans_exil=21000) ` (pièce 295, `loader._signaler_falaise`) ; vide sans falaise."""
+    if not f:
+        return ""
+    return (f"falaise={f['debit_relatif'] * 100:.0f}%<{f['seuil'] * 100:.0f}%"
+            f"(ctx_sans_exil={f['ctx_sans_exil'] or 'aucun'}) ")
+
+
 def _glue_texte() -> str:
     """`glue=compact(8)` | `glue=temoin` (C15-3d, regime.glue_texte)."""
     from ..regime import glue_texte
@@ -1047,6 +1055,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={kv_cap}/{kv_seqs} "
                + (f"kv_sous_demande={kv_cap}/{kv_dem} " if kv_dem and kv_cap < kv_dem else "")
+               + _falaise_texte(getattr(self.loaded.plan, "falaise", None))
                + f"kv={self.kv_format_servi()} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "
