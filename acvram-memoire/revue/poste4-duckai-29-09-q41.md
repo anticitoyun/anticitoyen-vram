@@ -45,6 +45,36 @@
   changement d'archi cible change la clé — mais les bugs ci-dessus montrent que la pratique
   diverge du principe quand des flags sont codés en dur au lieu de dérivés de l'arch détectée.
 
+## Croisement duck.ai (29/09, mode raisonnement)
+
+**Correction majeure (Luna, sourcée) qui contredit la section précédente** : Marlin est compilé
+**AOT** (CMake, `.so` fatbinary embarqué dans la roue), **pas JIT**. Le « cache JIT » n'existe
+QUE pour Triton/torch.compile-Inductor/FlashInfer/nouveaux noyaux JIT SGLang — jamais pour
+Marlin lui-même. Le risque réel sur Marlin n'est pas un cache d'empreinte différente mais une
+roue qui ne contient tout simplement pas le cubin de l'architecture courante (« no kernel image
+is available », repéré à l'exécution, pas au chargement du cache). Sources : `vllm/CMakeLists.txt`,
+`docs/getting_started/installation/gpu.cuda.inc.md`, issue vLLM sur le hashing du cache
+torch.compile (historiquement fragile, paramètre oublié → réutilisation incorrecte), et un chemin
+FlashInfer réel `~/.cache/flashinfer/0.6.12.dev20260602/120f/...` où `120f` = architecture dans
+le chemin de cache. Confirme et affine 209/217 (cache JIT par arch) mais déplace le sujet : ce
+n'est pas Marlin qui a ce problème, c'est FlashInfer/Triton autour de lui.
+
+**Gemma** (aucune source citée) : description générique correcte en surface (fatbinary +
+sélection driver + hash torch.compile/Triton incluant arch+version+hash source) mais confond
+implicitement Marlin et le cache JIT générique — même erreur que la section « sources
+primaires » initiale de ce fichier.
+
+**gpt-oss** : confabule (déjà écarté ci-dessus, cf. section sources primaires) — dépôt
+`sgl-ai/sglang` inexistant (le vrai est `sgl-project/sglang`), `torch/cuda/archs.yaml` inventé,
+numéros d'issues (#342, #127) invraisemblables pour le volume de ces dépôts. Même motif de
+confabulation que Q35/Q36 (27/09).
+
+**Accord des 3** sur le principe fatbinary multi-arch (`-gencode` empilés, `TORCH_CUDA_ARCH_LIST`
+pilote le build) et sur `sm_120`/Blackwell encore fragile/récent. Désaccord réel seulement sur
+la nature AOT vs JIT de Marlin — tranché par les sources primaires de Luna (CMakeLists.txt réel),
+retenu comme correction à la section précédente plutôt que comme désaccord non tranchable.
+
 ## Reste
 
-Repasser duck.ai (3 modèles) dès extension Chrome disponible pour croisement/désaccords.
+Rien : croisement fait. Correction Marlin AOT (pas JIT) à propager si le sujet ressert ailleurs
+dans le projet (recherche de cache JIT contaminé, notes 209/212/217).
