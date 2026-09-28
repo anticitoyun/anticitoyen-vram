@@ -16,13 +16,19 @@ VNUM = "0.7.3"
 
 
 def _depot_jetable(tmp_path: pathlib.Path, *, version: str = VNUM, avec_notes: bool = True,
-                    bilingue: bool = True) -> pathlib.Path:
+                    bilingue: bool = True, readme_version: str | None = ...) -> pathlib.Path:
     d = tmp_path / "depot"
     d.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(d)], check=True)
     subprocess.run(["git", "-C", str(d), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
     (d / "pyproject.toml").write_text(f'[project]\nname = "acvram"\nversion = "{version}"\n', encoding="utf-8")
+    # Pièce 295 : README.md § État doit porter la même version que pyproject.toml —
+    # par défaut aligné sur `version` (le cas normal) ; readme_version=None omet la
+    # ligne (README non tenu à jour), une autre chaîne simule un écart.
+    rv = version if readme_version is ... else readme_version
+    if rv is not None:
+        (d / "README.md").write_text(f"## État\n\nVersion {rv}. Reste du texte.\n", encoding="utf-8")
     outils = d / "outils"; outils.mkdir()
     shutil.copy2(SCRIPT, outils / "sortir-version.sh")
     (outils / "sortir-version.sh").chmod(0o755)

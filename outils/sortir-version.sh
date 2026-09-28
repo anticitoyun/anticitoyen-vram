@@ -77,6 +77,19 @@ if [ "$DEPUIS" -le 3 ]; then
   PYVER=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
   [ "$PYVER" = "$VNUM" ] || { echo "REFUS : pyproject.toml porte $PYVER, pas $VNUM" >&2; exit 65; }
 
+  # Pièce 295 (utilisateur, 28/09) : README.md restait à une version d'épouvante
+  # (0.6.38 quand la 0.7.10 était sortie) — personne ne le tenait à jour au fil
+  # des versions. La même faute que PYVER, un code distinct pour la nommer.
+  README_VER=$(grep -m1 -oP '^Version \K[0-9]+\.[0-9]+\.[0-9]+' README.md || true)
+  [ -n "$README_VER" ] || {
+    echo "REFUS : README.md — aucune ligne « Version X.Y.Z. » trouvée (§ État)" >&2
+    exit 74
+  }
+  [ "$README_VER" = "$VNUM" ] || {
+    echo "REFUS : README.md porte $README_VER, pas $VNUM — mettre à jour § État avant de sortir" >&2
+    exit 74
+  }
+
   echo "== 2. notes de release GitHub présentes"
   NOTES="$NOTES_DIR/release-$V-github.md"
   [ -f "$NOTES" ] || {
