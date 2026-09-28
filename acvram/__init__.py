@@ -16,7 +16,7 @@ La surface publique est la ligne de commande (`acvram`) et le serveur
 compatible avec l'API OpenAI.
 """
 
-__version__ = "0.7.11"
+__version__ = "0.7.12"
 
 # Segments extensibles de l'allocateur CUDA, sur demande seulement. Posé ici
 # parce que la variable n'est lue qu'une fois, à la première allocation, avant

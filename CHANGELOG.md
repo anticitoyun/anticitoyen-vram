@@ -1,5 +1,29 @@
 # Journal des changements
 
+## 0.7.12 (28/09/2026)
+
+### Service
+
+* **28/09/2026 — pièce 295 (poste5, poste5-295 23627f5bf) : avertissement « FALAISE D'EXIL ».** Quand le plan de
+  chargement exile des MLP et que le débit prévu tombe sous 25 % du résident (`ACVRAM_SEUIL_FALAISE`), `acvram serve`
+  le dit au démarrage avec le contexte qui tiendrait sans exil (`--max-model-len N`) ; la ligne de régime porte
+  `falaise=x%<25%(ctx_sans_exil=N)`. Aucun refus. Cas réel : Devstral 24B à 32 k (10/40 MLP exilés, 7,9 tok/s au lieu
+  de 94,5). Test `tests/test_falaise_295.py`.
+
+### Menus et Open WebUI (paquet parc 0.1.6)
+
+* **Vidéo dans Open WebUI** (pièces 296, poste6 et poste5) : Wan 2.2 14B I2V, Wan 2.2 14B T2V, Wan VACE / Fun Control
+  et LTX-2.3 (image et texte) apparaissent comme des modèles du sélecteur ; l'image ou la vidéo jointe sert d'entrée,
+  la vidéo s'affiche dans la conversation. Rendus de 2 s depuis OWUI : Wan I2V 250 s, T2V 302 s, VACE 411 s, LTX I2V
+  272 s, LTX T2V 64 s à chaud. `acvram-memoire/revue/poste6-piece296-verdict-28-09.md`,
+  `poste5-piece296-verdict-28-09.md`.
+* **Tri des colonnes** (poste3, poste3-296) : les valeurs inconnues restent en fin de liste dans les deux sens de tri
+  (le comparateur de GTK était inversé en aveugle) ; tests `tests/test_tri_bareme_edz.py`,
+  `tests/test_gui_tri_colonnes_edz.py`, `tests/test_colonnes_jamais_decalees_edz.py`.
+* **Test réel des menus** (poste1, poste1-edz, en cours : 70/294 alias testés) : premiers correctifs — contrôle du
+  modèle servi, `text_config` des modèles multimodaux, cause de mort du lancement et port, fenêtre servie de
+  claude-modele, masquage à l'affichage des alias en panne.
+
 ## 0.7.11 (28/09/2026)
 
 ### Contexte long, modèles denses
