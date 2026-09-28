@@ -495,6 +495,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"        le prefill retombe sur dequantification + cuBLAS ; le "
               f"decodage n'est pas affecte")
 
+    # 7x8b : les .deb >= 0.6.13 et le Flatpak servaient les MoE nvfp4 SANS Marlin (en-tetes non installes, pas de
+    # nvcc) sans que rien ne le dise hors de la ligne de regime. verifier-release exige la ligne « Marlin charge ».
+    if rig.gpus:
+        from .kernels import marlin_port as MP
+        if MP.charger() is not None:
+            src = (f"precompile {MP.PRECOMPILE}" if MP.PRECOMPILE
+                   else "compile ici" if MP.COMPILE_ICI else f"cache {MP.dossier_cache()}")
+            print(f"  {green('ok')}    Marlin charge ({src}, empreinte {MP.empreinte_sources()})")
+        else:
+            print(f"  {yellow('alerte')} Marlin indisponible ({MP.ECHEC_COMPILATION}) ; les MoE nvfp4 "
+                  f"servent sur la pile naturelle, plus lente")
+
     from .kernels import backends as bk
     print(f"  {green('ok')}    backends retenus par (format, peripherique) :")
     for row in bk.table():

@@ -6,7 +6,8 @@ Compile `acvram_kernels.cu` pour chaque architecture demandée (une seule compil
 sans GPU, et range `acvram_kernels.so` + `empreinte.json` sous ``<dossier>/<src_sha16>/`` — exactement ce que
 `kernels._precompile_utilisable` relit au chargement (même écriture : `_ecrire_empreinte`). La CI joue ceci dans
 `nvidia/cuda:*-devel` avec la roue torch cu130 ; le manifeste Flathub embarque ``build/noyaux`` sous
-``/app/lib/acvram/noyaux`` (`ACVRAM_KERNELS_PRECOMPILES`)."""
+``/app/lib/acvram/noyaux`` (`ACVRAM_KERNELS_PRECOMPILES`). 7x8b : le port Marlin aussi, sous ``<dossier>/marlin-<empreinte>/``
+(`marlin_port.compiler_precompile`, relu par `marlin_port.precompile_utilisable`)."""
 from __future__ import annotations
 
 import argparse
@@ -31,8 +32,12 @@ def main(argv=None) -> int:
     cand = kernels.compiler_precompile(a.dossier, archs)
     with open(os.path.join(cand, "empreinte.json"), encoding="utf-8") as fh:
         e = json.load(fh)
+    # 7x8b : Marlin aussi — sans lui, le Flatpak servait tous les MoE nvfp4 sur la pile naturelle
+    from acvram.kernels import marlin_port
+    cand_m = marlin_port.compiler_precompile(a.dossier, archs)
     print(json.dumps({"dossier": cand, "archs": e["archs"], "src_hash": e["src_hash"], "torch": e["torch"], "cuda": e["cuda"],
-                      "so_octets": os.path.getsize(os.path.join(cand, "acvram_kernels.so"))}))
+                      "so_octets": os.path.getsize(os.path.join(cand, "acvram_kernels.so")),
+                      "marlin_dossier": cand_m, "marlin_so_octets": os.path.getsize(os.path.join(cand_m, "acvram_marlin.so"))}))
     return 0
 
 

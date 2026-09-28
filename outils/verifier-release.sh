@@ -247,6 +247,10 @@ if [ -n "$FLAT" ]; then
         ok "flatpak : acvram doctor dans le bac à sable (flatpak-doctor.txt)"
         grep -i -E 'noyau|kernel|précompil|precompil|cuda' "$DOSSIER/flatpak-doctor.txt" | head -n6 | sed 's/^/        /'
       else faux "flatpak : acvram doctor a échoué (flatpak-doctor.txt)"; tail -n5 "$DOSSIER/flatpak-doctor.txt" | sed 's/^/        /'; fi
+      # 7x8b : le doctor rendait 0 sans Marlin (simple alerte) — le Flatpak servait les MoE nvfp4 sans lui depuis toujours
+      if grep -q 'Marlin charge (precompile ' "$DOSSIER/flatpak-doctor.txt"; then
+        ok "flatpak : Marlin chargé depuis le précompilé ($(grep -o 'empreinte [0-9a-f]*' "$DOSSIER/flatpak-doctor.txt" | head -1))"
+      else faux "flatpak : Marlin non chargé depuis le précompilé ($(grep -i 'marlin' "$DOSSIER/flatpak-doctor.txt" | head -1 | cut -c1-160))"; fi
     fi
   fi
 fi

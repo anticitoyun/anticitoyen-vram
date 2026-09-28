@@ -107,7 +107,7 @@ def chemin_so() -> pathlib.Path:
 def sha_so() -> str:
     """sha256 du binaire compilé — l'en-tête d'une cellule (INDEX) le porte."""
     import hashlib
-    p = chemin_so()
+    p = pathlib.Path(PRECOMPILE) if PRECOMPILE else chemin_so()
     if not p.exists():
         return "absent"
     return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
@@ -121,8 +121,14 @@ def charger(verbose: bool = False, compiler: bool = True):
     (nvcc seul, aucune carte requise : archs sm_86 + sm_120 par défaut). Si le
     binaire n'est pas en cache au moment du banc, `COMPILE_ICI` passe à vrai
     et le banc se déclare invalide."""
-    global _EXT, COMPILE_ICI, ECHEC_COMPILATION
+    global _EXT, COMPILE_ICI, ECHEC_COMPILATION, PRECOMPILE
     if _EXT is not None:
+        return _EXT
+    # 7x8b : d'abord un .so précompilé qui concorde (Flatpak : pas de nvcc), comme acvram_kernels (pièce 240)
+    pre = _charger_precompile()
+    if pre:
+        PRECOMPILE = pre
+        _EXT = torch.ops.acvram_marlin
         return _EXT
     so = chemin_so()
     if not so.exists():
@@ -158,7 +164,7 @@ def _compiler(verbose: bool = False) -> None:
         _lancer_ninja(cache, verbose, load)
 
 
-def _lancer_ninja(cache: pathlib.Path, verbose: bool, load) -> None:
+def _lancer_ninja(cache: pathlib.Path, verbose: bool, load, arch_flags=None) -> None:
     SRC = _sources_en_cache(cache)
     moe = SRC / "libtorch_stable" / "moe" / "marlin_moe_wna16"
     sources = [str(SRC / "bindings.cpp"), str(moe / "ops.cu"),
@@ -181,7 +187,93 @@ def _lancer_ninja(cache: pathlib.Path, verbose: bool, load) -> None:
          # explicitement ; sans ce drapeau (que vLLM pose, CMakeLists.txt:1377)
          # l'édition de liens rend « undefined hidden symbol Marlin<…> »
          extra_cuda_cflags=["-O3", "-std=c++20", "--expt-relaxed-constexpr", "-DENABLE_BF16", "-DUSE_CUDA",
-                            "-static-global-template-stub=false", empreinte] + _arch_flags())
+                            "-static-global-template-stub=false", empreinte]
+                           + (arch_flags if arch_flags is not None else _arch_flags()))
+
+
+# 7x8b (Flatpak, comme la pièce 240 pour acvram_kernels) : MARLIN PRÉCOMPILÉ. Sans nvcc (bac à sable), `charger()`
+# échouait et tous les MoE nvfp4 servaient sur la pile naturelle, repli nommé sur la ligne de régime seulement.
+# `ACVRAM_KERNELS_PRECOMPILES` (défaut <acvram/kernels>/precompiles) porte `marlin-<empreinte>/acvram_marlin.so` et son
+# `empreinte.json` {"empreinte", "archs", "torch", "cuda", "python"} ; le .so porte `acvram_marlin_empreinte=<empreinte>`
+# (bindings.cpp). Chargé sans ninja quand tout concorde, sinon compilation comme avant.
+MARQUEUR = b"acvram_marlin_empreinte="
+PRECOMPILE = None            # chemin du .so précompilé chargé dans ce processus, sinon None
+
+
+def _dossier_precompiles() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("ACVRAM_KERNELS_PRECOMPILES") or (ICI.parent / "precompiles"))
+
+
+def precompile_utilisable(dossier, empreinte: str, caps, torch_version: str, torch_cuda, python_abi: str | None = None):
+    """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_marlin_precompile_7x8b.py). Mêmes contrôles
+    que `kernels._precompile_utilisable` : empreinte des sources, torch/CUDA, ABI CPython, architectures, marqueur."""
+    import json
+    from .. import _abi_python
+    python_abi = python_abi or _abi_python()
+    cand = pathlib.Path(dossier) / f"marlin-{empreinte}"
+    man, so = cand / "empreinte.json", cand / "acvram_marlin.so"
+    if not (man.is_file() and so.is_file()):
+        return None, f"aucun Marlin précompilé pour l'empreinte {empreinte} sous {dossier}"
+    try:
+        e = json.loads(man.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"empreinte.json illisible : {exc}"
+    if e.get("empreinte") != empreinte:
+        return None, f"empreinte.json : empreinte {e.get('empreinte')}, sources présentes {empreinte}"
+    if e.get("torch") != torch_version or e.get("cuda") != str(torch_cuda):
+        return None, f"précompilé pour torch {e.get('torch')} / CUDA {e.get('cuda')}, ici {torch_version} / {torch_cuda}"
+    if e.get("python") != python_abi:
+        return None, f"précompilé pour l'ABI Python {e.get('python') or 'non renseignée'}, ici {python_abi}"
+    archs = set(e.get("archs") or [])
+    for a, b in caps:
+        if not ({f"sm_{a}{b}", f"sm_{a}{b}f", f"sm_{a}{b}a"} & archs):
+            return None, f"précompilé sans sm_{a}{b} (architectures : {sorted(archs)})"
+    if MARQUEUR + empreinte.encode() not in so.read_bytes():
+        return None, "le .so ne porte pas l'empreinte annoncée par son empreinte.json"
+    return str(so), "précompilé"
+
+
+def _charger_precompile():
+    """Chemin du .so précompilé chargé, ou None (raison dite si le dossier a été demandé explicitement)."""
+    import warnings
+    try:
+        caps = ({torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())}
+                if torch.cuda.is_available() else set())
+        so, raison = precompile_utilisable(_dossier_precompiles(), empreinte_sources(), caps,
+                                           torch.__version__, torch.version.cuda)
+        if so:
+            torch.ops.load_library(so)
+            return so
+        if os.environ.get("ACVRAM_KERNELS_PRECOMPILES"):
+            warnings.warn(f"acvram : Marlin précompilé refusé ({raison}) — compilation")
+    except Exception as exc:                      # noqa: BLE001 — un précompilé cassé ne doit pas empêcher la compilation
+        warnings.warn(f"acvram : Marlin précompilé inutilisable ({type(exc).__name__}: {exc}) — compilation")
+    return None
+
+
+def compiler_precompile(dossier, archs) -> str:
+    """7x8b : compile le port SANS carte (CI, conteneur CUDA) pour ``archs`` (ex. [(12, 0)]) et le range sous
+    ``dossier/marlin-<empreinte>/`` avec son empreinte.json. Mêmes sources et drapeaux que `charger()`, architectures
+    imposées. Rend le sous-dossier."""
+    import json
+    import shutil
+    import tempfile
+    from torch.utils.cpp_extension import load
+    from .. import _abi_python, _arch_flags, _archs_des_drapeaux, _ensure_cuda_home, _MIN_CUDA_FOR_SM120
+    _ensure_cuda_home(_MIN_CUDA_FOR_SM120)
+    flags = _arch_flags(archs_forcees=list(archs))
+    build = pathlib.Path(tempfile.mkdtemp(prefix="acvram-marlin-precompile-"))
+    _lancer_ninja(build, bool(os.environ.get("ACVRAM_VERBOSE_BUILD")), load, flags)
+    so, emp = build / "acvram_marlin.so", empreinte_sources()
+    if MARQUEUR + emp.encode() not in so.read_bytes():
+        raise RuntimeError(f"{so} ne porte pas l'empreinte {emp}")
+    cand = pathlib.Path(dossier) / f"marlin-{emp}"
+    cand.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(so, cand / "acvram_marlin.so")
+    (cand / "empreinte.json").write_text(json.dumps(
+        {"empreinte": emp, "archs": _archs_des_drapeaux(flags), "torch": torch.__version__,
+         "cuda": str(torch.version.cuda), "python": _abi_python()}, indent=1), encoding="utf-8")
+    return str(cand)
 
 
 # --- préparation des poids (transcrit de marlin_utils.py / marlin_utils_fp4.py, Apache-2.0) ---

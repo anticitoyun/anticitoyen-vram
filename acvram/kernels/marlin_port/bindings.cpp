@@ -5,6 +5,16 @@
 // (espace de noms `acvram_marlin`).
 #include <torch/csrc/stable/library.h>
 
+// 7x8b : l'empreinte des sources (-DMARLIN_PORT_EMPREINTE, posée par marlin_port/__init__.py) écrite DANS le binaire.
+// Un .so précompilé (Flatpak : pas de nvcc) n'est chargé que s'il porte l'empreinte des sources installées
+// (`precompile_utilisable`), comme acvram_kernels.so porte ACVRAM_SRC_HASH.
+#define ACVRAM_MARLIN_STR2(x) #x
+#define ACVRAM_MARLIN_STR(x) ACVRAM_MARLIN_STR2(x)
+#ifdef MARLIN_PORT_EMPREINTE
+extern "C" __attribute__((used)) const char acvram_marlin_empreinte[] =
+    "acvram_marlin_empreinte=" ACVRAM_MARLIN_STR(MARLIN_PORT_EMPREINTE);
+#endif
+
 STABLE_TORCH_LIBRARY(acvram_marlin, m) {
   m.def(
       "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
