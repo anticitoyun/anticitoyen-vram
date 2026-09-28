@@ -318,7 +318,7 @@ Where acvram leads: MLA models (GLM-4.7-Flash) in native sm_120 NVFP4, which vLL
 
 ## Status
 
-Version 0.7.10. Everything runs on the 5090: CUDA kernels compiled for `sm_120a` (native FP4) and `sm_86`, CUDA graphs, NVFP4/INT8/INT4 quantisation, HTTP server. Guardrails in place: the card is invisible to working sessions (`CUDA_VISIBLE_DEVICES` empty) and only `outils/carte.sh` lends it, under lock, to one measurement at a time; a watcher logs any access outside the lock; an energy measurement spanning more than one card or under 10 s is invalidated; a model loaded in a degraded regime says so and does not enter a duel.
+Version 0.7.11. Everything runs on the 5090: CUDA kernels compiled for `sm_120a` (native FP4) and `sm_86`, CUDA graphs, NVFP4/INT8/INT4 quantisation, HTTP server. Guardrails in place: the card is invisible to working sessions (`CUDA_VISIBLE_DEVICES` empty) and only `outils/carte.sh` lends it, under lock, to one measurement at a time; a watcher logs any access outside the lock; an energy measurement spanning more than one card or under 10 s is invalidated; a model loaded in a degraded regime says so and does not enter a duel.
 
 Recently: published as a Debian/Ubuntu (.deb), Arch (AUR), Fedora (RPM) and Flatpak package, in addition to source (see "Install"); the public GitHub mirror now carries the full (filtered) history. `ngram` speculation is no longer enabled by default (a repeated-token bug across the plain→speculative transition is fixed; `--speculative ngram` remains available on explicit request). Chunked prefill now holds up to 65,536 tokens of context on large models. Vision models encode their images during preparation, not during decoding. First boot of a fresh package or tree no longer dies on CUDA graph capture.
 
