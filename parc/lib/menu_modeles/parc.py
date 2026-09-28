@@ -28,7 +28,11 @@ def rang_qualite(txt):
     if t in NOTE_MOTS:
         return NOTE_MOTS[t]
     etoiles = txt.count("★") if txt else 0
-    return etoiles or -1
+    # edz (28/09, ordre chef) : une fiche absente vaut « non mesuré » (FICHE_ABSENTE),
+    # pas un mot de NOTE_MOTS ni une étoile — `etoiles or -1` rendait -1, la valeur la
+    # PLUS BASSE : triée en ASCENDANT, une qualité inconnue passait AVANT ★, l'inverse
+    # de « en fin de liste ». Même convention que rang_refus (9, « en queue de tri »).
+    return etoiles or 9
 
 
 def rang_refus(txt):
@@ -81,7 +85,10 @@ class Modele(GObject.Object):
         # Le premier nombre de la cellule, pas ses chiffres concaténés : « 134,9* » (débit
         # mesuré avant le 20/09, marqué d'une étoile) vaut 134,9, jamais 1349.
         m = re.match(r"\s*(\d+(?:[.,]\d+)?)", self.tps or "")
-        return float(m.group(1).replace(",", ".")) if m else -1
+        # edz (28/09) : « non mesuré » (FICHE_ABSENTE) ne matche pas — -1 était la valeur
+        # la PLUS BASSE, donc triée avant tout débit réel en ascendant (l'inverse de « en
+        # fin de liste »). +inf, comme rang_qualite/rang_refus : toujours en queue de tri.
+        return float(m.group(1).replace(",", ".")) if m else float("inf")
 
     @property
     def outils_etat(self):
