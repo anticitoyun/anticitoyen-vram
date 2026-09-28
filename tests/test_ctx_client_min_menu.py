@@ -107,3 +107,27 @@ def test_limite_sous_text_config_multimodal(tmp_path):
     res = _run_a_sec("mon-alias", tsv_dir, model_dir, env_extra={"CTX_CLIENT_MIN": "29096"})
     combined = res.stdout + res.stderr
     assert "limité à 0" not in combined and "ajusté 4096 → 29096" in combined, combined[:400]
+
+
+def test_mort_au_demarrage_cite_la_cause_de_ce_lancement(tmp_path):
+    """Serveur mort : la cause citée est l'erreur de CE lancement — ni l'avertissement Marlin « refusée … gardée »
+    (edz 28/09, gemma 12B bf16), ni une erreur d'un lancement précédent restée dans le journal (ouvert en ajout)."""
+    import socket
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    model_dir = tmp_path / "m"; model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"max_position_embeddings": 32768}))
+    tsv_dir = tmp_path / "TSV"; tsv_dir.mkdir()
+    (tsv_dir / "acvram-chemins.tsv").write_text(f"mon-alias\t{model_dir}\t4096\n")
+    log = tmp_path / "serveur.log"
+    log.write_text("RuntimeError: ancienne cause d'un autre lancement\n")
+    faux = tmp_path / "faux-acvram"
+    faux.write_text('#!/bin/sh\n[ "$1" = --version ] && { echo "acvram 0.0.0-essai"; exit 0; }\n'
+                    'echo "RuntimeError: refus : budget KV insuffisant (vraie cause)"\n'
+                    'echo "[acvram] disposition Marlin refusée : up_proj — pile naturelle gardée"\nexit 1\n')
+    faux.chmod(0o755)
+    env = {**os.environ, "HOME": str(tmp_path), "ACVRAM_PAQUET_BIN": str(faux), "ACVRAM_CARTE_SH": "/inexistant",
+           "ACVRAM_SERVEUR_LOG": str(log), "PARC_PORT_ACVRAM": str(port)}
+    env.pop("ACVRAM_SERVEUR_A_SEC", None)
+    res = subprocess.run([str(_serveur_sh()), "mon-alias"], capture_output=True, text=True, env=env, timeout=60)
+    assert res.returncode == 1 and "mort au démarrage" in res.stderr, res.stdout[-400:] + res.stderr[-400:]
+    assert "vraie cause" in res.stderr and "gardée" not in res.stderr and "ancienne" not in res.stderr, res.stderr[-400:]
