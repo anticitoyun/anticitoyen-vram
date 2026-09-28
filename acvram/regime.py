@@ -369,6 +369,14 @@ VARIABLES: tuple[Variable, ...] = (
              "tours (une image chacune, même appel, au bit 12/12) en vol ; mesuré 27/09 à b = 12 images : mur −5 %, mais TTFT moyen "
              "+9 % contre la 276 g (requêtes admises par paires → préfills plus gros) : scellé non tenu, pas de défaut ; une capture "
              "de graphe attend qu'aucune tour ne soit en vol (VerrouCapture lecteurs/rédacteur)"),
+    Variable("TOUR_GRAPHE", "1", ("acvram.engine.vision", "_TOUR_GRAPHE"), None,
+             "pièce 276 j : graphe CUDA de la tour de vision à forme fixe — capturé à la première image d'une forme "
+             "(pixel_values, image_grid_thw ; chauffe + capture payées par cette requête, ≈ 0,1-0,3 s), rejoué ensuite (mêmes "
+             "noyaux, même ordre : au bit contre l'eager) ; 0 = tour eager (régime 276 g/h) ; Qwen3-VL seulement (annexe = grille), "
+             "Gemma 4 reste eager ; rejeu sérialisé (TOUR_FLUX=2 ne recouvre plus deux tours de même forme)"),
+    Variable("TOUR_GRAPHE_MAX", "8", ("acvram.engine.vision", "_TOUR_GRAPHE_MAX"), None,
+             "pièce 276 j : nombre de formes d'image capturées au plus (une réserve mémoire privée par forme) ; au-delà, "
+             "eager, compté et journalisé"),
     Variable("ADMISSION_FENETRE_MS", "5", None, None,
              "pièce 179 (DÉFAUT 5 depuis 179 b ; 0 = coupé) : fenêtre d'admission du serveur en ms — moteur vide et ≥ 2 "
              "requêtes en file, attendre que la file cesse de grossir avant le pas (préfill groupé d'une rafale) ; une "
