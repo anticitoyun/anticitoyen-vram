@@ -50,6 +50,8 @@ ALIAS_PAR_VERSION = {
     "0.7.11": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
     # 0.7.12 (28/09, 295/296/edz) : garde falaise, vidéo OWUI, menus, même alias.
     "0.7.12": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.13 (29/09, 7x8/iqm) : Marlin empaqueté, outils Claude Code, même alias.
+    "0.7.13": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
 }
 # Formats par famille, identiques pour i8c et S1b (107 bis § 6) : ce qui distingue les deux est dans les experts
 # (calibrés ou non), pas dans les formats.

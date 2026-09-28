@@ -1,5 +1,35 @@
 # Journal des changements
 
+## 0.7.13 (29/09/2026)
+
+### Noyaux Marlin : absents des paquets depuis 0.6.13, rétablis
+
+* **Avertissement aux utilisateurs du .deb et du Flatpak.** Le paquet .deb n'embarquait plus les en-têtes `*.hpp`
+  depuis 0.6.13 : la compilation du port Marlin échouait sans bruit et les modèles MoE tournaient sur le chemin de
+  repli. Le Flatpak n'a jamais eu Marlin. Les débits MoE mesurés depuis un paquet de ces versions ne sont donc pas
+  ceux du dépôt ; les menus et leurs colonnes de débit sont à rejouer après la mise à jour.
+* **7x8 (poste5, poste5-7x8)** : `*.hpp` dans `package-data` ; `facteur_nvfp4` calcule le maximum sans index par
+  masque (le `nonzero` allouait 288 Mio par pile et faisait échouer le chargement de Qwen3-Coder-30B qkvo-i8c depuis
+  l'arbre : A OOM 2/2, B 2/2 et `serve` 200). `acvram-memoire/revue/poste5-7x8-verdict-28-09.md`,
+  `tests/test_marlin_chargement_7x8.py`.
+* **7x8b** : `acvram_marlin.so` précompilé pour le Flatpak, avec un marqueur d'empreinte (source, torch, CUDA,
+  architectures) ; un .so dont l'empreinte diffère n'est jamais chargé. `tests/test_marlin_precompile_7x8b.py`.
+* **7x8c** : le cache JIT de Marlin est indexé par l'empreinte ET les architectures (`ACVRAM_ARCHS`) ; jamais un .so
+  qui ne couvre pas la carte. `tests/test_marlin_cache_archs_7x8c.py`.
+* `acvram doctor` affiche désormais « Marlin charge (…) » ou une alerte « Marlin indisponible » ; `outils/verifier-release.sh`
+  exige la première.
+
+### Outils de Claude Code sur les modèles locaux (paquet parc 0.1.7)
+
+* **sf2 (poste1)** : `/v1/messages` rend les outils au format Anthropic (`tools`, `tool_use`, `tool_result`,
+  `stop_reason: tool_use`), y compris en flux. `acvram-memoire/revue/poste1-sf2-verdict-28-09.md`.
+* **iqm (poste1)** : un message `system` au milieu de la conversation (crochets de Claude Code) est joint au message
+  voisin au lieu de faire tomber le gabarit sans outils ; `tojson` sans échappement ASCII. `claude-modele` choisit le
+  jeu d'outils selon la fenêtre servie : complet à partir de 45 000 jetons, sinon Read, Edit, Bash et Grep sans MCP
+  (invite de 9 764 à 10 300 jetons au lieu d'environ 40 000). Contrôle de bout en bout VRAI : Claude Code appelle
+  Read sur KAT-Coder servi par acvram et rend la valeur lue. `acvram-memoire/revue/poste1-iqm-verdict-29-09.md`,
+  `tests/test_server.py`, `tests/test_claude_modele_contexte.py`.
+
 ## 0.7.12 (28/09/2026)
 
 ### Service

@@ -275,3 +275,5 @@ def test_la_ligne_de_regime_du_defaut_nu_a_sec():
     ligne = out.stdout.strip().splitlines()[-1]
     assert ligne.startswith("[régime] défaut "), ligne
     assert ligne.endswith(fin), f"fin de ligne : {ligne!r} ≠ …{fin!r}"
+# 0.7.13 (29/09, 7x8/7x8b/7x8c, sf2/iqm) : Marlin enfin présent dans le .deb et le Flatpak (aucun défaut ne bouge).
+DEFAUTS_PAR_VERSION["0.7.13"] = DEFAUTS_PAR_VERSION["0.7.12"]

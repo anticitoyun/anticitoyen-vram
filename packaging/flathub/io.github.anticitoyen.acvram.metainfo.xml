@@ -40,6 +40,7 @@
   <supports><control>pointing</control><control>keyboard</control></supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.13" date="2026-09-29"><description><p>Marlin MoE kernels are now shipped in the .deb and the Flatpak (they were missing since 0.6.13), with a fingerprinted precompiled kernel. Claude Code tools work on local models served by acvram.</p></description></release>
     <release version="0.7.12" date="2026-09-28"><description><p>A startup warning when offloading would collapse throughput, with the context that fits without offloading. Menus and Open WebUI video models (Wan 2.2, LTX-2.3) in the companion parc package.</p></description></release>
     <release version="0.7.11" date="2026-09-28"><description><p>Dense models: the MLP prefill is split into slices beyond what fits resident, so Devstral 24B holds 34,816 tokens without offloading (94.5 tokens/s instead of 7.9). New opt-in vision options.</p></description></release>
     <release version="0.7.10" date="2026-09-27"><description><p>Long prompts: 65,536-token context on the 35B, Coder-30B, Fable-27B and 80B models (prefill split into slices beyond what a single pass holds; unchanged output below). Kimi keeps its MCP tools on models serving 64k or more.</p></description></release>
