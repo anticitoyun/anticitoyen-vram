@@ -175,11 +175,18 @@ if [ -x "$CARTE_SH" ]; then
 else
     err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
     setsid nohup "${CMD[@]}" >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
+    srv_pid=$!
 fi
 
 for _ in $(seq 1 120); do
     curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 \
         && { echo "acvram prêt sur 127.0.0.1:$PORT ($alias_nom)"; exit 0; }
+    # mort au démarrage (refus de budget KV, OOM, contexte non tenu) : le dire tout de suite, pas après 240 s
+    # (t5e 27/09 : devstral à 65 536 refusé en quelques secondes, le menu attendait 4 min)
+    if [ -n "${srv_pid:-}" ] && ! kill -0 "$srv_pid" 2>/dev/null; then
+        err "acvram mort au démarrage : $(grep -vE CUDACachingAllocator /tmp/acvram-serveur.log 2>/dev/null | grep -E 'refus|non tenu|Error' | tail -1 | cut -c1-240)"
+        exit 1
+    fi
     sleep 2
 done
 err "acvram n'a pas démarré (voir /tmp/acvram-serveur.log)"

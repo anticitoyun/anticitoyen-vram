@@ -93,5 +93,6 @@
  "Prudence : un modèle local qui reçoit des outils a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Open WebUI n'écoute que sur 127.0.0.1 par défaut : ne l'exposez pas sans authentification.": "Varovaisuus: paikallinen malli, joka saa työkaluja, saa kaikki oikeutesi. Pidä agentti tavallisen käyttäjän alla, rajatussa työtilassa, varmuuskopioiden kanssa, ja lue mitä se ehdottaa ennen kuin hyväksyt <code>rm</code>-, <code>sudo</code>- tai verkkokomennon. Open WebUI kuuntelee oletuksena vain osoitetta 127.0.0.1: älä altista sitä ilman todennusta.",
  "jetons + image": "tokenit + kuva",
  "Réglages → Connexions → OpenAI": "Asetukset → Yhteydet → OpenAI",
- "clé": "avain"
+ "clé": "avain",
+ "rechercher un modèle…": "etsi mallia…"
 }

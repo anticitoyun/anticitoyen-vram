@@ -89,6 +89,10 @@ VARIABLES_LUES = {
     "ACVRAM_KV_CANAL_RANGS",
     "ACVRAM_ARBRE_LIBRE",       # garde d'import (__init__.py) : contournement nommé, arbre ≠ cwd
     "ACVRAM_ARBRE",             # garde d'import (__init__.py) : arbre attendu du bras d'une prise A/B (276 f)
+    "ACVRAM_PILE_RENDUE",       # engine/graphs.py : dut, limite de pile CUDA rendue avant la 1re capture (défaut 1)
+    "ACVRAM_PILE_OCTETS",       # engine/graphs.py : dut, limite de pile visée en octets par fil (défaut 1024)
+    "ACVRAM_TOUR_PREPARATION",  # engine/runner.py : 276 g, tour de vision dans le fil de préparation (défaut 1)
+    "ACVRAM_TOUR_FLUX",         # engine/runner.py : 276 h, flux annexes de la tour de vision (défaut 1, opt-in 2)
     "ACVRAM_DEPAQUETAGE",       # kernels/marlin_port/__init__.py : auto | cuda | triton | torch
     "ACVRAM_GDN_PREFILL_LOT",   # engine/couches.py : lot au préfill GDN
     "ACVRAM_GDN_COEUR_LOT",     # engine/couches.py : 245, cœur GDN du préfill en longueurs variables (opt-in, au bit)
@@ -280,6 +284,9 @@ VARIABLES_LUES = {
     "ACVRAM_SANS_REPLAN",
     "ACVRAM_SEUIL_FUSION",
     "ACVRAM_SPECULATION_LOT_MAX",
+    "ACVRAM_SPEC_REPOS",        # engine/runner.py : 277e, pas de recouvrement après un repli du spéculatif (défaut 2)
+    "ACVRAM_GDN_MORCEAU",       # engine/gdn.py : d19, tranches GDN au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
+    "ACVRAM_MOE_MORCEAU",       # engine/moe.py : d19, tranches MoE au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
     "ACVRAM_SYNC_COUCHES",
     "ACVRAM_TETE_LIEE",
     "ACVRAM_TRACEBACK",

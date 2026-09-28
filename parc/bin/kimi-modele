@@ -101,6 +101,46 @@ if [ -z "$choix" ]; then
   [ -n "$choix" ] || exit 0
 fi
 
+# Alias LOCAUX : kimi démarre sans MCP (t5e 27/09, décision utilisateur). Invite de démarrage mesurée (tokenizer
+# Qwen3) : 58 635 jetons avec les MCP globaux (tokensave + icm : 29 555), 29 107 sans — les moteurs locaux tiennent
+# 25-42 k. kimi n'a pas d'option MCP par session : un KIMI_CODE_HOME dédié, régénéré à chaque lancement (mcp.json vide,
+# AGENTS.md lié, config = copie de celle de l'utilisateur, seul max_context_size de l'alias mis au contexte SERVI).
+# La config de l'utilisateur et ses sessions distantes ne sont pas touchées.
+# d19 (27/09, décision chef) : les MCP sont GARDÉS pour un alias dont le contexte SERVI tient l'invite MCP avec marge
+# (≥ KIMI_MCP_CTX_MIN, 65 536 : invite 58-64 k) — 35B, 30B, 27B depuis le préfill par tranches ; sans MCP en dessous, et
+# quand le moteur ne dit pas son contexte (choix prudent : une invite de 58 k sur 32 k servis rend 400).
+kimi_local() {  # $1 alias  [$2 contexte servi]
+  local d="${PARC_KIMI_LOCAL:-$HOME/.kimi-code-local}" src; src=$(dirname "$CONFIG")
+  mkdir -p "$d" || return 1
+  if [ -n "${2:-}" ] && [ "$2" -ge "${KIMI_MCP_CTX_MIN:-65536}" ] 2>/dev/null && [ -e "$src/mcp.json" ]; then
+    rm -f "$d/mcp.json"; ln -s "$src/mcp.json" "$d/mcp.json"
+    printf '%skimi : MCP gardés (contexte servi %s ≥ %s)%s\n' "$c_d" "$2" "${KIMI_MCP_CTX_MIN:-65536}" "$c_0" >&2
+  else
+    rm -f "$d/mcp.json"; printf '{"mcpServers": {}}\n' > "$d/mcp.json"
+  fi
+  [ -e "$src/AGENTS.md" ] && ln -sfn "$src/AGENTS.md" "$d/AGENTS.md"
+  python3 - "$CONFIG" "$d/config.toml" "$1" "${2:-}" <<'PY' || return 1
+import re, sys
+src, dst, alias, ctx = sys.argv[1:5]
+t = open(src, encoding="utf-8").read()
+if ctx.isdigit():
+    # seul le bloc [models.<alias>] change ; le reste est recopié octet pour octet
+    motif = re.compile(r"(^\[models\." + re.escape(alias) + r"\]\n(?:(?!^\[).*\n)*?)max_context_size = \d+", re.M)
+    t = motif.sub(lambda m: m.group(1) + f"max_context_size = {ctx}", t, count=1)
+open(dst, "w", encoding="utf-8").write(t)
+PY
+  export KIMI_CODE_HOME="$d"
+}
+ctx_servi() {  # $1 url  $2 alias → max_model_len servi (acvram : data[0].acvram ; vLLM : à plat), vide sinon
+  curl -s -m 3 "$1/v1/models" 2>/dev/null | python3 -c '
+import json, sys
+for m in json.load(sys.stdin).get("data", []):
+    v = m.get("max_model_len") or (m.get("acvram") or {}).get("max_model_len")
+    if m.get("id") == sys.argv[1] and str(v or "").isdigit():
+        print(v)' "$2" 2>/dev/null || true
+}
+kimi_local "$choix" || { err "kimi local : préparation de ${PARC_KIMI_LOCAL:-$HOME/.kimi-code-local} impossible"; exit 1; }
+
 # mode Auto dès le démarrage, sauf en mode prompt (-p) où kimi le refuse
 AUTO=(--auto)
 for arg in "$@"; do
@@ -110,8 +150,11 @@ done
 case "$choix" in
   acvram-*)
     # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte)
-    # kimi charge ~65536 jetons de contexte MCP ; le serveur doit adapter CTX en conséquence.
-    CTX_CLIENT_MIN=65536 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    # le plus grand contexte que le moteur tient (clampé par la chauffe) ; si la carte ne peut pas même planifier
+    # 65 536 (budget KV d'un dense, devstral-24B), 34 816 = invite sans MCP (29 107) + 4 096 de réponse, arrondi.
+    CTX_CLIENT_MIN=65536 "$PARC_BIN/acvram-serveur" "$choix" \
+      || CTX_CLIENT_MIN=34816 "$PARC_BIN/acvram-serveur" "$choix" "${KIMI_CTX_REPLI:-34816}" || exit 1
+    kimi_local "$choix" "$(ctx_servi "http://127.0.0.1:${PARC_PORT_ACVRAM:-8090}" "$choix")" || exit 1
     printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
     exec "$KIMI" "${AUTO[@]}" -m "$choix" "$@"
     ;;

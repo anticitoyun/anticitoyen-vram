@@ -93,5 +93,6 @@
  "Prudence : un modèle local qui reçoit des outils a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Open WebUI n'écoute que sur 127.0.0.1 par défaut : ne l'exposez pas sans authentification.": "Thận trọng: mô hình cục bộ được cấp công cụ có mọi quyền của bạn. Giữ tác nhân dưới người dùng thường, không gian làm việc giới hạn, có sao lưu, và đọc đề xuất của nó trước khi chấp nhận lệnh <code>rm</code>, <code>sudo</code> hay gửi qua mạng. Open WebUI mặc định chỉ lắng nghe trên 127.0.0.1: đừng mở ra ngoài khi chưa xác thực.",
  "jetons + image": "token + ảnh",
  "Réglages → Connexions → OpenAI": "Cài đặt → Kết nối → OpenAI",
- "clé": "khóa"
+ "clé": "khóa",
+ "rechercher un modèle…": "tìm kiếm mô hình…"
 }

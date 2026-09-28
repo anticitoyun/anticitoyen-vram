@@ -138,6 +138,12 @@ fi
 
 while read -r pid reste; do
   [ -n "${pid:-}" ] || continue
+  # Pièce 73c (chef, 27/09) : ~/.config/acvram/ est le dossier des crochets
+  # Claude (masque-jetons.py), pas le depot — MOTIF le matchait sur la seule
+  # coincidence litterale « acvram » dans son chemin. Exclu par chemin, pas
+  # par nom de process : un vrai outils/… lance depuis ce dossier resterait
+  # attrape.
+  case "$reste" in *".config/acvram/"*) continue ;; esac
   mien "$pid" || {
     echo "carte 0 : une mesure demarre sans avoir encore alloue, PID $pid — $(echo "$reste" | cut -c1-120)" >&2
     exit 1; }

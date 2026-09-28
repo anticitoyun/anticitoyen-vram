@@ -230,6 +230,14 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 195 (AU DÉFAUT depuis le 25/09, décision déléguée par l utilisateur ; HORS BIT « ± 1 ulp » : ordre des sommes fp32) : linéaires int8 symétriques par canal à 2 ≤ b ≤ 16 servies par `_etroit_canal_kernel` (K entier par programme, géométrie NInfer, table GEOMETRIE_CANAL par forme) — 1 = défaut ; 0 = TÉMOIN NOMMÉ (noyau d avant : vue g128, tranches) ; `BN,BK,W,S` = géométrie imposée ; ligne etroites=…+canal(table|temoin|géométrie) ; mixte b=8 +4,01 % / −3,76 % J, KL ≤ 2 × témoin (revue/poste6-piece195-verdict-25-09.md)"),
     Variable("CAPTURE_MEM_MIN_MIO", "1024", None, None,
              "garde d interblocage de capture (22/09) : mémoire libre minimale (Mio) sous laquelle une capture de graphe est refusée (eager) — une allocation manquante DANS la capture attend sans fin"),
+    Variable("PILE_RENDUE", "1", None, None,
+             "dut (27/09) : 1 = avant la première capture (et sous le seuil de la garde), limite de pile CUDA ramenée à ACVRAM_PILE_OCTETS — rend la mémoire locale que l autotune Triton à froid avait fait réserver (2,7 Gio mesurés) ; 0 = témoin"),
+    Variable("PILE_OCTETS", "1024", None, None,
+             "dut (27/09) : limite de pile (o/fil) visée par ACVRAM_PILE_RENDUE ; le pilote la regrandit au lancement d un noyau qui en a besoin"),
+    Variable("GDN_MORCEAU", "4096", ("acvram.engine.gdn", "_GDN_MORCEAU"), None,
+             "d19 (27/09) : au-delà du tenu d un seul tenant (chauffe), le cœur GDN tourne par tranches de N jetons (multiple de 64), état porté — borne sa mémoire (245 Ko/jeton sur le 35B) ; 1 ulp bf16 aux dimensions réelles, jamais engagé en dessous ; ligne tranches>N ; 0 = jamais (témoin)"),
+    Variable("MOE_MORCEAU", "4096", ("acvram.engine.moe", "_MOE_MORCEAU"), None,
+             "d19 (27/09) : au-delà du tenu d un seul tenant (chauffe), le bloc MoE tourne par tranches de N lignes (tampons bornés) — pas au bit du seul tenant, jamais engagé en dessous ; ligne tranches>N ; 0 = jamais (témoin)"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",
@@ -368,6 +376,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
              "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
              "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),
+    Variable("SPEC_REPOS", "2", ("acvram.engine.runner", "_SPEC_REPOS"), None,
+             "pièce 277e : pas de recouvrement après un repli du spéculatif (proposeur muet) avant de reproposer ; "
+             "0 = reproposer à chaque pas. Seulement sous --speculative ngram|mtp (none par défaut : inerte)"),
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),

@@ -73,6 +73,10 @@ def chemin_moe_atteint(compteurs: list[dict]) -> str:
 # couche par couche — au bit, déquantification partagée par couche. 0 = témoin (la boucle d'avant, telle quelle).
 _PREFILL_TRANCHES = os.environ.get("ACVRAM_PREFILL_TRANCHES", "1") == "1"
 
+# Pièce 277e : pas de recouvrement gardés après un repli du spéculatif sur le pas simple (proposeur muet) avant de
+# revider pour reproposer (`_pas_speculatif`) ; 0 = reproposer à chaque pas. Sans effet sous --speculative none (défaut).
+_SPEC_REPOS = int(os.environ.get("ACVRAM_SPEC_REPOS", "2"))
+
 @dataclass
 class Sequence:
     prompt_ids: list[int]
@@ -754,6 +758,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # porte `pipeline=1|0`.
         self._pipeline_pendiente: Optional[dict] = None
         self.pipeline_actif = os.environ.get("ACVRAM_PIPELINE", "1") not in ("0", "")
+        # Pièce 277e : après un repli du spéculatif sur le pas simple (proposeur muet), rester en recouvrement ce
+        # nombre de pas avant de revider pour reproposer — sinon un proposeur hésitant alterne amorce et vidage et
+        # ne recouvre jamais (`_pas_speculatif`). 0 = reproposer à chaque pas.
+        self.spec_repos_max = _SPEC_REPOS
+        self._spec_repos = 0
         # Levier 2 : rapatriement des ids du pas par tampon hôte épinglé à
         # double parité (`_apres_echantillon`) — DÉFAUT depuis le verdict poste4
         # (22/09 : ids/logprobs au bit 3/3, trou_gpu 165 → 24 µs, ABBA service
@@ -1777,14 +1786,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             t0 = time.perf_counter()
             b_reel = len(decodable)
             if self.speculator is not None and self._garde_spec.eligible(b_reel):
-                if self._pipeline_pendiente is not None:
-                    # pièce 277 : un pas simple est encore en vol — le livrer d'abord ; spéculer au pas suivant, sur
-                    # un état et un `output_ids` de nouveau d'accord (sinon jetons répétés, sortie ≠ décodage simple)
-                    outputs += self._pipeline_vider()
-                else:
-                    n0 = self.stats.decode_tokens
-                    outputs += self._speculative_decode(decodable)
-                    self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
+                outputs += self._pas_speculatif(decodable, b_reel)
             else:
                 outputs += self._plain_decode(decodable)
             t1 = time.perf_counter()

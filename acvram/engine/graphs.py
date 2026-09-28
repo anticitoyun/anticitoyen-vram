@@ -239,6 +239,32 @@ def _avec_tokens(batch: "ForwardBatch", tokens: torch.Tensor) -> "ForwardBatch":
     return b2
 
 
+def _rendre_pile() -> Optional[tuple[int, int]]:
+    """dut (27/09) : ramène la limite de pile CUDA (mémoire locale par fil) au défaut et rend au pilote ce qu il gardait.
+    À froid, l autotune Triton essaie des configurations qui débordent en mémoire locale ; le pilote garde la réserve au
+    MAXIMUM jamais demandé (12 256 o/fil mesurés, × 170 SM × 1 536 fils ≈ 2,7 Gio) : chauffe à 1,6 Gio libres, capture
+    refusée ou confirmation échouée, serveur mort au premier démarrage d une version (worktree ou paquet neuf). Le pilote
+    regrandit la réserve au lancement d un noyau qui en a besoin : aucune sortie ne change (lieu du débordement seul).
+    Rend (avant, après) en octets par fil, ou None (à sec, témoin ACVRAM_PILE_RENDUE=0, pilote muet)."""
+    if os.environ.get("ACVRAM_PILE_RENDUE", "1") == "0" or not torch.cuda.is_available():
+        return None
+    import ctypes
+    try:
+        cu = ctypes.CDLL("libcuda.so.1")
+        pile = ctypes.c_size_t(0)
+        if cu.cuCtxGetLimit(ctypes.byref(pile), 0) != 0:           # 0 = CU_LIMIT_STACK_SIZE
+            return None
+        cible = int(os.environ.get("ACVRAM_PILE_OCTETS", "1024"))
+        if pile.value <= cible:
+            return (pile.value, pile.value)
+        torch.cuda.synchronize()
+        if cu.cuCtxSetLimit(0, ctypes.c_size_t(cible)) != 0:
+            return None
+        return (pile.value, cible)
+    except Exception:                                               # noqa: BLE001
+        return None
+
+
 class VerrouCapture:
     """276 g/h : une capture de graphe (mode global) et un noyau lancé d'un AUTRE fil s'invalident mutuellement. 276 g :
     un seul verrou, donc une seule tour de vision en vol — les 12 tours d'une rafale restaient sérielles (mur non tenu).
@@ -606,6 +632,19 @@ class GraphRunner:
         if getattr(self, "abandon_capture", None):
             return self.abandon_capture
         photo = self._photo_memoire()
+        # Le pilote ne voit pas le cache que PyTorch garde sans l utiliser (après un préfill long : activations
+        # rendues à l allocateur, pas au pilote). Sous le seuil, on le rend avant de juger — hors capture, donc
+        # sans risque d interblocage. Sans cela (t5e 27/09) : 614 Mio « libres » à la confirmation de chauffe,
+        # capture refusée, trois baisses de contexte, service refusé sur les 35B ; et repli eager au 1er
+        # serveur à froid (dut). Ne change aucune sortie : seules les réserves de l allocateur bougent.
+        if (photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE
+                and photo["reserve"] > photo["alloue"]):
+            torch.cuda.empty_cache()
+            photo = self._photo_memoire()
+        if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
+            pile = _rendre_pile()                                    # dut : autotune d une forme nouvelle en service
+            if pile is not None and pile[0] > pile[1]:
+                photo = self._photo_memoire()
         if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
             return (f"mémoire libre {photo['libre'] / 2 ** 20:.0f} Mio < "
                     f"{self.MEM_MIN_CAPTURE / 2 ** 20:.0f} Mio : capture refusée (interblocage possible)")
@@ -639,6 +678,16 @@ class GraphRunner:
             return
         self.memoire_avant_capture = photo
         print(f"[graphe] mémoire avant capture : {self._ligne_memoire(photo)}", flush=True)
+        # dut (27/09) : la chauffe a fini l autotune ; la mémoire locale qu il a fait réserver est rendue AVANT de capturer.
+        pile = _rendre_pile()
+        if pile is not None and pile[0] > pile[1]:
+            apres = self._photo_memoire()
+            print(f"[graphe] pile locale rendue : {pile[0]} → {pile[1]} o/fil ; hors allocateur "
+                  f"{self._hors_allocateur(photo):.2f} → {self._hors_allocateur(apres):.2f} Gio", flush=True)
+            self.memoire_avant_capture = apres
+
+    def _hors_allocateur(self, photo: dict) -> float:
+        return (photo["total"] - photo["libre"] - photo["reserve"]) / 2 ** 30
 
     def _apres_echec_capture(self) -> None:
         """Même photo juste après un échec de capture, AVANT `empty_cache` :
