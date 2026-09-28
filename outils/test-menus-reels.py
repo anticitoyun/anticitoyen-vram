@@ -34,6 +34,9 @@ from acvram_parc import charger  # noqa: E402
 ETAT = Path(os.environ.get("TMR_ETAT", Path.home() / ".cache" / "acvram" / "menus-reels"))
 RESULTATS = Path(os.environ.get("TMR_RESULTATS", Path.home() / "TSV" / "menus-reels.tsv"))
 PAUSE = ETAT / "pause"
+# journal du serveur (acvram-serveur, en ajout) : sa part de CE lancement est copiée dans le journal d alias quand
+# le préchargement échoue — le 28/09 la seule cause lisible était un avertissement, et /tmp s est vidé au redémarrage
+LOG_SERVEUR = Path(os.environ.get("ACVRAM_SERVEUR_LOG", "/tmp/acvram-serveur.log"))
 QUESTION = "Réponds en un seul mot : quelle est la capitale de la France ?"
 # rc 0 et réponse non vide ne jugent rien : le 28/09, GLM-4.7-Flash rendait « ``| » en boucle (kimi rc 0 compté OK) et
 # claude enchaînait les suites jusqu'au « Prompt is too long ». La réponse doit contenir ATTENDU (casse ignorée) ;
@@ -211,6 +214,7 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                 return panne("préchargement", lz)
             argv, env, attendu = lz
             t0 = time.monotonic()
+            debut = LOG_SERVEUR.stat().st_size if LOG_SERVEUR.exists() else 0
             try:
                 r = subprocess.run(argv, env={**os.environ, "ACVRAM_ATTENTE": str(a.attente), **env},
                                    capture_output=True, text=True, timeout=a.attente + 600, stdin=subprocess.DEVNULL)
@@ -221,6 +225,11 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                 f.write(f"--- lanceur rc={r.returncode}\n{r.stdout[-6000:]}\n{r.stderr[-6000:]}\n")
             pid = pid_ecoute(port)
             if r.returncode != 0:
+                if LOG_SERVEUR.exists():
+                    with LOG_SERVEUR.open("rb") as f:
+                        f.seek(debut); neuf = f.read().decode(errors="replace").splitlines()[-60:]
+                    with journal.open("a", encoding="utf-8") as f:
+                        f.write(f"--- {LOG_SERVEUR} (ce lancement, 60 dernières lignes)\n" + "\n".join(neuf) + "\n")
                 return panne("préchargement", f"rc {r.returncode} : {queue(r.stderr) or queue(r.stdout)}")
             try:
                 servi = get_json(f"http://127.0.0.1:{port}/v1/models", cle)["data"][0]["id"]

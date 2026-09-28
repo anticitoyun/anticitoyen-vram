@@ -47,7 +47,7 @@ def parc(tmp_path):
     (tmp_path / "serveur.py").write_text(SERVEUR)
     # acvram-serveur factice : « acvram-panne » échoue ; « acvram-autre » sert un autre id ; sinon sert l'alias
     (b / "acvram-serveur").write_text(f'''#!/bin/sh
-[ "$1" = acvram-panne ] && {{ echo "OOM simulé au chargement" >&2; exit 1; }}
+[ "$1" = acvram-panne ] && {{ echo "RuntimeError: cause au journal serveur" >> "$ACVRAM_SERVEUR_LOG"; echo "OOM simulé au chargement" >&2; exit 1; }}
 id="$1"; [ "$1" = acvram-autre ] && id=un-autre-modele
 setsid {sys.executable} {tmp_path}/serveur.py {port} "$id" >/dev/null 2>&1 < /dev/null &
 for i in $(seq 1 50); do {sys.executable} -c "import socket,sys; s=socket.socket(); sys.exit(s.connect_ex(('127.0.0.1',{port})))" && exit 0; sleep 0.1; done
@@ -63,7 +63,8 @@ exit 1
     cfg.write_text(f'[chemins]\nkimi_dir = "{kimi}"\ntsv_dir = "{tsv}"\nsecrets = "{tmp_path}/secrets.env"\nbin = "{b}"\n\n'
                    f"[moteurs.acvram]\npresent = true\nport = {port}\n")
     env = {**os.environ, "ACVRAM_PARC_CONFIG": str(cfg), "TMR_ETAT": str(tmp_path / "etat"),
-           "TMR_RESULTATS": str(tsv / "menus-reels.tsv")}
+           "TMR_RESULTATS": str(tsv / "menus-reels.tsv"),
+           "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log")}
     yield {"env": env, "port": port, "tsv": tsv / "menus-reels.tsv", "tmp": tmp_path}
     # un test rouge ne laisse pas de faux serveur derrière lui (orphelins du 28/09 : arrêt sauté, port lu à None)
     r = subprocess.run(["ss", "-tlnpH"], capture_output=True, text=True)
@@ -96,6 +97,7 @@ def test_une_ligne_par_alias_cause_de_chaque_panne_et_arret(parc):
     # colonnes : alias date moteur verdict etape cause prechargement_s models completion kimi_rc claude_rc arret detail
     assert l["acvram-bon"][3] == "OK" and l["acvram-bon"][7:11] == ["ok", "ok", "0", "0"] and l["acvram-bon"][11] == "ok"
     assert l["acvram-panne"][3:5] == ["PANNE", "préchargement"] and "OOM simulé" in l["acvram-panne"][5]
+    assert "cause au journal serveur" in (parc["tmp"] / "etat" / "journaux" / "acvram-panne.log").read_text()
     assert l["acvram-autre"][3:5] == ["PANNE", "/v1/models"] and "un-autre-modele" in l["acvram-autre"][5]
     assert l["acvram-muet"][3:5] == ["PANNE", "claude"] and "vide" in l["acvram-muet"][5] and l["acvram-muet"][9] == "0"  # kimi joué quand même
     assert l["acvram-degenere"][3:5] == ["PANNE", "kimi"] and "sans « Paris »" in l["acvram-degenere"][5], l["acvram-degenere"]
