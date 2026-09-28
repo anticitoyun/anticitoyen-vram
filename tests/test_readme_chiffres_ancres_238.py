@@ -117,6 +117,25 @@ def _sans_cibles(texte: str) -> str:
     return texte
 
 
+def _garder_versions(texte: str) -> frozenset:
+    """295 (poste3, 28/09) : un numéro de version à plusieurs groupes point-séparés
+    (« 0.7.10 ») peut se faire manger PARTIELLEMENT par `_DATE` dans une traduction —
+    seule sa QUEUE (« 7.10 », lue jour.mois puisque 10 ≤ 12) ressemble à une date,
+    jamais le nombre ENTIER (aucun jour ne vaut « 0 »). Le garde-fou de la 249 ne
+    protégeait que le token normalisé ENTIER (« 0710 ») ; étendu ici à chaque
+    bigramme point-séparé ADJACENT du nombre source (« 0.7.10 » protège aussi « 710 »,
+    jamais un jour/mois qui n'est la queue d'aucun nombre du FR — repéré en trouvant
+    `README.md` réel en défaut sur la version 0.7.10, `sm_120a` et « 6 752 tests »
+    intacts par ailleurs, seule « 0.7.10 » perdant son « 7.10 » à la traduction)."""
+    sans_code = re.sub(r"```.*?```", "", _sans_cibles(_sans_dates(_sans_oku(texte), None)), flags=re.S)
+    out = set()
+    for m in _NOMBRE.finditer(sans_code):
+        groupes = re.split(r"[.,]", m.group(0))
+        for i in range(len(groupes) - 1):
+            out.add(_normalise_nombre(groupes[i] + "." + groupes[i + 1]))
+    return frozenset(out)
+
+
 def _nombres(texte: str, garder: frozenset | None = None) -> list[str]:
     # hors blocs de code (une sortie de commande n'est pas de la prose ; déjà vérifiée AU BIT par
     # test_readme_traductions.py:_blocs_de_code — la revérifier ici ferait doublon, pas un défaut).
@@ -163,7 +182,9 @@ def test_les_chiffres_sont_recopies_a_l_identique():
     src_nombres = _nombres(src)
     assert len(src_nombres) >= 30, "gabarit du test obsolète : moins de 30 chiffres dans README.md"
     src_compte = Counter(src_nombres)
-    garder = frozenset(src_nombres)          # 249 : « 16.02 » n'est une date que si le FR n'a pas 16,02
+    # 249 : « 16.02 » n'est une date que si le FR n'a pas 16,02 ; 295 : un numéro de
+    # version « 0.7.10 » protège aussi sa queue « 710 » (voir _garder_versions).
+    garder = frozenset(src_nombres) | _garder_versions(src)
     for code in LANGUES - {"en"}:
         # `docs/README.en.md` écrit ses décimales au point (« 16.02 ») ET certaines de ses dates
         # n'existent qu'avec année (ISO, jamais de DD.MM nu) — mais le FR écrit AUSSI des dates nues
@@ -231,6 +252,25 @@ def test_le_test_sait_dire_faux(tmp_path):
         "l'altération n'a pas changé le multiset de chiffres — gabarit du test à revoir")
 
 
+def test_une_version_a_trois_groupes_ne_se_fait_plus_manger_par_une_date():
+    """295 (poste3, 28/09) : `README.md` réel a trouvé ce bogue en défaut — la version
+    « 0.7.10 » perdait sa queue « 7.10 » (lue jour=7/mois=10, 10 ≤ 12) dans toute
+    traduction utilisant `_DATE` (le FR y échappe : `_DATE_FR` exige un « / »). Sans
+    `_garder_versions`, « Version 0.7.10. » devient « Version 0.. » après `_sans_dates` —
+    reproduit ici, isolé de tout fichier réel, avec la même moitié de phrase."""
+    src_frag = "Version 0.7.10. Tout tourne sur la 5090"
+    garder_nu = frozenset(_nombres(src_frag))
+    garder_etendu = garder_nu | _garder_versions(src_frag)
+    assert "710" not in garder_nu, "gabarit du test obsolète : 710 déjà protégé sans l'extension"
+    assert "710" in garder_etendu
+    mange = _sans_dates(src_frag, garder_nu)
+    protege = _sans_dates(src_frag, garder_etendu)
+    assert "0.7.10" not in mange, "gabarit du test obsolète : le bogue ne se reproduit plus sans l'extension"
+    assert "0.7.10" in protege, "la version à trois groupes reste mangée malgré l'extension"
+    # un vrai jour.mois voisin (22.10, pas une queue d'un nombre du FR) reste vu comme une date
+    assert "22.10" not in _sans_dates("le 22.10, réunion", garder_etendu)
+
+
 # ---- 249 : les dates aussi, et les témoins de l'élargissement ----------------------------------------------
 
 def _dates_jour_mois(texte: str, garder: frozenset | None) -> Counter:
@@ -258,7 +298,7 @@ def test_les_dates_sont_les_memes():
     des chiffres (ci-dessus) ne doit pas les soustraire à tout contrôle. Comparées en (jour, mois),
     toutes langues, le FR comme référence."""
     src = README.read_text(encoding="utf-8")
-    garder = frozenset(_nombres(src))
+    garder = frozenset(_nombres(src)) | _garder_versions(src)
     src_dates = _dates_jour_mois(src, None)
     assert len(src_dates) >= 3, "gabarit du test obsolète : moins de 3 dates distinctes dans README.md"
     for code in LANGUES:
@@ -276,7 +316,7 @@ def test_l_elargissement_249_sait_dire_faux():
     """REGLES n° 5 : l'élargissement de la 249 (dates locales, nombres du FR gardés, 億 ÷ 10) doit rester
     un contrôle — chaque témoin ci-dessous DOIT casser, sinon c'est un relâchement."""
     src = README.read_text(encoding="utf-8")
-    garder = frozenset(_nombres(src))
+    garder = frozenset(_nombres(src)) | _garder_versions(src)
     src_compte = Counter(_nombres(src))
     ja = (DOCS / "README.ja.md").read_text(encoding="utf-8")
     zh = (DOCS / "README.zh.md").read_text(encoding="utf-8")

@@ -161,14 +161,19 @@ def disques_montes() -> list[Path]:
 
 def lire_ctx_gguf(chemin: Path) -> int | None:
     """Lit <arch>.context_length dans l'en-tête GGUF (v2/v3), sans dépendance."""
+    return entete_gguf(chemin)[1]
+
+
+def entete_gguf(chemin: Path) -> tuple[str | None, int | None]:
+    """(general.architecture, <arch>.context_length) de l'en-tête GGUF (v2/v3) ; (None, None) si illisible."""
     T = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
     try:
         with open(chemin, "rb") as f:
             if f.read(4) != b"GGUF":
-                return None
+                return None, None
             version, = struct.unpack("<I", f.read(4))
             if version < 2:
-                return None
+                return None, None
             n_t, n_kv = struct.unpack("<QQ", f.read(16))
 
             def lire(t):
@@ -186,10 +191,46 @@ def lire_ctx_gguf(chemin: Path) -> int | None:
                 if k.endswith(".context_length"):
                     ctx = int(v)
                 if arch and ctx:
-                    return ctx
-            return ctx
+                    return arch, ctx
+            return arch, ctx
     except Exception:
-        return None
+        return None, None
+
+
+# t5e-b (28/09) : ce que le balayage NE met PAS au menu de chat, une famille = un motif, avec sa raison. parc 0.1.4 y
+# ajoutait bge-m3, bge-reranker, le dossier ChatterUI (modèles du téléphone), models_gguf_tmp et un dossier « INVALIDE ».
+ENCODEURS_GGUF = {"bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "jina-bert-v3", "xlm-roberta", "modern-bert",
+                  "neo-bert", "eurobert", "t5encoder"}
+HORS_CHAT = (
+    (re.compile(r"(^|[-_.])(bge|embed(ding)?s?|rerank(er)?)([-_.]|$)", re.I), "plongement ou reranker (nom)"),
+    (re.compile(r"invalide", re.I), "marqué INVALIDE"),
+    (re.compile(r"(^|[-_])(tmp|temp)$", re.I), "zone de transit (tmp)"),
+)
+_ECLAT = re.compile(r"-\d{5}-of-\d{5}$", re.I)
+ECARTES: dict[str, str] = {}
+
+
+def hors_chat(d: Path) -> str | None:
+    """Raison d'écarter ``d`` du menu de chat, sinon None ; le balayage ne descend pas dans un dossier écarté."""
+    nom = d.stem if d.is_file() else d.name
+    for motif, raison in HORS_CHAT:
+        if motif.search(nom):
+            return raison
+    ggufs = []
+    if d.is_file() and d.suffix.lower() == ".gguf":
+        ggufs = [d]
+    elif d.is_dir() and os.access(d, os.R_OK):
+        try:
+            ggufs = sorted(p for p in d.iterdir() if p.suffix.lower() == ".gguf" and "mmproj" not in p.name.lower())
+        except OSError:
+            ggufs = []
+        if not (d / "config.json").exists() and len({_ECLAT.sub("", p.stem) for p in ggufs}) >= 2:
+            return "collection de plusieurs modèles (dossier d'application)"
+    if ggufs:
+        arch = entete_gguf(ggufs[0])[0]
+        if arch in ENCODEURS_GGUF:
+            return f"encodeur {arch} (plongement ou reranker)"
+    return None
 
 
 def classer(d: Path) -> tuple[str, str, int | None] | None:
@@ -230,6 +271,10 @@ def balayer(racine: Path, profondeur: int, budget: float) -> tuple[list[tuple[Pa
         if time.monotonic() - t0 > budget:
             reste += 1 + len(pile)
             break
+        r = hors_chat(d) if d != racine else None
+        if r:
+            ECARTES[str(d)] = r
+            continue
         c = classer(d)
         if c:
             trouves.append((d, *c))
@@ -244,6 +289,10 @@ def balayer(racine: Path, profondeur: int, budget: float) -> tuple[list[tuple[Pa
             if p.is_dir():
                 pile.append((p, prof + 1))
             elif p.suffix.lower() == ".gguf" and prof < profondeur:
+                r = hors_chat(p)
+                if r:
+                    ECARTES[str(p)] = r
+                    continue
                 c = classer(p)
                 if c:
                     trouves.append((p, *c))
@@ -278,34 +327,42 @@ def ecrire_si_change(p: Path, texte: str) -> bool:
     return True
 
 
+def _cle_toml(alias: str) -> str:
+    """Clé nue si TOML l'admet, sinon entre guillemets : « acvram-glm-4.7-flash » non quoté devenait la table
+    imbriquée models.acvram-glm-4 → 7-flash… (alias tronqué au menu, t5e-b 28/09)."""
+    return alias if re.fullmatch(r"[A-Za-z0-9_-]+", alias) else json.dumps(alias)
+
+
 def fusionner_config_kimi(cfg: Path, moteurs: dict[str, dict], modeles: dict[str, tuple[str, str, int]], routeur: int | None) -> bool:
-    """Ajoute/remplace les blocs [models.<alias>] gérés et [providers.<moteur>] ; le reste du fichier est intact."""
+    """FUSION par ajout seul (t5e-b, 28/09 : la version « remplace les blocs gérés » a réécrit le config.toml de
+    l'utilisateur, 285 → 150 alias, contextes réglés remis au maximum du modèle). Le texte existant est gardé À
+    L'OCTET ; on ajoute à la fin les [providers.<moteur>] absents et les [models.<alias>] de ``modeles`` absents.
+    Aucun bloc existant n'est retiré ni modifié ; un second passage n'écrit rien."""
+    import tomllib
     texte = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
-    blocs: list[tuple[str, str]] = []  # (titre|'', contenu)
-    titre, cour = "", []
-    for l in texte.splitlines(keepends=True):
-        m = re.match(r"^\[([^\]]+)\]\s*$", l)
-        if m:
-            blocs.append((titre, "".join(cour))); titre, cour = m.group(1), [l]
-        else:
-            cour.append(l)
-    blocs.append((titre, "".join(cour)))
-    geres = {f"models.{a}" for a in modeles} | {f"providers.{k}" for k in moteurs}
-    anciens_geres = {t for t, _ in blocs if t.startswith("models.") and t.split(".", 1)[1].split("-")[0] in MOTEURS_CONNUS}
-    garde = [(t, c) for t, c in blocs if t not in geres and t not in anciens_geres]
-    sortie = "".join(c for _, c in garde).rstrip("\n") + "\n\n"
+    try:
+        existant = tomllib.loads(texte)
+    except tomllib.TOMLDecodeError as e:
+        dire(f"{cfg} : TOML illisible ({e}) — rien n'y est écrit ; à corriger à la main")
+        return False
+    fournisseurs, alias = existant.get("providers", {}), existant.get("models", {})
+    ajout = ""
     for k in sorted(moteurs, key=lambda x: ORDRE_MOTEUR.get(x, 99)):
         m = moteurs[k]
         base = f"http://127.0.0.1:{routeur}/{k}/v1" if routeur else f"http://127.0.0.1:{m['port']}/v1"
-        # api_key : conservée si le bloc existait
-        ancien = next((c for t, c in blocs if t == f"providers.{k}"), "")
-        mk = re.search(r'^api_key\s*=\s*"([^"]*)"', ancien, re.M)
-        cle = mk.group(1) if mk else m.get("cle_defaut", "")
-        sortie += f'[providers.{k}]\ntype = "openai"\nbase_url = "{base}"\napi_key = "{cle}"\n\n'
+        if k in fournisseurs:
+            if fournisseurs[k].get("base_url") != base:
+                dire(f"[providers.{k}] : base_url {fournisseurs[k].get('base_url')} gardée (détecté : {base}) — à changer à la main si voulu")
+            continue
+        ajout += f'[providers.{k}]\ntype = "openai"\nbase_url = "{base}"\napi_key = "{m.get("cle_defaut", "")}"\n\n'
     for a in sorted(modeles):
+        if a in alias:
+            continue
         moteur, modele, ctx = modeles[a]
-        sortie += f'[models.{a}]\nprovider = "{moteur}"\nmodel = "{modele}"\nmax_context_size = {ctx}\n\n'
-    return ecrire_si_change(cfg, sortie.rstrip("\n") + "\n")
+        ajout += f'[models.{_cle_toml(a)}]\nprovider = "{moteur}"\nmodel = "{modele}"\nmax_context_size = {ctx}\n\n'
+    if not ajout:
+        return False
+    return ecrire_si_change(cfg, (texte.rstrip("\n") + "\n\n" if texte.strip() else "") + ajout.rstrip("\n") + "\n")
 
 
 # ─── installation ───────────────────────────────────────────────────────────
@@ -412,6 +469,8 @@ def main() -> int:
             chemins_alias[al] = chemin
             par_classe[classe] = par_classe.get(classe, 0) + 1
     dire(f"racines : {len(racines)} — " + ", ".join(str(r) for r in racines))
+    if ECARTES:
+        dire(f"écartés du menu de chat : {len(ECARTES)} — " + " ; ".join(f"{Path(k).name} ({v})" for k, v in sorted(ECARTES.items())))
     dire("modèles : " + (", ".join(f"{k} {v}" for k, v in sorted(par_classe.items())) or "aucun"))
     if tronque_total and a.auto:
         dire(f"REFUS --auto : {tronque_total} dossier(s) non balayé(s) ; ajoute la racine à la main (--racine) ou relance sans --auto")
@@ -439,26 +498,59 @@ def main() -> int:
                                         g_.write("\t".join(c + [f"mesuré sur {a.importer.stem}"]) + "\n")
     changes = []
     if not a.verifier:
+        # t5e-b (28/09) : AJOUT SEUL. Une ligne existante reste à l'octet (colonnes au-delà de la 2e comprises : gabarit
+        # jinja) ; un chemin déjà présent dans N'IMPORTE quel TSV, sous n'importe quel nom, n'est pas réajouté (la version
+        # précédente ajoutait 109 doublons sous les noms `alias_de` et remettait le contexte réglé au maximum du modèle).
+        connus = {c[0].rstrip("/") for n in ("gguf", "vllm", "acvram") for c in lire_tsv(P.tsv(n)).values() if c}
+        nouveaux: dict[str, tuple[str, str, int]] = {}
         for classe, nom_tsv in (("llamacpp", "gguf"), ("vllm", "vllm"), ("acvram", "acvram")):
-            anciens = lire_tsv(P.tsv(nom_tsv))
-            lignes = {al: [str(chemins_alias[al]), str(modeles[al][2])] for al in modeles if modeles[al][0] == classe or (classe == "llamacpp" and modeles[al][0] == "rapide")}
-            for al, c in anciens.items():
-                if al not in lignes:
-                    lignes[al] = c[:2] if Path(c[0]).exists() else [c[0], c[1] if len(c) > 1 else "32768", "ABSENT"]
-                    if len(lignes[al]) == 3:
-                        dire(f"{al} : ABSENT ({c[0]}) — conservé, à retirer à la main")
-            texte = "".join(f"{al}\t" + "\t".join(lignes[al]) + "\n" for al in sorted(lignes))
-            if ecrire_si_change(P.tsv(nom_tsv), texte):
-                changes.append(P.tsv(nom_tsv).name)
-        notes = lire_tsv(P.tsv("notes"))
-        entete = [l for l in P.tsv("notes").read_text(encoding="utf-8").splitlines() if l.startswith("#")] if P.tsv("notes").exists() else []
-        for al in modeles:
-            notes.setdefault(al, list(FICHE_ABSENTE))
-        texte = "".join(l + "\n" for l in entete) + "".join(f"{al}\t" + "\t".join(notes[al]) + "\n" for al in sorted(notes))
-        if ecrire_si_change(P.tsv("notes"), texte):
+            p_tsv = P.tsv(nom_tsv)
+            texte0 = p_tsv.read_text(encoding="utf-8") if p_tsv.exists() else ""
+            anciens = lire_tsv(p_tsv)
+            sortie = []
+            for l in texte0.splitlines():
+                c = l.split("\t")
+                if l and not l.startswith("#") and len(c) == 3 and not Path(c[1]).exists():
+                    l += "\tABSENT"                                  # alias à deux colonnes disparu : marqué, jamais retiré
+                    dire(f"{c[0]} : ABSENT ({c[1]}) — conservé, à retirer à la main")
+                elif l and not l.startswith("#") and len(c) > 3 and not Path(c[1]).exists() and "ABSENT" not in c:
+                    dire(f"{c[0]} : ABSENT ({c[1]}) — ligne gardée telle quelle")
+                sortie.append(l)
+            for al in sorted(modeles):
+                if not (modeles[al][0] == classe or (classe == "llamacpp" and modeles[al][0] == "rapide")):
+                    continue
+                ch = str(chemins_alias[al])
+                if ch.rstrip("/") in connus:
+                    continue
+                nom, k = al, 2
+                while nom in anciens or nom in nouveaux:
+                    nom, k = f"{al}-{k}", k + 1
+                sortie.append(f"{nom}\t{ch}\t{modeles[al][2]}")
+                connus.add(ch.rstrip("/")); nouveaux[nom] = modeles[al]; chemins_alias[nom] = chemins_alias[al]
+            texte = "".join(l + "\n" for l in sortie)
+            if (texte != texte0 or not p_tsv.exists()) and ecrire_si_change(p_tsv, texte):
+                changes.append(p_tsv.name)
+
+        def ajouter(p_tsv: Path, lignes: dict[str, list[str]]) -> bool:
+            """Ajout en fin de fichier des seules clés absentes — jamais de réécriture (notes-modeles est écrit par les
+            campagnes de mesure pendant qu'on tourne)."""
+            presentes = lire_tsv(p_tsv)
+            neuves = [f"{al}\t" + "\t".join(v) + "\n" for al, v in sorted(lignes.items()) if al not in presentes]
+            if not neuves:
+                return False
+            if p_tsv.exists():
+                shutil.copy2(p_tsv, p_tsv.with_name(p_tsv.name + f".avant-{DATE}"))
+                fin = p_tsv.read_bytes()[-1:]
+            else:
+                p_tsv.parent.mkdir(parents=True, exist_ok=True); fin = b"\n"
+            with open(p_tsv, "a", encoding="utf-8") as f:
+                f.write(("" if fin in (b"\n", b"") else "\n") + "".join(neuves))
+            return True
+        if ajouter(P.tsv("notes"), {al: list(FICHE_ABSENTE) for al in nouveaux}):
             changes.append("notes-modeles.tsv")
-        vision = lire_tsv(P.tsv("vision"))
-        for al, ch in chemins_alias.items():
+        vision = {}
+        for al in nouveaux:
+            ch = chemins_alias[al]
             cj = ch / "config.json" if ch.is_dir() else None
             if cj and cj.exists():
                 try:
@@ -466,11 +558,10 @@ def main() -> int:
                     vision[al] = ["vision" if (mt in TYPES_VL and "vision_config" in cfg) else "texte-seul", f"config.json:{mt}"]
                 except Exception:
                     pass
-        texte = "".join(f"{al}\t" + "\t".join(vision[al]) + "\n" for al in sorted(vision))
-        if ecrire_si_change(P.tsv("vision"), texte):
+        if ajouter(P.tsv("vision"), vision):
             changes.append("vision-modeles.tsv")
         routeur = P.extras.get("routeur_port")
-        if fusionner_config_kimi(P.config_kimi, moteurs, modeles, int(routeur) if routeur else None):
+        if fusionner_config_kimi(P.config_kimi, moteurs, nouveaux, int(routeur) if routeur else None):
             changes.append("config.toml")
         # secrets : clés aléatoires si absentes
         if not P.secrets.exists():

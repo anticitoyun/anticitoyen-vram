@@ -15,10 +15,23 @@ une mini-tour factice, sans ``transformers``.
 
 from __future__ import annotations
 
+import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import torch
+
+# 276 j : graphe CUDA de la tour à forme fixe — la tour eager (≈ 8,7 ms/image à 448×448, bornée par ses ~300 lancements)
+# se capture à la première image d'une forme (pixel_values, image_grid_thw) et se rejoue ensuite : mêmes noyaux, même ordre,
+# au bit par construction (12/12 ×2, jetons 5/5, 28/09). OPT-IN (décision chef 28/09 06 h 5x) : le lot gagne 10 % de mur mais le
+# TTFT p50 perd 10-15 % par regroupement des préfills (pièce 276 j § 3) — défaut quand la 276 k l'aura neutralisé. 0 = eager (276 g/h).
+_TOUR_GRAPHE = int(os.environ.get("ACVRAM_TOUR_GRAPHE", "0") or "0")
+# Formes capturées au plus (une réserve mémoire privée par forme) ; au-delà, eager — jamais une capture sans fin.
+_TOUR_GRAPHE_MAX = max(0, int(os.environ.get("ACVRAM_TOUR_GRAPHE_MAX", "8") or "8"))
+# Une annexe (image_grid_thw : 3 valeurs) entre dans la clé du graphe par ses VALEURS ; au-delà de ce nombre d'éléments
+# (Gemma 4 : image_position_ids, 2 520 valeurs) la tour reste eager — la clé ne porte jamais un tenseur entier.
+_ANNEXE_CLE_MAX = 16
 
 PREFIXES_TOUR = ("model.vision_tower.", "model.embed_vision.",
                  "model.multi_modal_projector.", "model.vision_embedder.",   # vision_embedder : gemma4_unified
@@ -96,6 +109,70 @@ def verifier_plages(images: list[ImageRequete], n_prompt: int) -> None:
         fin_prec = im.fin
 
 
+@dataclass
+class SortieTour:
+    """276 j : sortie d'un rejeu de graphe, même forme que celle de transformers (`traits_projetes` /
+    `niveaux_deepstack` la lisent sans la distinguer de l'eager) : ``pooler_output`` = tuple par image des traits
+    projetés, ``deepstack_features`` = liste des k niveaux (vide sans deepstack)."""
+    pooler_output: tuple
+    deepstack_features: list
+
+
+@dataclass
+class GrapheTour:
+    """276 j : un graphe CUDA capturé pour UNE forme — entrée statique (copiée avant le rejeu), sorties statiques
+    (clonées après)."""
+    graphe: Any
+    entree: torch.Tensor
+    pooler: tuple
+    deepstack: list
+    # Les annexes précalculées (indices d'interpolation, position_ids…) sont des ENTRÉES du graphe : il lit leurs adresses
+    # à chaque rejeu. Libérées, leur mémoire est réattribuée et le gather lit n'importe quoi (assertion CUDA « index out of
+    # bounds » au 2e rejeu en service, 28/09 06 h 36 — l'identité en process l'avait manqué par chance : rien n'avait réalloué).
+    annexes: dict = field(default_factory=dict)
+
+
+def sorties_statiques(out: Any) -> tuple[tuple, list]:
+    """Les tenseurs de sortie TELS QUELS (pas de `cat` : ce sont les tampons statiques du graphe) : pooler par image
+    (tuple, ou le tenseur seul), niveaux deepstack (liste, vide sans)."""
+    po = getattr(out, "pooler_output", None)
+    if po is None:
+        po = traits_projetes(out)
+    pooler = tuple(po) if isinstance(po, (tuple, list)) else (po,)
+    ds = getattr(out, "deepstack_features", None)
+    if ds is None:
+        nv = niveaux_deepstack(out)
+        ds = [] if nv is None else list(nv)
+    return pooler, [t for t in ds]
+
+
+def precalculs_qwen3vl(visual: Any) -> Callable[[Any, dict], Optional[dict]]:
+    """276 j : pour la tour Qwen3-VL de transformers 5.17, ce que `Qwen3VLVisionModel.forward` calcule depuis la seule
+    grille — indices/poids d'interpolation des positions, position_ids du rotary, cu_seqlens — par LES MÊMES fonctions
+    (`transformers.vision_utils`), sur le même device : mêmes valeurs, mêmes noyaux en aval. Le forward les accepte en
+    kwargs et saute alors ses lectures de la grille (`.tolist()`, synchronisations interdites sous capture) ; la grille
+    et cu_seqlens passent sur CPU (seuls `.tolist()` les lisent : `get_image_features`, attention sdpa par segment).
+    None quand l'annexe n'est pas la grille (rien à précalculer : eager)."""
+    from transformers.vision_utils import (get_vision_attention_seqlens, get_vision_interpolation_indices_and_weights,
+                                           get_vision_position_ids)
+
+    def precalculs(pv: Any, supp: dict) -> Optional[dict]:
+        grid = supp.get("image_grid_thw")
+        if not isinstance(grid, torch.Tensor) or len(supp) != 1:
+            return None
+        cfg = visual.config
+        ii, iw = get_vision_interpolation_indices_and_weights(
+            grid, num_grid_per_side=visual.num_grid_per_side, mode=visual.interpolation_mode,
+            align_corners=visual.interpolation_align_corners, spatial_merge_size=cfg.spatial_merge_size)
+        pos = get_vision_position_ids(grid, visual.spatial_merge_size)
+        cu, mx = get_vision_attention_seqlens(grid, cfg)
+        pre = dict(image_grid_thw=grid.cpu(), interp_indices=ii, interp_weights=iw, position_ids=pos, cu_seqlens=cu.cpu())
+        if mx is not None:
+            pre["max_seqlen"] = int(mx)
+        return pre
+    return precalculs
+
+
 class TourVision:
     """Tour de vision + projection : ``pixel_values`` → traits bf16 ``[n, h]``."""
 
@@ -106,8 +183,105 @@ class TourVision:
         self.nom = nom
         self.hidden = hidden          # dimension du LM : un trait d'une autre dimension (tour NON projetée) est refusé
         self.niveaux_deepstack = 0    # k niveaux deepstack (Qwen3-VL), posé par depuis_dossier depuis la config de la tour
+        # 276 j : `precalculs(pv, supp) -> dict | None` = ce qui ne dépend que des annexes (grille), calculé UNE fois hors
+        # capture par les fonctions du modèle lui-même et passé au calcul en kwargs ; None = tour non capturable (eager)
+        self.precalculs: Optional[Callable[[Any, dict], Optional[dict]]] = None
+        self._graphes: dict = {}                    # clé de forme → GrapheTour | None (None = forme marquée eager)
+        self._verrou_graphes = threading.Lock()     # une capture à la fois
+        self._verrou_rejeu = threading.Lock()       # un rejeu à la fois : tampons statiques, réserve mémoire partagée
+        self._pool = None
+        self._flux_capture = None
+        self.graphes_captures = 0                   # observés (journal, tests)
+        self.graphes_rejeux = 0
+        self.graphes_refuses = 0
         global _CHARGEE
         _CHARGEE = nom
+
+    # -- 276 j : graphe CUDA de la tour à forme fixe ---------------------------------------------------------------
+    def graphes_actifs(self) -> bool:
+        """Le graphe ne s'essaie que sur CUDA, avec des précalculs (une tour dont le calcul lit ses annexes par des
+        synchronisations ne se capture pas) et si le régime le demande."""
+        return bool(_TOUR_GRAPHE) and self.device.type == "cuda" and self.precalculs is not None
+
+    @staticmethod
+    def cle_graphe(pixel_values: Any, supp: dict) -> Optional[tuple]:
+        """Clé de forme : forme et dtype de l'entrée, puis chaque annexe par ses VALEURS si c'est un petit tenseur
+        (≤ `_ANNEXE_CLE_MAX` éléments) ou un scalaire ; toute autre annexe → None (pas de graphe)."""
+        if not isinstance(pixel_values, torch.Tensor):
+            return None
+        cle: list = [tuple(pixel_values.shape), str(pixel_values.dtype)]
+        for k in sorted(supp):
+            v = supp[k]
+            if isinstance(v, torch.Tensor):
+                if v.numel() > _ANNEXE_CLE_MAX:
+                    return None
+                cle.append((k, tuple(v.shape), str(v.dtype), tuple(v.reshape(-1).tolist())))
+            elif isinstance(v, (int, float, str, bool)) or v is None:
+                cle.append((k, v))
+            else:
+                return None
+        return tuple(cle)
+
+    def _calcul_graphe(self, pixel_values: torch.Tensor, supp: dict) -> Any:
+        """Sortie de la tour par le graphe de cette forme (capturé à la première image), ou None → eager."""
+        cle = self.cle_graphe(pixel_values, supp)
+        if cle is None:
+            return None
+        g = self._graphes.get(cle, ...)
+        if g is ...:
+            with self._verrou_graphes:
+                g = self._graphes.get(cle, ...)
+                if g is ...:
+                    g = self._capturer(pixel_values, supp, cle)
+                    self._graphes[cle] = g
+        if g is None:
+            return None
+        with self._verrou_rejeu:
+            g.entree.copy_(pixel_values)
+            g.graphe.replay()
+            self.graphes_rejeux += 1
+            # clones : les tampons de sortie sont statiques, le prochain rejeu les réécrit
+            return SortieTour(tuple(t.clone() for t in g.pooler), [t.clone() for t in g.deepstack])
+
+    def _capturer(self, pixel_values: torch.Tensor, supp: dict, cle: tuple) -> Optional["GrapheTour"]:
+        """Chauffe (2 passes sur un flux annexe, comme le moteur) puis capture en mode `thread_local` : le pas moteur
+        continue sur l'autre fil (la capture rédactrice du moteur, elle, est exclue par le verrou lecteur de la 276 h).
+        Échec ou plafond de formes → None (forme eager), journal — jamais un refus de requête."""
+        if len([g for g in self._graphes.values() if g is not None]) >= _TOUR_GRAPHE_MAX:
+            self.graphes_refuses += 1
+            print(f"[vision] graphe refusé : {_TOUR_GRAPHE_MAX} formes déjà capturées (ACVRAM_TOUR_GRAPHE_MAX) ; "
+                  f"forme {cle[0]} eager", flush=True)
+            return None
+        try:
+            pre = self.precalculs(pixel_values, supp)
+            if pre is None:
+                self.graphes_refuses += 1
+                return None
+            kw = dict(supp)
+            kw.update(pre)
+            entree = pixel_values.clone()
+            if self._flux_capture is None:
+                self._flux_capture = torch.cuda.Stream(self.device)
+            if self._pool is None:
+                self._pool = torch.cuda.graph_pool_handle()
+            flux = self._flux_capture
+            flux.wait_stream(torch.cuda.current_stream(self.device))
+            with torch.cuda.stream(flux):
+                for _ in range(2):
+                    self._calcul(entree, **kw)
+            torch.cuda.current_stream(self.device).wait_stream(flux)
+            graphe = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graphe, pool=self._pool, stream=flux, capture_error_mode="thread_local"):
+                out = self._calcul(entree, **kw)
+            pooler, deepstack = sorties_statiques(out)
+            self.graphes_captures += 1
+            print(f"[vision] graphe capturé : forme {cle[0]} annexes {[c[0] for c in cle[2:]]} "
+                  f"traits {tuple(pooler[0].shape)} niveaux {len(deepstack)} ({self.graphes_captures} graphe(s))", flush=True)
+            return GrapheTour(graphe, entree, pooler, deepstack, annexes=kw)
+        except Exception as exc:                                    # noqa: BLE001
+            self.graphes_refuses += 1
+            print(f"[vision] graphe non capturé ({type(exc).__name__}: {str(exc)[:200]}) ; forme {cle[0]} eager", flush=True)
+            return None
 
     @torch.no_grad()
     def traits(self, pixel_values: Any, n_attendu: Optional[int] = None,
@@ -129,8 +303,10 @@ class TourVision:
         if isinstance(pixel_values, torch.Tensor):
             pixel_values = pixel_values.to(self.device)
         supp = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in (supplement or {}).items()}
+        out = self._calcul_graphe(pixel_values, supp) if self.graphes_actifs() else None     # 276 j : None → eager
         try:
-            out = self._calcul(pixel_values, **supp) if supp else self._calcul(pixel_values)
+            if out is None:
+                out = self._calcul(pixel_values, **supp) if supp else self._calcul(pixel_values)
         except TypeError as exc:
             if supp and "unexpected keyword" in str(exc):
                 raise TypeError(f"tour de vision : le calcul refuse les annexes du processeur {sorted(supp)} ({exc})") from exc
@@ -266,6 +442,13 @@ class TourVision:
         tour = cls(calcul, device, nom=f"transformers {transformers.__version__}",
                    hidden=int(getattr(tcfg, "hidden_size", 0)) or None)
         tour.niveaux_deepstack = len(idx) if idx is not None else 0       # lu sur la CONFIG de la tour chargée
+        # 276 j : seule la tour Qwen3-VL (module `visual`, annexe = grille) a ses précalculs ; les autres restent eager
+        visual = getattr(racine, "visual", None)
+        if visual is not None and vcfg is not None and hasattr(visual, "num_grid_per_side"):
+            try:
+                tour.precalculs = precalculs_qwen3vl(visual)
+            except ImportError as exc:                                    # vision_utils absent : pas de graphe
+                print(f"[vision] graphe de la tour indisponible ({exc}) : eager", flush=True)
         return tour
 
 

@@ -317,9 +317,11 @@ Ahol az acvram vezet: MLA modellek (GLM-4.7-Flash) natív sm_120 NVFP4-ben, amel
 
 ## Állapot
 
-0.6.38-as verzió. Minden az 5090-en fut: `sm_120a`-ra (natív FP4) és `sm_86`-ra fordított CUDA kernelek, CUDA gráfok, NVFP4/INT8/INT4 kvantálás, HTTP szerver. Védőkorlátok a helyükön: a kártya láthatatlan a munkamenetek számára (`CUDA_VISIBLE_DEVICES` üres), és csak az `outils/carte.sh` kölcsönzi, zár alatt, egyszerre egy mérésnek; egy megfigyelő naplóz minden zár nélküli hozzáférést; egy energiamérés, amely több kártyát fed le, vagy 10 s alatt tart, érvénytelenítésre kerül; egy degradált módban betöltött modell ezt jelzi, és nem lép be egy párbajba.
+0.7.11-es verzió. Minden az 5090-en fut: `sm_120a`-ra (natív FP4) és `sm_86`-ra fordított CUDA kernelek, CUDA gráfok, NVFP4/INT8/INT4 kvantálás, HTTP szerver. Védőkorlátok a helyükön: a kártya láthatatlan a munkamenetek számára (`CUDA_VISIBLE_DEVICES` üres), és csak az `outils/carte.sh` kölcsönzi, zár alatt, egyszerre egy mérésnek; egy megfigyelő naplóz minden zár nélküli hozzáférést; egy energiamérés, amely több kártyát fed le, vagy 10 s alatt tart, érvénytelenítésre kerül; egy degradált módban betöltött modell ezt jelzi, és nem lép be egy párbajba.
 
-4107 teszt (`pytest --collect-only -q`, egy perc processzoron; a GPU-tesztek csak `carte.sh` alatt futnak). A munka nyomon követése: `acvram-memoire/` (szabályok, jegyzék, füzetek, több száz jegyzet áttekintése).
+Nemrég: a forráskód mellett (lásd «Telepítés») immár Debian/Ubuntu (.deb), Arch (AUR), Fedora (RPM) és Flatpak csomagként is elérhető; a nyilvános GitHub-tükör mostantól a teljes (szűrt) előzményt tartalmazza. Az `ngram` spekuláció alapértelmezés szerint már nincs bekapcsolva (kijavítva egy hiba, amely ismétlődő tokeneket okozott az egyszerű→spekulatív átmenetnél; a `--speculative ngram` továbbra is elérhető kifejezett kérésre). A szakaszos előtöltés mostantól nagy modelleken akár 65 536 kontextus-tokent is megtart. A látásmodellek a képeiket az előkészítés alatt kódolják, nem a dekódolás alatt. Egy friss csomag vagy fa első indítása többé nem áll le a CUDA-grafikonok rögzítésénél.
+
+6752 teszt (`pytest --collect-only -q`, egy perc processzoron; a GPU-tesztek csak `carte.sh` alatt futnak). A munka nyomon követése: `acvram-memoire/` (szabályok, jegyzék, füzetek, több száz jegyzet áttekintése).
 
 ---
 

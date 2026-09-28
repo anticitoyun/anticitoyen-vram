@@ -317,9 +317,11 @@ Der acvram ligger foran: MLA-modeller (GLM-4.7-Flash) i innebygd sm_120-NVFP4, s
 
 ## Status
 
-Versjon 0.6.38. Alt kjører på 5090: CUDA-kjerner kompilert for `sm_120a` (innebygd FP4) og `sm_86`, CUDA-grafer, NVFP4/INT8/INT4-kvantisering, HTTP-server. Rekkverk på plass: kortet er usynlig for arbeidsøkter (`CUDA_VISIBLE_DEVICES` tom), og bare `outils/carte.sh` låner det ut, under lås, til én måling om gangen; en vakt logger all tilgang utenfor låsen; en energimåling som dekker mer enn ett kort eller under 10 s, ugyldiggjøres; en modell lastet i degradert modus sier det og deltar ikke i en duell.
+Versjon 0.7.11. Alt kjører på 5090: CUDA-kjerner kompilert for `sm_120a` (innebygd FP4) og `sm_86`, CUDA-grafer, NVFP4/INT8/INT4-kvantisering, HTTP-server. Rekkverk på plass: kortet er usynlig for arbeidsøkter (`CUDA_VISIBLE_DEVICES` tom), og bare `outils/carte.sh` låner det ut, under lås, til én måling om gangen; en vakt logger all tilgang utenfor låsen; en energimåling som dekker mer enn ett kort eller under 10 s, ugyldiggjøres; en modell lastet i degradert modus sier det og deltar ikke i en duell.
 
-4 107 tester (`pytest --collect-only -q`, ett minutt på prosessoren; GPU-tester kjører bare under `carte.sh`). Arbeidsoppfølging: `acvram-memoire/` (regler, register, hefter, gjennomgang av flere hundre notater).
+Nylig: utgitt som Debian/Ubuntu-pakke (.deb), Arch (AUR), Fedora (RPM) og Flatpak, i tillegg til kilden (se «Installer»); det offentlige GitHub-speilet bærer nå den fullstendige (filtrerte) historikken. `ngram`-spekulasjon er ikke lenger aktivert som standard (en feil med gjentatte tokens ved overgangen fra vanlig til spekulativ er rettet; `--speculative ngram` er fortsatt tilgjengelig på uttrykkelig forespørsel). Chunket prefill holder nå på opptil 65 536 kontekst-tokens på store modeller. Visjonsmodeller koder bildene sine under forberedelsen, ikke under dekodingen. Første oppstart av en fersk pakke eller et ferskt tre dør ikke lenger under CUDA-graf-opptak.
+
+6 752 tester (`pytest --collect-only -q`, ett minutt på prosessoren; GPU-tester kjører bare under `carte.sh`). Arbeidsoppfølging: `acvram-memoire/` (regler, register, hefter, gjennomgang av flere hundre notater).
 
 ---
 

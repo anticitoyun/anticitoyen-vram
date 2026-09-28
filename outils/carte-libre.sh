@@ -87,11 +87,39 @@ u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0 2>/dev
 # silencieusement à la lecture (jamais en écriture, un autre process peut
 # écrire pendant qu'on lit).
 JOURNAL_SERVICES=${JOURNAL_SERVICES:-outils/gpu/journal-services.tsv}
+# Pièce poste2 (27/09, nuit) : un llama-server en cours de chargement (pris par
+# carte.sh ACVRAM_TYPE=service, verrou tenu, ligne dans le `.qui` de carte.sh)
+# passait pour un INTRUS — JOURNAL_SERVICES n'existe dans aucun dépôt connu,
+# c'est le `.qui` de carte.sh (contrat 4 champs `<pid> <epoch> <nom> service`,
+# une ligne par service vivant) qui dit la vérité sur ce qui est déclaré.
+QUI_CARTE=${QUI_CARTE:-${ACVRAM_VERROU:-/tmp/acvram-carte-0.lock}.qui}
 service_declare() {
   local pid=$1
-  [ -r "$JOURNAL_SERVICES" ] || return 1
-  awk -v p="$pid" -F'\t' '$1 == p { print $2; found=1 } END { exit !found }' \
-      "$JOURNAL_SERVICES" 2>/dev/null
+  if [ -r "$JOURNAL_SERVICES" ] \
+     && awk -v p="$pid" -F'\t' '$1 == p { found=1 } END { exit !found }' "$JOURNAL_SERVICES" 2>/dev/null; then
+    return 0
+  fi
+  [ -r "$QUI_CARTE" ] || return 1
+  awk -v p="$pid" '$1 == p && $4 == "service" { found=1 } END { exit !found }' "$QUI_CARTE" 2>/dev/null
+}
+
+# g2c (28/09, ordre chef) : interblocage 12h05-13h47 — campagne-tps-menus.py
+# EN PAUSE (attend un drapeau, aucune prise carte.sh, aucune mémoire GPU)
+# comptait comme « une mesure démarre sans avoir encore alloué » (le motif
+# ci-dessous, à la ligne). Un script qui matche MOTIF mais ne tient ni un
+# `.qui` vivant (mesure/etat/service/partage) NI de mémoire GPU réelle
+# n'est qu'un avertissement — le refus reste entier pour une VRAIE prise
+# qui vient de démarrer (verrou pris, allocation pas encore visible).
+_pid_verrouille_ou_alloue() {
+  local pid=$1 q p
+  [ "${MEM_MIO[$pid]+_}" ] && return 0
+  for q in "$QUI_CARTE" "${QUI_CARTE%.qui}.share".*.qui; do
+    [ -e "$q" ] || continue
+    while read -r p _; do
+      [ "${p:-}" = "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+    done < "$q"
+  done
+  return 1
 }
 
 # DEUX APPELS PARCE QUE `pmon` NE DIT PAS CE QU'ON CROIT. Sa colonne « mem »
@@ -144,9 +172,14 @@ while read -r pid reste; do
   # par nom de process : un vrai outils/… lance depuis ce dossier resterait
   # attrape.
   case "$reste" in *".config/acvram/"*) continue ;; esac
-  mien "$pid" || {
+  mien "$pid" && continue
+  if _pid_verrouille_ou_alloue "$pid"; then
     echo "carte 0 : une mesure demarre sans avoir encore alloue, PID $pid — $(echo "$reste" | cut -c1-120)" >&2
-    exit 1; }
+    exit 1
+  fi
+  # g2c : ni verrou ni memoire GPU — un script qui n'a RIEN pris (en pause,
+  # attend un drapeau…) ne bloque personne. Avertissement, pas un refus.
+  echo "carte 0 : PID $pid (motif $MOTIF) sans verrou ni memoire GPU — avertissement, pas un refus. $(echo "$reste" | cut -c1-120)" >&2
 done < <(pgrep -af "$MOTIF" 2>/dev/null)
 
 # TROISIEME ETAT. Une compilation est cherchee EN DERNIER, apres que la carte a

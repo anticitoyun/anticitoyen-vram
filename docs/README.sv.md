@@ -317,9 +317,11 @@ Där acvram ligger före: MLA-modeller (GLM-4.7-Flash) i nativ NVFP4 sm_120, som
 
 ## Status
 
-Version 0.6.38. Allt körs på 5090:an: CUDA-kärnor kompilerade för `sm_120a` (nativt FP4) och `sm_86`, CUDA-grafer, NVFP4/INT8/INT4-kvantisering, HTTP-server. Skyddsmekanismer på plats: kortet är osynligt för arbetssessioner (`CUDA_VISIBLE_DEVICES` tom) och endast `outils/carte.sh` lånar ut det, under lås, till en mätning i taget; en väktare loggar all åtkomst utanför låset; en energimätning som täcker mer än ett kort eller mindre än 10 s ogiltigförklaras; en modell laddad i degraderat läge säger det och deltar inte i en duell.
+Version 0.7.11. Allt körs på 5090:an: CUDA-kärnor kompilerade för `sm_120a` (nativt FP4) och `sm_86`, CUDA-grafer, NVFP4/INT8/INT4-kvantisering, HTTP-server. Skyddsmekanismer på plats: kortet är osynligt för arbetssessioner (`CUDA_VISIBLE_DEVICES` tom) och endast `outils/carte.sh` lånar ut det, under lås, till en mätning i taget; en väktare loggar all åtkomst utanför låset; en energimätning som täcker mer än ett kort eller mindre än 10 s ogiltigförklaras; en modell laddad i degraderat läge säger det och deltar inte i en duell.
 
-4 107 tester (`pytest --collect-only -q`, en minut på processor; GPU-testerna körs bara under `carte.sh`). Uppföljning av arbetet: `acvram-memoire/` (regler, katalog, anteckningsböcker, genomgång av flera hundra anteckningar).
+Nyligen: publicerad som Debian/Ubuntu-paket (.deb), Arch (AUR), Fedora (RPM) och Flatpak, utöver källkoden (se ”Installera”); den offentliga GitHub-spegeln bär nu den fullständiga (filtrerade) historiken. `ngram`-spekulation är inte längre aktiverad som standard (en bugg med upprepade tokens vid övergången vanlig→spekulativ är rättad; `--speculative ngram` går fortfarande att använda på uttrycklig begäran). Chunkad prefill håller nu upp till 65 536 kontext-tokens på stora modeller. Vision-modeller kodar sina bilder under förberedelsen, inte under avkodningen. Första start av ett färskt paket eller träd kraschar inte längre vid CUDA-grafinfångning.
+
+6 752 tester (`pytest --collect-only -q`, en minut på processor; GPU-testerna körs bara under `carte.sh`). Uppföljning av arbetet: `acvram-memoire/` (regler, katalog, anteckningsböcker, genomgång av flera hundra anteckningar).
 
 ---
 

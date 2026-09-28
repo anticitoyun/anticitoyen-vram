@@ -242,6 +242,9 @@ DEFAUTS_PAR_VERSION["0.7.9"] = ({**DEFAUTS_PAR_VERSION["0.7.8"][0], "PILE_RENDUE
 # Gabarit de la version qui portera la 277e (hors défaut) : ACVRAM_SPEC_REPOS déclarée, défaut 2, inerte sous
 # --speculative none — seule différence de table avec la 0.7.9.
 DEFAUTS_PAR_VERSION["0.7.10"] = ({**DEFAUTS_PAR_VERSION["0.7.9"][0], "SPEC_REPOS": "2", "GDN_MORCEAU": "4096", "MOE_MORCEAU": "4096"}, DEFAUTS_PAR_VERSION["0.7.9"][1])
+# 0.7.11 (28/09, a5v et 276 i-k) : MLP dense par tranches au-delà du tenu (MLP_MORCEAU=4096) ; options vision
+# TOUR_GRAPHE=0 et PREFILL_FILE=0 (opt-in), TOUR_GRAPHE_MAX=8.
+DEFAUTS_PAR_VERSION["0.7.11"] = ({**DEFAUTS_PAR_VERSION["0.7.10"][0], "MLP_MORCEAU": "4096", "TOUR_GRAPHE": "0", "TOUR_GRAPHE_MAX": "8", "PREFILL_FILE": "0"}, DEFAUTS_PAR_VERSION["0.7.10"][1])
 
 
 def _var(nom):

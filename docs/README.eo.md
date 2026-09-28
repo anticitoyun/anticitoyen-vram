@@ -317,9 +317,11 @@ Kie acvram estas antaŭe: MLA-modeloj (GLM-4.7-Flash) en denaska NVFP4 sm_120, k
 
 ## Stato
 
-Versio 0.6.38. Ĉio funkcias sur la 5090: CUDA-kernoj kompilitaj por `sm_120a` (denaska FP4) kaj `sm_86`, CUDA-grafoj, kvantigo NVFP4/INT8/INT4, HTTP-servilo. Gardoj enloke: la karto estas nevidebla al laborsesioj (`CUDA_VISIBLE_DEVICES` malplena) kaj nur `outils/carte.sh` disponigas ĝin, sub ŝlosilo, po unu mezuro samtempe; observanto protokolas ĉiun aliron ekster la ŝlosilo; energimezuro kovranta pli ol unu karton aŭ malpli ol 10 s estas nuligata; modelo ŝargita en degradita reĝimo diras tion kaj ne eniras duelon.
+Versio 0.7.11. Ĉio funkcias sur la 5090: CUDA-kernoj kompilitaj por `sm_120a` (denaska FP4) kaj `sm_86`, CUDA-grafoj, kvantigo NVFP4/INT8/INT4, HTTP-servilo. Gardoj enloke: la karto estas nevidebla al laborsesioj (`CUDA_VISIBLE_DEVICES` malplena) kaj nur `outils/carte.sh` disponigas ĝin, sub ŝlosilo, po unu mezuro samtempe; observanto protokolas ĉiun aliron ekster la ŝlosilo; energimezuro kovranta pli ol unu karton aŭ malpli ol 10 s estas nuligata; modelo ŝargita en degradita reĝimo diras tion kaj ne eniras duelon.
 
-4 107 testoj (`pytest --collect-only -q`, unu minuto sur procesoro; la GPU-testoj funkcias nur sub `carte.sh`). Sekvado de la laboro: `acvram-memoire/` (reguloj, listo, kajeroj, revizio de pluraj centoj da notoj).
+Lastatempe: publikigita kiel Debian/Ubuntu-pako (.deb), Arch (AUR), Fedora (RPM) kaj Flatpak, krom la fontkodo (vidu «Instali»); la publika GitHub-spegulo nun portas la kompletan (filtritan) historion. La `ngram`-spekulado ne plu estas defaŭlte ŝaltita (cimo pri ripetataj ĵetonoj ĉe la transiro simpla→spekulativa estas korektita; `--speculative ngram` restas uzebla laŭ eksplicita peto). La peca antaŭplenigo (chunked prefill) nun tenas ĝis 65 536 kuntekstajn ĵetonojn sur grandaj modeloj. Vidmodeloj kodas siajn bildojn dum la preparo, ne dum la malkodigo. La unua starto de freŝa pako aŭ arbo ne plu mortas dum la kapto de CUDA-grafoj.
+
+6 752 testoj (`pytest --collect-only -q`, unu minuto sur procesoro; la GPU-testoj funkcias nur sub `carte.sh`). Sekvado de la laboro: `acvram-memoire/` (reguloj, listo, kajeroj, revizio de pluraj centoj da notoj).
 
 ---
 

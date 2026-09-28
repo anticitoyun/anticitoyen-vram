@@ -5,7 +5,19 @@ dans son chemin. Test cassant : rétabli à l'ancien motif, il doit échouer.
 Hermétique (chef, 27/09, après échec sous carte réellement occupée) : un
 faux nvidia-smi en tête de PATH répond toujours « 0 Mio, aucune app » — le
 verdict ne dépend plus de ce qui tourne sur la machine au moment du test.
-"""
+
+g2c (28/09, ordre chef) : depuis g2c, un candidat MOTIF qui ne tient NI un
+`.qui` vivant NI de mémoire GPU réelle n'est plus qu'un avertissement (une
+campagne EN PAUSE ne bloque plus personne) — ce que `test_vrai_outils_...`
+simulait (processus lancé, « 0 Mio, aucune app » partout) n'est donc plus un
+« vrai intrus » AUJOURD'HUI. Un vrai intrus est un processus qui tient
+réellement de la mémoire GPU (ou un `.qui`) : le faux nvidia-smi de ce test
+le déclare désormais dans `--query-compute-apps`, ce qui le fait attraper
+par le critère 2 (mémoire non déclarée), message « Intrus » — et non plus
+par le motif d'intentions (critère 3, « une mesure demarre... », réservé
+maintenant à une vraie prise carte.sh en train de démarrer). g2c n'est pas
+affaibli par ce changement : c'est ce test qui décrivait un intrus à côté de
+la plaque."""
 import os
 import signal
 import stat
@@ -30,6 +42,25 @@ def _faux_path(tmp_path):
     bindir.mkdir()
     cible = bindir / "nvidia-smi"
     cible.write_text(FAUX_NVIDIA_SMI)
+    cible.chmod(cible.stat().st_mode | stat.S_IEXEC)
+    return str(bindir) + os.pathsep + os.environ["PATH"]
+
+
+def _faux_path_avec_gpu(tmp_path, pid, mem_mio=512):
+    """Même faux nvidia-smi, mais ce PID précis tient réellement mem_mio de
+    mémoire GPU (compute-apps) — ce qui fait un intrus aujourd'hui (g2c)."""
+    bindir = tmp_path / "faux-bin-gpu"
+    bindir.mkdir()
+    cible = bindir / "nvidia-smi"
+    cible.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        f'  *query-gpu=memory.used*) echo {mem_mio} ;;\n'
+        f'  *query-compute-apps=pid,used_memory*) echo "{pid}, {mem_mio}" ;;\n'
+        f'  *query-compute-apps=pid*) echo "{pid}" ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
     cible.chmod(cible.stat().st_mode | stat.S_IEXEC)
     return str(bindir) + os.pathsep + os.environ["PATH"]
 
@@ -80,12 +111,13 @@ def test_vrai_outils_reste_attrape_comme_intrus(tmp_path):
         r = subprocess.run(
             [SCRIPT],
             cwd=DEPOT,
-            env={**os.environ, "RACINE": "1", "PATH": _faux_path(tmp_path)},
+            env={**os.environ, "RACINE": "1", "PATH": _faux_path_avec_gpu(tmp_path, proc.pid)},
             capture_output=True,
             text=True,
             timeout=30,
         )
         assert r.returncode == 1
-        assert "une mesure demarre sans avoir encore alloue" in r.stderr, r.stderr
+        assert "Intrus" in r.stderr, r.stderr
+        assert str(proc.pid) in r.stderr, r.stderr
     finally:
         _nettoie(proc, fichier)

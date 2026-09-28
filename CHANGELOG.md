@@ -1,5 +1,38 @@
 # Journal des changements
 
+## 0.7.11 (28/09/2026)
+
+### Contexte long, modèles denses
+
+* **28/09/2026 — pièce a5v (poste1, poste1-a5v d69f13f46) : MLP dense par tranches, Devstral 24B à 34 816 jetons sans
+  exil.** À 32 k, la réserve de préfill dense (13,41 Gio) exilait 10 MLP sur 40 et le débit tombait à 7,9 tok/s
+  (bd 294, poste5 : exil, pas une régression — 94,5 tok/s à 16 k). Le MLP dense tourne désormais par tranches au-delà
+  du tenu résident (`ACVRAM_MLP_MORCEAU`, défaut 4096, `0` = témoin) : **34 816 et 32 768 sans exil, 94,5 tok/s**
+  (kimi-modele exige 34 816). Sortie identique au bit sous le seuil ; au-delà, KL 2,5e-4 et top-1 99,28 % (seuil
+  scellé ≤ 1e-4 de KL non atteint, dit tel quel). `acvram-memoire/revue/poste1-a5v-verdict-28-09.md`,
+  `poste5-piece294-verdict-28-09.md`.
+
+### Menus et paquets
+
+* **28/09/2026 — README à jour (pièce 295, poste3 et poste4)** : README.md et ses 31 traductions portent la version et
+  les nouveautés des 0.7.x ; `outils/sortir-version.sh` refuse (code 74) un README qui ne porte pas la version sortie ;
+  `outils/bumper-version-readme.py` bascule le numéro dans les 32 fichiers d'un coup.
+* **28/09/2026 — parc 0.1.5 (poste1, poste1-t5eb 44e480a32) : l'installateur ne détruit plus les menus.** parc 0.1.4
+  réécrivait `~/.kimi-code/config.toml` (285 → 150 alias, contextes remis au maximum, clés à point tronquées) ;
+  `parc-installer` n'ajoute plus que ce qui manque, n'écrase jamais un alias ni un contexte réglé, est idempotent, et
+  écarte les dossiers qui ne sont pas des modèles de chat (plongements, reranker, collections, `*_tmp`, INVALIDE).
+  Menus de l'utilisateur restaurés (285 alias d'avant + 66 nouveaux). **Ne pas réinstaller parc 0.1.4.** Outils de la
+  carte : interblocage carte-libre/campagne en pause corrigé (g2c, poste3), `liberer-vram` ne tue plus les processus
+  d'une autre prise (293).
+
+### Vision (options, désactivées par défaut)
+
+* **28/09/2026 — pièces 276 i à 276 k (poste6, poste6-276i 9f517b04d).** 276 i : pas de non-déterminisme entre
+  processus (15/15 identiques sur serveurs neufs) — les écarts venaient du cache de préfixe qui ressert des K/V calculés
+  dans un lot (règle de mesure REGLES § 4). 276 j : graphe CUDA de la tour de vision (`ACVRAM_TOUR_GRAPHE=1`, au bit,
+  12 tours 105 → 79 ms, temps du lot −10 %, mais TTFT p50 +10 à 15 % par regroupement des préfills) — **optionnel**.
+  276 k : préfill en file dans le pas (`ACVRAM_PREFILL_FILE=1`), TTFT moyen +5 % — **optionnel**, série close.
+
 ## 0.7.10 (27/09/2026)
 
 ### Contexte long

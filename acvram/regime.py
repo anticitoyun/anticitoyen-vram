@@ -238,6 +238,8 @@ VARIABLES: tuple[Variable, ...] = (
              "d19 (27/09) : au-delà du tenu d un seul tenant (chauffe), le cœur GDN tourne par tranches de N jetons (multiple de 64), état porté — borne sa mémoire (245 Ko/jeton sur le 35B) ; 1 ulp bf16 aux dimensions réelles, jamais engagé en dessous ; ligne tranches>N ; 0 = jamais (témoin)"),
     Variable("MOE_MORCEAU", "4096", ("acvram.engine.moe", "_MOE_MORCEAU"), None,
              "d19 (27/09) : au-delà du tenu d un seul tenant (chauffe), le bloc MoE tourne par tranches de N lignes (tampons bornés) — pas au bit du seul tenant, jamais engagé en dessous ; ligne tranches>N ; 0 = jamais (témoin)"),
+    Variable("MLP_MORCEAU", "4096", ("acvram.engine.attention", "_MLP_MORCEAU"), None,
+             "a5v (28/09) : au-delà du tenu résident, le MLP dense tourne par tranches de N jetons (Devstral 34 816 sans exil) ; 0 = témoin"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",
@@ -369,6 +371,15 @@ VARIABLES: tuple[Variable, ...] = (
              "tours (une image chacune, même appel, au bit 12/12) en vol ; mesuré 27/09 à b = 12 images : mur −5 %, mais TTFT moyen "
              "+9 % contre la 276 g (requêtes admises par paires → préfills plus gros) : scellé non tenu, pas de défaut ; une capture "
              "de graphe attend qu'aucune tour ne soit en vol (VerrouCapture lecteurs/rédacteur)"),
+    Variable("TOUR_GRAPHE", "0", ("acvram.engine.vision", "_TOUR_GRAPHE"), None,
+             "pièce 276 j (OPT-IN, défaut 0, décision chef 28/09 : mur b = 12 −10 % mais TTFT p50 +10-15 % par regroupement des "
+             "préfills ; défaut après la 276 k) : 1 = graphe CUDA de la tour de vision à forme fixe — capturé à la première image d'une forme "
+             "(pixel_values, image_grid_thw ; chauffe + capture payées par cette requête, ≈ 0,1-0,3 s), rejoué ensuite (mêmes "
+             "noyaux, même ordre : au bit contre l'eager) ; 0 = tour eager (régime 276 g/h) ; Qwen3-VL seulement (annexe = grille), "
+             "Gemma 4 reste eager ; rejeu sérialisé (TOUR_FLUX=2 ne recouvre plus deux tours de même forme)"),
+    Variable("TOUR_GRAPHE_MAX", "8", ("acvram.engine.vision", "_TOUR_GRAPHE_MAX"), None,
+             "pièce 276 j : nombre de formes d'image capturées au plus (une réserve mémoire privée par forme) ; au-delà, "
+             "eager, compté et journalisé"),
     Variable("ADMISSION_FENETRE_MS", "5", None, None,
              "pièce 179 (DÉFAUT 5 depuis 179 b ; 0 = coupé) : fenêtre d'admission du serveur en ms — moteur vide et ≥ 2 "
              "requêtes en file, attendre que la file cesse de grossir avant le pas (préfill groupé d'une rafale) ; une "
@@ -382,6 +393,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
+    Variable("PREFILL_FILE", "0", ("acvram.engine.runner", "_PREFILL_FILE"), None,
+             "pièce 276 k (OPT-IN) : 1 = dans le pas groupé, un forward par séquence dans l'ordre d'admission, jeton rapatrié "
+             "après le lancement du forward suivant (copie épinglée + événement) et émis aussitôt (Engine.emettre) : le premier "
+             "jeton ne dépend plus de la composition du lot ; 0 = un forward packé pour tout le groupe"),
     Variable("GDN_COEUR_LOT", "0", ("acvram.engine.couches", "_GDN_COEUR_LOT"), "0",
              "pièce 245 (opt-in) : 1 = au préfill de plusieurs séquences, cœur Gated DeltaNet (portes, fla cu_seqlens, "
              "norme) en un appel ; projections, convolution et out_proj par séquence ; au bit de la boucle (test 245)"),

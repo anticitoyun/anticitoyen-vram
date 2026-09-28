@@ -90,9 +90,17 @@ class ChauffeContexte:
 
     def _a_des_tranches(self) -> bool:
         """Un bloc que la chauffe peut passer par tranches au-delà du seul tenant (d19) : MoE ou GDN, morceau non nul."""
-        from . import gdn as _gdn, moe as _moe
-        return any((isinstance(m, _moe.MoEBlock) and _moe._MOE_MORCEAU > 0)
-                   or (isinstance(m, _gdn.GatedDeltaNet) and _gdn._GDN_MORCEAU > 0) for m in self.model.modules())
+        from . import attention as _att, gdn as _gdn, moe as _moe
+        return (any((isinstance(m, _moe.MoEBlock) and _moe._MOE_MORCEAU > 0)
+                    or (isinstance(m, _gdn.GatedDeltaNet) and _gdn._GDN_MORCEAU > 0) for m in self.model.modules())
+                or (self._dense_pur() and _att._MLP_MORCEAU > 0))
+
+    def _dense_pur(self) -> bool:
+        """a5v : ni MoE ni GDN — seul cas où le MLP dense passe par tranches (un MoE ou un hybride garde d19 tel quel)."""
+        from . import attention as _att, gdn as _gdn, moe as _moe
+        mods = list(self.model.modules())
+        return (not any(isinstance(m, (_moe.MoEBlock, _gdn.GatedDeltaNet)) for m in mods)
+                and any(type(m) is _att.MLP for m in mods))
 
     def _libre_apres_chauffe(self) -> tuple[int, int]:
         """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
@@ -166,10 +174,11 @@ class ChauffeContexte:
                     haut = milieu
             return bas
 
-        from . import gdn as _gdn, moe as _moe
+        from . import attention as _att, gdn as _gdn, moe as _moe
+        dense = self._dense_pur()
 
         def seuils(v):
-            _moe.definir_seuil(v); _gdn.definir_seuil(v)
+            _moe.definir_seuil(v); _gdn.definir_seuil(v); _att.definir_seuil(v if dense else None)
         seuils(None)
         self.moe_seuil: Optional[int] = None
         tenu: Optional[int] = n if essai(n) else dichotomie(0, n)
@@ -180,7 +189,8 @@ class ChauffeContexte:
             seuils(max(tenu, pas))
             tenu2 = n if essai(n) else dichotomie(tenu, n)
             if tenu2 > tenu:
-                print(f"[acvram] préfill par tranches (GDN {_gdn._GDN_MORCEAU}, MoE {_moe._MOE_MORCEAU}) au-delà de "
+                print(f"[acvram] préfill par tranches (GDN {_gdn._GDN_MORCEAU}, MoE {_moe._MOE_MORCEAU}"
+                      f"{f', MLP {_att._MLP_MORCEAU}' if dense else ''}) au-delà de "
                       f"{tenu} jetons : {tenu2} tenus", flush=True)
                 self.moe_seuil, tenu = tenu, tenu2
             else:

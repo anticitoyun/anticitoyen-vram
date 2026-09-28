@@ -242,6 +242,24 @@ def temoins_sans_fiche(disque, menu):
     return frozenset(n for n in disque if n not in menu and n not in alias_servis())
 
 
+# Dossiers d'ESSAI présents sous les racines, que parc-installer (0.1.4, 28/09) a mis dans les TSV servis : ni menu ni
+# fiche, par famille — un motif = une famille, avec sa raison (t5e-b, chef 28/09 : pas de liste fourre-tout).
+ESSAIS_HORS_MENU = {
+    r"-p\d{2,3}$": "variantes des pièces 53-56 du Gemma 31B (KL sous gabarit, chaîne close 23/09 : non servable comme référence)",
+    r"-\d{2}-09$": "bras de mesure datés du Coder 30B (assemblages S1-S9, projections qkv/alpha, 22-23/09)",
+    r"-bf16-(vision|acvram)$": "références bf16 de contrôle (pièce 125 ; chaîne vision du 20/09) : témoins de mesure, pas des alias",
+    r"-4sur6-": "Four Over Six, RÉFUTÉ au scellé E (22/09)",
+    r"-repli-mediane-": "repli mediane_couche, RÉFUTÉ (verdict-p3-3-30b-mediane-couche-22-09)",
+    r"-unsloth-mixte-i8c$": "bras int8 mixte des pièces 139 et 175 (mesure)",
+    r"^Qwen3-VL-30B-A3B-abl-nvfp4-vision$": "qualité non validée : P3(3) 12,6 % > seuil 11 % (verdict-p3-3-30b-collectpy-21-09)",
+}
+
+
+def essais_hors_menu(disque):
+    """{nom: raison} des dossiers du disque qu'une famille d'ESSAIS_HORS_MENU exclut."""
+    return {n: r for n in disque for m, r in ESSAIS_HORS_MENU.items() if re.search(m, n)}
+
+
 def controle_b(menu, disque, absents=frozenset(), temoins=frozenset()):
     """(b) les deux différences, chacune doit être vide (les alias à l'état absent/relocalisé
     et les témoins sans fiche exceptés)."""
@@ -325,7 +343,10 @@ def poste():
     etats = {n: etat_alias(n, racines["models_acvram"]) for n in sorted(absents)}
     print(f"[menus] alias acvram à l'état absent/relocalisé (§ 4, exclus des contrôles) : {len(absents)} — "
           + ", ".join(f"{n}:{e}" for n, e in etats.items()))
-    temoins = temoins_sans_fiche(disque, menu)
+    essais = essais_hors_menu(disque)
+    print(f"[menus] essais hors menu (ESSAIS_HORS_MENU, exclus de (b)) : {len(essais)} — "
+          + ", ".join(f"{n}:{r[:40]}" for n, r in sorted(essais.items())))
+    temoins = temoins_sans_fiche(disque, menu) | frozenset(essais)
     if temoins:
         print(f"[menus] témoins sans fiche verdict (hors menu, exclus de (b)) : {len(temoins)} — {sorted(temoins)}")
     return racines, lignes, menu, usages, disque, tailles, absents, temoins
@@ -349,6 +370,20 @@ def test_c_taille_et_format_suivent_du_et_le_manifeste(poste):
     assert not fautes, f"{len(fautes)} écart(s) :\n  " + "\n  ".join(fautes)
     sans_taille = [n for n, (t, r, _) in menu.items() if t is None and not (racines[r] / n).is_symlink()]
     assert not sans_taille, f"entrées sans taille au menu : {sans_taille}"
+
+
+def test_les_motifs_d_essais_n_attrapent_aucun_alias_du_menu(poste):
+    """Un motif d ESSAIS_HORS_MENU qui prendrait un alias servi serait une liste fourre-tout déguisée : chaque famille
+    doit rester hors du menu. Faute construite : un motif « -nvfp4$ » attraperait des dizaines d alias et rendrait rouge."""
+    _, _, menu, _, _, _, _, _ = poste
+    pris = sorted(n for n in menu if essais_hors_menu({n: None}))
+    assert not pris, f"motifs d essais trop larges, ils attrapent des alias du menu : {pris}"
+    assert essais_hors_menu({"Truc-27B-nvfp4": None}) == {}
+    ESSAIS_HORS_MENU["-nvfp4$"] = "faute construite"
+    try:
+        assert any(essais_hors_menu({n: None}) for n in menu)
+    finally:
+        del ESSAIS_HORS_MENU["-nvfp4$"]
 
 
 def test_le_menu_par_usage_est_un_sous_ensemble_du_menu_par_moteur(poste):

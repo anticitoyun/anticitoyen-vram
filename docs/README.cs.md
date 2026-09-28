@@ -317,9 +317,11 @@ Kde je acvram vpředu: modely MLA (GLM-4.7-Flash) v nativním sm_120 NVFP4, kter
 
 ## Stav
 
-Verze 0.6.38. Vše běží na 5090: jádra CUDA zkompilovaná pro `sm_120a` (nativní FP4) a `sm_86`, CUDA grafy, kvantizace NVFP4/INT8/INT4, HTTP server. Pojistky na místě: karta je neviditelná pro pracovní sezení (`CUDA_VISIBLE_DEVICES` prázdné) a jen `outils/carte.sh` ji zapůjčí, pod zámkem, jednomu měření naráz; hlídač loguje každý přístup mimo zámek; měření energie pokrývající více než jednu kartu nebo trvající méně než 10 s je zneplatněno; model načtený v degradovaném režimu to řekne a nevstoupí do souboje.
+Verze 0.7.11. Vše běží na 5090: jádra CUDA zkompilovaná pro `sm_120a` (nativní FP4) a `sm_86`, CUDA grafy, kvantizace NVFP4/INT8/INT4, HTTP server. Pojistky na místě: karta je neviditelná pro pracovní sezení (`CUDA_VISIBLE_DEVICES` prázdné) a jen `outils/carte.sh` ji zapůjčí, pod zámkem, jednomu měření naráz; hlídač loguje každý přístup mimo zámek; měření energie pokrývající více než jednu kartu nebo trvající méně než 10 s je zneplatněno; model načtený v degradovaném režimu to řekne a nevstoupí do souboje.
 
-4 107 testů (`pytest --collect-only -q`, minuta na procesoru; GPU testy běží jen pod `carte.sh`). Sledování práce: `acvram-memoire/` (pravidla, adresář, sešity, přehled několika set poznámek).
+Nedávno: vydáno jako balíček Debian/Ubuntu (.deb), Arch (AUR), Fedora (RPM) a Flatpak, kromě zdroje (viz „Instalace“); veřejné zrcadlo GitHub nyní nese kompletní (filtrovanou) historii. Spekulace `ngram` už není ve výchozím nastavení zapnutá (chyba opakovaných tokenů při přechodu z jednoduchého na spekulativní je opravena; `--speculative ngram` zůstává dostupná na výslovné vyžádání). Prefill po dílech nyní udrží až 65 536 tokenů kontextu u velkých modelů. Modely s viděním kódují své obrázky během přípravy, ne během dekódování. První start nového balíčku nebo stromu už neumírá na zachycení CUDA grafů.
+
+6 752 testů (`pytest --collect-only -q`, minuta na procesoru; GPU testy běží jen pod `carte.sh`). Sledování práce: `acvram-memoire/` (pravidla, adresář, sešity, přehled několika set poznámek).
 
 ---
 

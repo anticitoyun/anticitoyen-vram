@@ -107,6 +107,10 @@ class ModelSpec:
     linear_key_head_dim: int = 0
     linear_value_head_dim: int = 0
     linear_conv_kernel_dim: int = 4
+    # a5v (28/09) : jetons au-delà desquels le préfill d un modèle DENSE passe son MLP par tranches (posé par le chargeur
+    # SEULEMENT quand la réserve d un seul tenant exilerait des MLP) ; le terme MLP de la réserve s arrête là. None = seul
+    # tenant jusqu à max_model_len (comme avant).
+    mlp_prefill_plafond: Optional[int] = None
     rotary_dim: Optional[int] = None      # RoPE partiel (None = tête entière)
     attn_output_gate: bool = False
     # gemma4 : couches locales (fenêtre) / globales (têtes plus larges, RoPE
@@ -387,7 +391,9 @@ class ModelSpec:
                               qkv * H) * 2
         else:
             im = self.intermediate_size
-            par_jeton += 3 * im * 2 + im * 4
+            # a5v : au-delà du plafond, le MLP dense tourne par tranches — son terme s arrête au plafond
+            mlp_jetons = min(T, int(self.mlp_prefill_plafond)) if self.mlp_prefill_plafond else T
+            par_jeton += (3 * im * 2 + im * 4) * mlp_jetons // T
             plus_grosse = max(im * H, qkv * H) * 2
         # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
         # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),

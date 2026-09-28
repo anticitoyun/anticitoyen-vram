@@ -46,6 +46,8 @@ ALIAS_PAR_VERSION = {
     "0.7.9": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
     # 0.7.10 (27/09, d19/277 e) : préfill par tranches au-delà du tenu, ngram optionnel allégé, même alias.
     "0.7.10": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.11 (28/09, a5v/276 i-k) : MLP dense par tranches, options vision, même alias.
+    "0.7.11": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
 }
 # Formats par famille, identiques pour i8c et S1b (107 bis § 6) : ce qui distingue les deux est dans les experts
 # (calibrés ou non), pas dans les formats.
