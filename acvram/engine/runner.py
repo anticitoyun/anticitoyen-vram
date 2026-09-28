@@ -37,6 +37,13 @@ from .graphs import depaqueter_logprobs, rapatriement_epingle_actif
 from ..kernels.gemm_etroit import etroites_texte
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
+# 276 g : tour de vision dans le fil de préparation (Engine.encoder_images), hors de `_admit`, recouverte avec le pas ;
+# DÉFAUT 1 si l'identité au bit tient (scellé 276 g) ; 0 = tour dans `_admit` (témoin, comportement d'avant)
+_TOUR_PREPARATION = os.environ.get("ACVRAM_TOUR_PREPARATION", "1") == "1"
+# 276 h : flux CUDA annexes pour les tours hors du pas — OPT-IN (2 = deux tours en vol) : mesuré 27/09, mur −5 % mais TTFT
+# moyen +9 % contre la 276 g (les requêtes arrivent par paires, préfills plus gros, attente plus longue) ; défaut 1 = régime 276 g
+_TOUR_FLUX = max(1, int(os.environ.get("ACVRAM_TOUR_FLUX", "1") or "1"))
+_VERROU_RESERVE_FLUX = threading.Lock()
 
 __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
 
@@ -65,6 +72,10 @@ def chemin_moe_atteint(compteurs: list[dict]) -> str:
 # Pièce 284 b (DÉFAUT) : préfill « une par une » (hybride + frontière d'instantané, ou toute séquence hors lot) réordonné
 # couche par couche — au bit, déquantification partagée par couche. 0 = témoin (la boucle d'avant, telle quelle).
 _PREFILL_TRANCHES = os.environ.get("ACVRAM_PREFILL_TRANCHES", "1") == "1"
+
+# Pièce 277e : pas de recouvrement gardés après un repli du spéculatif sur le pas simple (proposeur muet) avant de
+# revider pour reproposer (`_pas_speculatif`) ; 0 = reproposer à chaque pas. Sans effet sous --speculative none (défaut).
+_SPEC_REPOS = int(os.environ.get("ACVRAM_SPEC_REPOS", "2"))
 
 @dataclass
 class Sequence:
@@ -747,6 +758,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # porte `pipeline=1|0`.
         self._pipeline_pendiente: Optional[dict] = None
         self.pipeline_actif = os.environ.get("ACVRAM_PIPELINE", "1") not in ("0", "")
+        # Pièce 277e : après un repli du spéculatif sur le pas simple (proposeur muet), rester en recouvrement ce
+        # nombre de pas avant de revider pour reproposer — sinon un proposeur hésitant alterne amorce et vidage et
+        # ne recouvre jamais (`_pas_speculatif`). 0 = reproposer à chaque pas.
+        self.spec_repos_max = _SPEC_REPOS
+        self._spec_repos = 0
         # Levier 2 : rapatriement des ids du pas par tampon hôte épinglé à
         # double parité (`_apres_echantillon`) — DÉFAUT depuis le verdict poste4
         # (22/09 : ids/logprobs au bit 3/3, trou_gpu 165 → 24 µs, ABBA service
@@ -1081,10 +1097,78 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     ids.update(int(x) for x in v if isinstance(x, int))
         return ids
 
+    def _positions_images(self, seq: "Sequence") -> None:
+        """M-RoPE (engine/mrope) : positions [3, T] et delta de l'invite depuis (debut, fin, supplement["image_grid_thw"])
+        de chaque image — avant la tour, elles n'en dépendent pas."""
+        if self._mrope_section is not None:
+            from .mrope import grille_de, positions_mrope
+            seq.mrope_positions, seq.rope_delta = positions_mrope(
+                len(seq.prompt_ids),
+                [(im.debut, im.fin, grille_de(im)) for im in seq.images],
+                self._mrope_merge)
+
+    def _rendus_en_traits(self, rendus: list, request_id: str, ou: str) -> tuple[list, Optional[list]]:
+        """(image_embeds, image_niveaux) depuis [(debut, fin, traits, niveaux)] — deepstack tous ou aucun ; ligne de journal."""
+        embeds = [(d, f, e) for d, f, e, _ in rendus]
+        niveaux = [(d, f, n) for d, f, _, n in rendus] if all(n is not None for *_, n in rendus) else None
+        if niveaux is None and any(n is not None for *_, n in rendus):
+            raise ValueError("tour de vision : niveaux deepstack rendus pour une partie des images seulement")
+        return embeds, niveaux
+
+    def _reserve_flux_tour(self) -> Any:
+        """276 h : la réserve (queue.Queue) des `_TOUR_FLUX` flux CUDA annexes des tours hors du pas, créée une fois ;
+        None sans CUDA (la tour tourne sur le flux courant, `traits_niveaux_sur_flux` sans flux)."""
+        if self.vision is None or self.vision.device.type != "cuda":
+            return None
+        reserve = getattr(self, "_flux_tours", None)
+        if reserve is None:
+            with _VERROU_RESERVE_FLUX:
+                reserve = getattr(self, "_flux_tours", None)
+                if reserve is None:
+                    import queue
+                    reserve = queue.Queue()
+                    for _ in range(_TOUR_FLUX):
+                        reserve.put(torch.cuda.Stream(self.vision.device))
+                    self._flux_tours = reserve
+        return reserve
+
+    def encoder_images(self, images: Any, request_id: str = "") -> Optional[tuple[list, Optional[list]]]:
+        """276 g : la tour de vision HORS du pas moteur, appelée depuis le fil de préparation du serveur, image par
+        image (MÊME `traits_niveaux` que `_admit` : au bit), sur un flux CUDA annexe pour se recouvrir avec le pas en
+        cours, sous le verrou de capture des graphes. Rend ``(image_embeds, image_niveaux)`` à passer à `add_request`
+        (``traits=``) ; None sans image. Une tour qui échoue lève (ValueError nommée) : le serveur refuse la requête."""
+        import contextlib
+        ims = sorted((ImageRequete.depuis(i) for i in (images or [])), key=lambda i: i.debut)
+        if not ims:
+            return None
+        if self.vision is None:
+            raise SansTourVision(f"{len(ims)} image(s) pour un modèle sans tour de vision (manifeste vision: non)")
+        verrou = getattr(getattr(self, "graphs", None), "verrou_capture", None)
+        # 276 h : lecteur (N tours en vol) quand le verrou le sait, sinon le verrou tel quel (un seul en vol)
+        garde = contextlib.nullcontext() if verrou is None else (verrou.lecteur() if hasattr(verrou, "lecteur") else verrou)
+        reserve = self._reserve_flux_tour()
+        flux = reserve.get() if reserve is not None else None        # bloque quand les N flux sont tous en vol
+        try:
+            with garde:
+                rendus = [(im.debut, im.fin,
+                           *self.vision.traits_niveaux_sur_flux(im.pixel_values, im.fin - im.debut,
+                                                                supplement=getattr(im, "supplement", None), flux=flux))
+                          for im in ims]
+        finally:
+            if reserve is not None:
+                reserve.put(flux)
+        embeds, niveaux = self._rendus_en_traits(rendus, request_id, "préparation")
+        print("[engine] tour (préparation) : " + " ; ".join(
+            f"[{d},{f}) {tuple(e.shape)} sha={im.sha256[:8]} Σ={float(e.float().abs().sum()):.4g}"
+            for (d, f, e), im in zip(embeds, ims)) + f" request_id={request_id}", flush=True)
+        return embeds, niveaux
+
     def add_request(self, prompt_ids: list[int], params: SamplingParams,
-                    request_id: str = "", images: Any = None) -> Sequence:
+                    request_id: str = "", images: Any = None, traits: Any = None) -> Sequence:
         """``images`` (multimodal P1) : itérable de (debut, fin, pixel_values,
-        sha256) ou d'objets à ces attributs — voir engine/vision.ImageRequete."""
+        sha256) ou d'objets à ces attributs — voir engine/vision.ImageRequete.
+        ``traits`` (276 g) : ``(image_embeds, image_niveaux)`` déjà calculés par `encoder_images` — la tour ne
+        tourne pas dans `_admit` pour cette séquence."""
         if len(prompt_ids) >= self.max_model_len:
             raise ValueError(
                 f"invite de {len(prompt_ids)} jetons au-delà de max_model_len "
@@ -1097,6 +1181,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         verifier_plages(ims, len(prompt_ids))
         seq = Sequence(list(prompt_ids), params, request_id)
         seq.images = sorted(ims, key=lambda i: i.debut)
+        if traits is not None and seq.images:
+            embeds, niveaux = traits
+            if len(embeds) != len(seq.images) or any((d, f) != (im.debut, im.fin) for (d, f, _), im in zip(embeds, seq.images)):
+                raise ValueError("traits d'images sans rapport avec les plages de la requête (276 g)")
+            self._positions_images(seq)
+            seq.image_embeds, seq.image_niveaux = list(embeds), (list(niveaux) if niveaux is not None else None)
         if params.ignore_eos:
             self.stats.sequences_ignore_eos += 1
         with self._lock:
@@ -1145,25 +1235,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                         # M-RoPE (engine/mrope) : positions [3, T] et delta de
                         # l'invite depuis (debut, fin, supplement["image_grid_thw"])
                         # de chaque image — avant la tour, elles n'en dépendent pas
-                        if self._mrope_section is not None:
-                            from .mrope import grille_de, positions_mrope
-                            seq.mrope_positions, seq.rope_delta = positions_mrope(
-                                len(seq.prompt_ids),
-                                [(im.debut, im.fin, grille_de(im)) for im in seq.images],
-                                self._mrope_merge)
+                        self._positions_images(seq)
                         rendus = [
                             (im.debut, im.fin,
                              *self.vision.traits_niveaux(im.pixel_values, im.fin - im.debut,
                                                          supplement=getattr(im, "supplement", None)))
                             for im in seq.images]
-                        seq.image_embeds = [(d, f, e) for d, f, e, _ in rendus]
-                        # Deepstack : les niveaux suivent les traits, tous ou aucun
-                        # (une tour rend le même nombre de niveaux pour chaque image)
-                        seq.image_niveaux = ([(d, f, n) for d, f, _, n in rendus]
-                                             if all(n is not None for *_, n in rendus) else None)
-                        if seq.image_niveaux is None and any(n is not None for *_, n in rendus):
-                            raise ValueError("tour de vision : niveaux deepstack rendus pour une partie "
-                                             "des images seulement")
+                        # Deepstack : les niveaux suivent les traits, tous ou aucun (même règle que `encoder_images`)
+                        seq.image_embeds, seq.image_niveaux = self._rendus_en_traits(rendus, seq.request_id, "_admit")
                         # Le journal dit que la tour a tourné (poste2 15 h 00 : « aucune ligne tour ») —
                         # une somme des traits par image, pour qu'une image différente se voie
                         print("[engine] tour : " + " ; ".join(
@@ -1707,14 +1786,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             t0 = time.perf_counter()
             b_reel = len(decodable)
             if self.speculator is not None and self._garde_spec.eligible(b_reel):
-                if self._pipeline_pendiente is not None:
-                    # pièce 277 : un pas simple est encore en vol — le livrer d'abord ; spéculer au pas suivant, sur
-                    # un état et un `output_ids` de nouveau d'accord (sinon jetons répétés, sortie ≠ décodage simple)
-                    outputs += self._pipeline_vider()
-                else:
-                    n0 = self.stats.decode_tokens
-                    outputs += self._speculative_decode(decodable)
-                    self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
+                outputs += self._pas_speculatif(decodable, b_reel)
             else:
                 outputs += self._plain_decode(decodable)
             t1 = time.perf_counter()

@@ -118,13 +118,13 @@ esac
 
 qui_tient() {
   [ -r "$INFO" ] || { echo "detenteur inconnu"; return; }
-  read -r p t n y < "$INFO" 2>/dev/null || { echo "detenteur inconnu"; return; }
-  if [ -n "${p:-}" ] && kill -0 "$p" 2>/dev/null; then
-    echo "PID $p ($n, ${y:-?}) depuis $(( $(date +%s) - t )) s"
-  else
-    # INFO peut survivre a un kill -9 ; le VERROU, lui, est deja libere.
-    echo "detenteur disparu (info perimee)"
-  fi
+  local p t n y out=""
+  while read -r p t n y _; do                 # une ligne par service vivant (27/09)
+    [ -n "${p:-}" ] && kill -0 "$p" 2>/dev/null || continue
+    out="$out${out:+ + }PID $p ($n, ${y:-?}) depuis $(( $(date +%s) - t )) s"
+  done < "$INFO"
+  # INFO peut survivre a un kill -9 ; le VERROU, lui, est deja libere.
+  if [ -n "$out" ]; then echo "$out"; else echo "detenteur disparu (info perimee)"; fi
 }
 
 _lister_partages() {
@@ -257,7 +257,13 @@ if [ "$TYPE" = partage ]; then
 fi
 
 exec 9>"$VERROU" || { echo "carte.sh : $VERROU inaccessible" >&2; exit 65; }
-if ! flock -n 9; then
+# Pièce ComfyUI (27/09, bd kmb) : DEUX SERVICES PARTAGENT LA CARTE (llama-server
+# d'Open WebUI + ComfyUI sur la 5090) — un service prend le verrou en PARTAGÉ
+# (flock -s) ; une mesure ou un réglage d'état le prend toujours en EXCLUSIF, donc
+# reste refusé tant qu'UN service vit (refus mutuel nommé inchangé). Le `.qui`
+# porte alors UNE LIGNE PAR SERVICE vivant (première ligne = contrat 4 champs).
+_flock_mode=-n; [ "$TYPE" = service ] && _flock_mode=-sn
+if ! flock $_flock_mode 9; then
   # REFUS MUTUEL NOMME service <-> mesure. Un service permanent ne rend jamais
   # le verrou de lui-meme : une mesure qui l'attendrait perdrait ses 30 min pour
   # rien, et un service qui attendrait une mesure bloquerait un serveur. Quand
@@ -303,7 +309,7 @@ if ! flock -n 9; then
       echo "ABANDON apres $(( $(date +%s) - debut )) s : carte toujours tenue par $(qui_tient)" >&2
       exit 3; }
     pas=$(( reste < 30 ? reste : 30 ))
-    flock -w "$pas" 9 && break
+    if [ "$TYPE" = service ]; then flock -s -w "$pas" 9 && break; else flock -w "$pas" 9 && break; fi
     echo "  ... $(( $(date +%s) - debut )) s, toujours $(qui_tient)" >&2
   done
   [ -z "${ACVRAM_TICKET_DESACTIVE:-}" ] && _ticket_avancer "$VERROU" "$_mon_ticket" 12
@@ -362,7 +368,16 @@ if [ "$TYPE" = service ]; then
     setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" >> "$_log" 2>&1 < /dev/null &
   fi
   _srv=$!
-  printf '%s %s %s %s\n' "$_srv" "$(date +%s)" "$NOM" "$TYPE" > "$INFO"
+  # Une ligne par service vivant : on garde celles des services encore en vie,
+  # on jette les périmées (mesure morte, service mort sans gardien), on ajoute la sienne.
+  _tmpq="$INFO.$_srv.tmp"; : > "$_tmpq"
+  if [ -r "$INFO" ]; then
+    while read -r _qp _qt _qn _qy _; do
+      [ "${_qy:-}" = service ] && kill -0 "$_qp" 2>/dev/null && printf '%s %s %s %s\n' "$_qp" "$_qt" "$_qn" "$_qy" >> "$_tmpq"
+    done < "$INFO"
+  fi
+  printf '%s %s %s %s\n' "$_srv" "$(date +%s)" "$NOM" "$TYPE" >> "$_tmpq"
+  mv -f "$_tmpq" "$INFO"
   printf '%s prise   %-8s %-32s %s (detache, verrou herite)\n' "$(date +%FT%T)" "$_srv" "$NOM" "$TYPE" >> "$_jour" 2>/dev/null || true
   # anticitoyen-vram-jxm : entre la mort du service et ce reveil (jusqu'a 5 s
   # de sommeil), un NOUVEAU detenteur (mesure ou autre service) peut deja avoir
@@ -370,7 +385,7 @@ if [ "$TYPE" = service ]; then
   # par carte) — un `rm -f` inconditionnel effacait alors l'INFO du detenteur
   # ACTUEL, encore vivant, flock compris (qui_tient() mentait « personne »).
   # Ne retirer .qui que s'il porte encore CE pid de service.
-  setsid sh -c 'while kill -0 '"$_srv"' 2>/dev/null; do sleep 5; done; p=; read -r p _ < "'"$INFO"'" 2>/dev/null; [ "$p" = "'"$_srv"'" ] && rm -f "'"$INFO"'"; printf "%s rendue  %-8s %-32s %s (service mort)\n" "$(date +%FT%T)" "'"$_srv"'" "'"$NOM"'" "'"$TYPE"'" >> "'"$_jour"'" 2>/dev/null' 9>&- >/dev/null 2>&1 < /dev/null &
+  setsid sh -c 'while kill -0 '"$_srv"' 2>/dev/null; do sleep 5; done; f="'"$INFO"'"; if [ -r "$f" ]; then grep -v "^'"$_srv"' " "$f" > "$f.'"$_srv"'.tmp" 2>/dev/null; if [ -s "$f.'"$_srv"'.tmp" ]; then mv -f "$f.'"$_srv"'.tmp" "$f"; else rm -f "$f.'"$_srv"'.tmp"; p=; read -r p _ < "$f" 2>/dev/null; [ "$p" = "'"$_srv"'" ] && rm -f "$f"; fi; fi; printf "%s rendue  %-8s %-32s %s (service mort)\n" "$(date +%FT%T)" "'"$_srv"'" "'"$NOM"'" "'"$TYPE"'" >> "'"$_jour"'" 2>/dev/null' 9>&- >/dev/null 2>&1 < /dev/null &
   echo "$_srv"                                   # le lanceur lit le PID du serveur
   exit 0
 fi

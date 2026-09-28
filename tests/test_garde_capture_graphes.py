@@ -56,3 +56,21 @@ def test_ligne_de_regime_dit_l_abandon():
     etat = "graphes=" + ("on" if r["graphes"] and not r.get("graphes_abandon") else "off" + f"abandon({r['graphes_abandon']})")
     assert etat.startswith("graphes=offabandon(capture clé")
     assert "graphes_abandon" in Engine.regime.__doc__ or True           # la clé est publiée par `regime()`
+
+
+def test_cache_non_rendu_rendu_avant_de_juger(monkeypatch):
+    """t5e 27/09 : 614 Mio libres pour le pilote, mais 3 Gio de cache PyTorch non rendu après le préfill de
+    chauffe. Avant : capture refusée (repli eager, baisse de contexte, service refusé). Après : empty_cache,
+    nouvelle photo, capture admise. Sans cache non rendu, aucun empty_cache et le refus tient."""
+    import torch
+    appels = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: appels.append(1))
+    gr = GraphRunner.__new__(GraphRunner)
+    gr.abandon_capture = None
+    photos = iter([{"libre": 614 * 2 ** 20, "total": 32 * 2 ** 30, "reserve": 25 * 2 ** 30, "alloue": 22 * 2 ** 30},
+                   {"libre": 3686 * 2 ** 20, "total": 32 * 2 ** 30, "reserve": 22 * 2 ** 30, "alloue": 22 * 2 ** 30}])
+    gr._photo_memoire = lambda: next(photos)
+    assert gr._garde_capture((12, 1, 8, 0)) is None and appels == [1]
+    appels.clear()
+    r = _gr(614)._garde_capture((12, 1, 8, 0))                         # réservé = alloué : rien à rendre
+    assert r is not None and "capture refusée" in r and appels == []

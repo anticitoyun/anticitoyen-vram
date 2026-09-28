@@ -36,9 +36,10 @@ seul son contenu change) reste capturable ; `_eligible()` le distingue.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
-from typing import Optional
+from typing import Any, Iterator, Optional
 
 import torch
 
@@ -238,6 +239,81 @@ def _avec_tokens(batch: "ForwardBatch", tokens: torch.Tensor) -> "ForwardBatch":
     return b2
 
 
+def _rendre_pile() -> Optional[tuple[int, int]]:
+    """dut (27/09) : ramène la limite de pile CUDA (mémoire locale par fil) au défaut et rend au pilote ce qu il gardait.
+    À froid, l autotune Triton essaie des configurations qui débordent en mémoire locale ; le pilote garde la réserve au
+    MAXIMUM jamais demandé (12 256 o/fil mesurés, × 170 SM × 1 536 fils ≈ 2,7 Gio) : chauffe à 1,6 Gio libres, capture
+    refusée ou confirmation échouée, serveur mort au premier démarrage d une version (worktree ou paquet neuf). Le pilote
+    regrandit la réserve au lancement d un noyau qui en a besoin : aucune sortie ne change (lieu du débordement seul).
+    Rend (avant, après) en octets par fil, ou None (à sec, témoin ACVRAM_PILE_RENDUE=0, pilote muet)."""
+    if os.environ.get("ACVRAM_PILE_RENDUE", "1") == "0" or not torch.cuda.is_available():
+        return None
+    import ctypes
+    try:
+        cu = ctypes.CDLL("libcuda.so.1")
+        pile = ctypes.c_size_t(0)
+        if cu.cuCtxGetLimit(ctypes.byref(pile), 0) != 0:           # 0 = CU_LIMIT_STACK_SIZE
+            return None
+        cible = int(os.environ.get("ACVRAM_PILE_OCTETS", "1024"))
+        if pile.value <= cible:
+            return (pile.value, pile.value)
+        torch.cuda.synchronize()
+        if cu.cuCtxSetLimit(0, ctypes.c_size_t(cible)) != 0:
+            return None
+        return (pile.value, cible)
+    except Exception:                                               # noqa: BLE001
+        return None
+
+
+class VerrouCapture:
+    """276 g/h : une capture de graphe (mode global) et un noyau lancé d'un AUTRE fil s'invalident mutuellement. 276 g :
+    un seul verrou, donc une seule tour de vision en vol — les 12 tours d'une rafale restaient sérielles (mur non tenu).
+    276 h : lecteurs / rédacteur — `with verrou.lecteur():` = une tour en vol, plusieurs coexistent ; `with verrou:` =
+    la capture, seule, qui attend la fin des tours en vol et fait attendre les suivantes (priorité au rédacteur : une
+    rafale de tours ne peut pas repousser une capture sans fin)."""
+
+    def __init__(self) -> None:
+        import threading
+        self._cond = threading.Condition(threading.Lock())
+        self._lecteurs = 0
+        self._redacteur = False
+        self._redacteurs_en_attente = 0
+        self.lecteurs_max = 0          # observé : tours simultanées (journal, tests)
+
+    def __enter__(self) -> "VerrouCapture":
+        with self._cond:
+            self._redacteurs_en_attente += 1
+            while self._redacteur or self._lecteurs:
+                self._cond.wait()
+            self._redacteurs_en_attente -= 1
+            self._redacteur = True
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        with self._cond:
+            self._redacteur = False
+            self._cond.notify_all()
+
+    def locked(self) -> bool:
+        with self._cond:
+            return self._redacteur or self._lecteurs > 0
+
+    @contextlib.contextmanager
+    def lecteur(self) -> Iterator[None]:
+        with self._cond:
+            while self._redacteur or self._redacteurs_en_attente:
+                self._cond.wait()
+            self._lecteurs += 1
+            self.lecteurs_max = max(self.lecteurs_max, self._lecteurs)
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._lecteurs -= 1
+                if self._lecteurs == 0:
+                    self._cond.notify_all()
+
+
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
     # ACVRAM_HYBRID_SLOTS : plafond du nombre de séquences hybrides (GDN/KDA/
@@ -281,6 +357,10 @@ class GraphRunner:
         # rejeu, et événement enregistré après chaque rejeu
         self._prepare = None
         self.abandon_capture: Optional[str] = None     # cause d un dépassement de délai : captures suivantes refusées
+        # 276 g : une capture (mode global) et un noyau lancé d'un AUTRE fil s'invalident mutuellement (« operation not
+        # permitted when stream is capturing », graphes coupés à vie — leçon runner.py `_etat_eco`). La tour de vision hors
+        # du pas (Engine.encoder_images, fil de préparation) et la capture prennent ce verrou : jamais en même temps.
+        self.verrou_capture = VerrouCapture()      # 276 h : N tours en vol (lecteurs), une capture (rédacteur)
         # Pièce 267 : `GraphRunner` est construit par TOUT `Engine`, même sur un torch CPU-only
         # (roue sans extension CUDA) où `torch.cuda.Event` est une classe factice qui lève à
         # l'instanciation — CI GitHub (runner sans CUDA) rouge sur 62 tests, tous des `Engine`
@@ -552,6 +632,19 @@ class GraphRunner:
         if getattr(self, "abandon_capture", None):
             return self.abandon_capture
         photo = self._photo_memoire()
+        # Le pilote ne voit pas le cache que PyTorch garde sans l utiliser (après un préfill long : activations
+        # rendues à l allocateur, pas au pilote). Sous le seuil, on le rend avant de juger — hors capture, donc
+        # sans risque d interblocage. Sans cela (t5e 27/09) : 614 Mio « libres » à la confirmation de chauffe,
+        # capture refusée, trois baisses de contexte, service refusé sur les 35B ; et repli eager au 1er
+        # serveur à froid (dut). Ne change aucune sortie : seules les réserves de l allocateur bougent.
+        if (photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE
+                and photo["reserve"] > photo["alloue"]):
+            torch.cuda.empty_cache()
+            photo = self._photo_memoire()
+        if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
+            pile = _rendre_pile()                                    # dut : autotune d une forme nouvelle en service
+            if pile is not None and pile[0] > pile[1]:
+                photo = self._photo_memoire()
         if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
             return (f"mémoire libre {photo['libre'] / 2 ** 20:.0f} Mio < "
                     f"{self.MEM_MIN_CAPTURE / 2 ** 20:.0f} Mio : capture refusée (interblocage possible)")
@@ -585,6 +678,16 @@ class GraphRunner:
             return
         self.memoire_avant_capture = photo
         print(f"[graphe] mémoire avant capture : {self._ligne_memoire(photo)}", flush=True)
+        # dut (27/09) : la chauffe a fini l autotune ; la mémoire locale qu il a fait réserver est rendue AVANT de capturer.
+        pile = _rendre_pile()
+        if pile is not None and pile[0] > pile[1]:
+            apres = self._photo_memoire()
+            print(f"[graphe] pile locale rendue : {pile[0]} → {pile[1]} o/fil ; hors allocateur "
+                  f"{self._hors_allocateur(photo):.2f} → {self._hors_allocateur(apres):.2f} Gio", flush=True)
+            self.memoire_avant_capture = apres
+
+    def _hors_allocateur(self, photo: dict) -> float:
+        return (photo["total"] - photo["libre"] - photo["reserve"]) / 2 ** 30
 
     def _apres_echec_capture(self) -> None:
         """Même photo juste après un échec de capture, AVANT `empty_cache` :
@@ -988,6 +1091,12 @@ class GraphRunner:
 
     def _capture(self, b: int, ql: int, nblk: int,
                  batch: ForwardBatch) -> dict:
+        """276 g : sous `verrou_capture` — aucun noyau de la tour hors du pas pendant la capture."""
+        with self.verrou_capture:
+            return self._capture_sans_verrou(b, ql, nblk, batch)
+
+    def _capture_sans_verrou(self, b: int, ql: int, nblk: int,
+                             batch: ForwardBatch) -> dict:
         m = self.model
         d = self.device
         h = m.spec.hidden_size
