@@ -89,8 +89,10 @@ class EngineService:
     def __init__(self, engine: Engine, tokenizer: Optional[Tokenizer],
                  model_name: str) -> None:
         self.engine = engine
-        # 276 k : les sorties d'un préfill en file sont livrées PENDANT le pas, par le même `_deliver` (fil moteur)
-        engine.emettre = lambda sorties: [self._deliver(o) for o in sorties]
+        # 276 k : les sorties d'un préfill en file sont livrées PENDANT le pas, par le même `_deliver` (fil moteur) ;
+        # les fixtures serveur construisent le service SANS moteur (engine=None) : le crochet ne se pose que sur un moteur
+        if engine is not None:
+            engine.emettre = lambda sorties: [self._deliver(o) for o in sorties]
         self.tokenizer = tokenizer
         self.model_name = model_name
         self._queues: dict[str, asyncio.Queue] = {}

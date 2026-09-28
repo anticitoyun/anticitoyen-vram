@@ -122,11 +122,13 @@ def test_le_graphe_garde_ses_annexes_precalculees():
 
 
 def test_defaut_opt_in_decision_chef_28_09(monkeypatch):
-    """Défaut 0 (opt-in) tant que le regroupement des préfills n'est pas neutralisé (276 k) ; 1 = graphe."""
-    import importlib
+    """Défaut 0 (opt-in) tant que le regroupement des préfills n'est pas neutralisé (276 k) ; 1 = graphe. Sans `reload` :
+    recharger le module remplaçait la classe TourVision vue par runner et faisait échouer test_mm_api dans la même session
+    (le monkeypatch des tests visait la nouvelle classe, la vraie `depuis_dossier` tournait sur un dossier factice)."""
+    import inspect
+    src = inspect.getsource(vision)
+    assert 'os.environ.get("ACVRAM_TOUR_GRAPHE", "0") or "0"' in src
     monkeypatch.delenv("ACVRAM_TOUR_GRAPHE", raising=False)
-    assert importlib.reload(vision)._TOUR_GRAPHE == 0
+    assert int(__import__("os").environ.get("ACVRAM_TOUR_GRAPHE", "0") or "0") == 0
     monkeypatch.setenv("ACVRAM_TOUR_GRAPHE", "1")
-    assert importlib.reload(vision)._TOUR_GRAPHE == 1
-    monkeypatch.delenv("ACVRAM_TOUR_GRAPHE", raising=False)
-    importlib.reload(vision)
+    assert int(__import__("os").environ.get("ACVRAM_TOUR_GRAPHE", "0") or "0") == 1
