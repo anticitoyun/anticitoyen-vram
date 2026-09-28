@@ -35,6 +35,10 @@ ETAT = Path(os.environ.get("TMR_ETAT", Path.home() / ".cache" / "acvram" / "menu
 RESULTATS = Path(os.environ.get("TMR_RESULTATS", Path.home() / "TSV" / "menus-reels.tsv"))
 PAUSE = ETAT / "pause"
 QUESTION = "Réponds en un seul mot : quelle est la capitale de la France ?"
+# rc 0 et réponse non vide ne jugent rien : le 28/09, GLM-4.7-Flash rendait « ``| » en boucle (kimi rc 0 compté OK) et
+# claude enchaînait les suites jusqu'au « Prompt is too long ». La réponse doit contenir ATTENDU (casse ignorée) ;
+# le programme juge, personne ne relit la sortie (REGLES § 6).
+ATTENDU = "paris"
 COLONNES = ["date", "alias", "moteur", "verdict", "etape", "cause", "prechargement_s", "models", "completion",
             "kimi_rc", "claude_rc", "arret", "detail"]
 ORDRE = ["acvram", "llamacpp", "vllm", "rapide", "yals", "tabby", "jan"]
@@ -179,6 +183,8 @@ def client(p, nom: str, alias: str, journal: Path, delai: int) -> tuple[str, str
         return str(r.returncode), f"{nom} rc {r.returncode} : {queue(r.stderr) or queue(r.stdout)}"
     if not r.stdout.strip():
         return "0", f"{nom} : réponse vide"
+    if ATTENDU not in r.stdout.casefold():
+        return "0", f"{nom} : réponse sans « Paris » ({len(r.stdout)} o : fausse ou dégénérée)"
     return "0", ""
 
 
@@ -233,10 +239,11 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                 return panne("complétion", f"{type(e).__name__} : {e}"[:200])
             if not texte:
                 return panne("complétion", "réponse vide (contenu et raisonnement)")
-            ligne["completion"] = "ok"
+            # sans « Paris » : noté, mais les clients sont joués quand même (64 jetons de raisonnement peuvent finir avant)
+            ligne["completion"] = "ok" if ATTENDU in texte.casefold() else "sans Paris"
         # les deux clients sont joués indépendamment : claude d abord (serveur préchargé à son contexte), puis kimi
         # (kimi-modele relance à 34 816 si besoin) ; une panne de l un ne masque pas l autre.
-        pannes = []
+        pannes = [("complétion", "complétion sans « Paris »")] if ligne["completion"] == "sans Paris" else []
         if moteur in SANS_CLAUDE:
             ligne["claude_rc"] = "n/a"
         else:
@@ -257,6 +264,35 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                 ligne["detail"] = "arrêt : " + ligne["arret"]
 
 
+def rejuger() -> int:
+    """Lignes OK écrites avant le contrôle « Paris » : chaque section client rc 0 du journal est rejugée ; une réponse
+    sans ATTENDU passe la ligne en PANNE. TSV réécrit, l'ancien gardé en .avant-rejuger."""
+    if not RESULTATS.exists():
+        print(f"{RESULTATS} absent : rien à rejuger."); return 0
+    lignes, n = RESULTATS.read_text(encoding="utf-8").splitlines(), 0
+    for i, l in enumerate(lignes):
+        c = l.split("\t")
+        if l.startswith("#") or len(c) < len(COLONNES) or c[3] != "OK":
+            continue
+        journal = ETAT / "journaux" / f"{c[0]}.log"
+        t = journal.read_text(encoding="utf-8", errors="replace") if journal.exists() else ""
+        pannes = []
+        for nom, etape in (("claude-modele", "claude"), ("kimi-modele", "kimi")):
+            m = re.search(rf"--- {nom} rc=0\n(.*?)(?=\n--- |\Z)", t, re.S)
+            if m and ATTENDU not in m.group(1).casefold():
+                pannes.append((etape, f"{nom} : réponse sans « Paris » (rejugé sur le journal)"))
+        if pannes:
+            c[3:6] = ["PANNE", "+".join(e for e, _ in pannes), " | ".join(x for _, x in pannes)]
+            lignes[i], n = "\t".join(c), n + 1
+            print(f"PANNE {c[0]} {c[4]}")
+    if n:
+        RESULTATS.with_name(RESULTATS.name + ".avant-rejuger").write_text(RESULTATS.read_text(encoding="utf-8"),
+                                                                           encoding="utf-8")
+        RESULTATS.write_text("\n".join(lignes) + "\n", encoding="utf-8")
+    print(f"{n} ligne(s) OK passée(s) en PANNE.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pour-de-vrai", action="store_true")
@@ -268,7 +304,11 @@ def main() -> int:
     ap.add_argument("--max", type=int, default=0, help="au plus N alias dans ce passage (0 : tous)")
     ap.add_argument("--attente", type=int, default=1800, help="ACVRAM_ATTENTE des lanceurs (verrou de carte)")
     ap.add_argument("--delai-client", type=int, default=600, help="délai de chaque client (s)")
+    ap.add_argument("--rejuger", action="store_true",
+                    help="rejuge les lignes OK du TSV sur leurs journaux (contrôle « Paris »), sans rien lancer")
     a = ap.parse_args()
+    if a.rejuger:
+        return rejuger()
     p = charger(os.environ.get("ACVRAM_PARC_CONFIG"))
     cles = secrets(p)
     tous = alias_du_menu(p)
