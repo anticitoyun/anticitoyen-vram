@@ -20,11 +20,11 @@ import acvram_parc  # noqa: E402
 MOTIFS = (r"/mnt/", r"/opt/ia", r"/home/[a-z]+", r"/media/")  # chemins de machine seulement : le nom d'auteur (ids GTK fr.anticitoyen.*) n'en est pas un (poste7 20/09)
 
 
-def _gguf(chemin: Path, ctx: int = 4096) -> None:
-    """GGUF v3 minimal : 0 tenseur, 2 clés (general.architecture, llama.context_length)."""
+def _gguf(chemin: Path, ctx: int = 4096, arch: str = "llama") -> None:
+    """GGUF v3 minimal : 0 tenseur, 2 clés (general.architecture, <arch>.context_length)."""
     def s(x: str) -> bytes:
         b = x.encode(); return struct.pack("<Q", len(b)) + b
-    kv = s("general.architecture") + struct.pack("<I", 8) + s("llama") + s("llama.context_length") + struct.pack("<I", 4) + struct.pack("<I", ctx)
+    kv = s("general.architecture") + struct.pack("<I", 8) + s(arch) + s(f"{arch}.context_length") + struct.pack("<I", 4) + struct.pack("<I", ctx)
     chemin.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, 2) + kv + b"\0" * 64)
 
 
@@ -207,3 +207,28 @@ def test_t5eb_fusion_ne_retire_ni_ne_modifie_rien(poste):
     r2 = _installer(poste)
     assert r2.returncode == 0 and "rien (déjà à jour)" in r2.stdout, r2.stdout[-600:]
     assert _empreinte(home) == etat
+
+
+def test_t5eb_le_balayage_ecarte_les_non_chat(poste):
+    """t5e-b (28/09) : parc 0.1.4 mettait au menu de chat un plongement (bge-m3), un reranker, le dossier de modèles d'une
+    application mobile (plusieurs GGUF sans rapport), une zone de transit (*_tmp) et un dossier marqué INVALIDE. Un motif
+    par famille ; un encodeur au nom neutre est reconnu à son architecture GGUF. Rouge sur 0.1.4 (les six y entraient)."""
+    d2 = poste["d2"]
+    (d2 / "rag" / "bge-m3-GGUF").mkdir(parents=True); _gguf(d2 / "rag" / "bge-m3-GGUF" / "bge-m3-q4.gguf", 8192, "bert")
+    (d2 / "rag" / "bge-reranker-v2-m3-GGUF").mkdir(); _gguf(d2 / "rag" / "bge-reranker-v2-m3-GGUF" / "r.gguf", 8192, "bert")
+    (d2 / "Encodeur-Mini").mkdir(); _gguf(d2 / "Encodeur-Mini" / "mini.gguf", 512, "xlm-roberta")
+    (d2 / "Appli-models").mkdir()
+    for n in ("rocinante-12b-q4.gguf", "stheno-8b-q4.gguf"):
+        _gguf(d2 / "Appli-models" / n, 8192)
+    (d2 / "models_gguf_tmp").mkdir(); _gguf(d2 / "models_gguf_tmp" / "Gros-27B-bf16.gguf", 32768)
+    (d2 / "Truc-30B-INVALIDE-fautif").mkdir(); _gguf(d2 / "Truc-30B-INVALIDE-fautif" / "t.gguf", 32768)
+    (d2 / "Eclate-70B").mkdir()                                   # un modèle en deux éclats reste UN modèle, servi
+    for i in (1, 2):
+        _gguf(d2 / "Eclate-70B" / f"eclate-70b-q4-0000{i}-of-00002.gguf", 8192)
+    r = _installer(poste)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-500:]
+    g = (poste["home"] / "TSV" / "gguf-chemins.tsv").read_text().lower()
+    for nom in ("bge-m3", "reranker", "encodeur-mini", "appli-models", "rocinante", "gguf_tmp", "gros-27b", "invalide"):
+        assert nom not in g, (nom, g)
+    assert "petit-7b" in g and "eclate-70b" in g, g
+    assert "écartés du menu de chat : 6" in r.stdout, r.stdout[-1200:]

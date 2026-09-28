@@ -161,14 +161,19 @@ def disques_montes() -> list[Path]:
 
 def lire_ctx_gguf(chemin: Path) -> int | None:
     """Lit <arch>.context_length dans l'en-tête GGUF (v2/v3), sans dépendance."""
+    return entete_gguf(chemin)[1]
+
+
+def entete_gguf(chemin: Path) -> tuple[str | None, int | None]:
+    """(general.architecture, <arch>.context_length) de l'en-tête GGUF (v2/v3) ; (None, None) si illisible."""
     T = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
     try:
         with open(chemin, "rb") as f:
             if f.read(4) != b"GGUF":
-                return None
+                return None, None
             version, = struct.unpack("<I", f.read(4))
             if version < 2:
-                return None
+                return None, None
             n_t, n_kv = struct.unpack("<QQ", f.read(16))
 
             def lire(t):
@@ -186,10 +191,46 @@ def lire_ctx_gguf(chemin: Path) -> int | None:
                 if k.endswith(".context_length"):
                     ctx = int(v)
                 if arch and ctx:
-                    return ctx
-            return ctx
+                    return arch, ctx
+            return arch, ctx
     except Exception:
-        return None
+        return None, None
+
+
+# t5e-b (28/09) : ce que le balayage NE met PAS au menu de chat, une famille = un motif, avec sa raison. parc 0.1.4 y
+# ajoutait bge-m3, bge-reranker, le dossier ChatterUI (modèles du téléphone), models_gguf_tmp et un dossier « INVALIDE ».
+ENCODEURS_GGUF = {"bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "jina-bert-v3", "xlm-roberta", "modern-bert",
+                  "neo-bert", "eurobert", "t5encoder"}
+HORS_CHAT = (
+    (re.compile(r"(^|[-_.])(bge|embed(ding)?s?|rerank(er)?)([-_.]|$)", re.I), "plongement ou reranker (nom)"),
+    (re.compile(r"invalide", re.I), "marqué INVALIDE"),
+    (re.compile(r"(^|[-_])(tmp|temp)$", re.I), "zone de transit (tmp)"),
+)
+_ECLAT = re.compile(r"-\d{5}-of-\d{5}$", re.I)
+ECARTES: dict[str, str] = {}
+
+
+def hors_chat(d: Path) -> str | None:
+    """Raison d'écarter ``d`` du menu de chat, sinon None ; le balayage ne descend pas dans un dossier écarté."""
+    nom = d.stem if d.is_file() else d.name
+    for motif, raison in HORS_CHAT:
+        if motif.search(nom):
+            return raison
+    ggufs = []
+    if d.is_file() and d.suffix.lower() == ".gguf":
+        ggufs = [d]
+    elif d.is_dir() and os.access(d, os.R_OK):
+        try:
+            ggufs = sorted(p for p in d.iterdir() if p.suffix.lower() == ".gguf" and "mmproj" not in p.name.lower())
+        except OSError:
+            ggufs = []
+        if not (d / "config.json").exists() and len({_ECLAT.sub("", p.stem) for p in ggufs}) >= 2:
+            return "collection de plusieurs modèles (dossier d'application)"
+    if ggufs:
+        arch = entete_gguf(ggufs[0])[0]
+        if arch in ENCODEURS_GGUF:
+            return f"encodeur {arch} (plongement ou reranker)"
+    return None
 
 
 def classer(d: Path) -> tuple[str, str, int | None] | None:
@@ -230,6 +271,10 @@ def balayer(racine: Path, profondeur: int, budget: float) -> tuple[list[tuple[Pa
         if time.monotonic() - t0 > budget:
             reste += 1 + len(pile)
             break
+        r = hors_chat(d) if d != racine else None
+        if r:
+            ECARTES[str(d)] = r
+            continue
         c = classer(d)
         if c:
             trouves.append((d, *c))
@@ -244,6 +289,10 @@ def balayer(racine: Path, profondeur: int, budget: float) -> tuple[list[tuple[Pa
             if p.is_dir():
                 pile.append((p, prof + 1))
             elif p.suffix.lower() == ".gguf" and prof < profondeur:
+                r = hors_chat(p)
+                if r:
+                    ECARTES[str(p)] = r
+                    continue
                 c = classer(p)
                 if c:
                     trouves.append((p, *c))
@@ -420,6 +469,8 @@ def main() -> int:
             chemins_alias[al] = chemin
             par_classe[classe] = par_classe.get(classe, 0) + 1
     dire(f"racines : {len(racines)} — " + ", ".join(str(r) for r in racines))
+    if ECARTES:
+        dire(f"écartés du menu de chat : {len(ECARTES)} — " + " ; ".join(f"{Path(k).name} ({v})" for k, v in sorted(ECARTES.items())))
     dire("modèles : " + (", ".join(f"{k} {v}" for k, v in sorted(par_classe.items())) or "aucun"))
     if tronque_total and a.auto:
         dire(f"REFUS --auto : {tronque_total} dossier(s) non balayé(s) ; ajoute la racine à la main (--racine) ou relance sans --auto")
