@@ -15,6 +15,7 @@ import os
 import sys
 import re
 import threading
+import uuid
 from typing import Any, Optional
 
 __all__ = ["Tokenizer", "load_tokenizer", "render_chat",
@@ -155,6 +156,14 @@ class Tokenizer:
                     env = Environment(trim_blocks=True, lstrip_blocks=True)
                     env.globals["raise_exception"] = raise_exception
                     env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
+
+                    # iqm : le `tojson` de transformers (chat_template_utils), que vLLM sert aussi. Celui de Jinja
+                    # refuse `ensure_ascii`/`separators` (GLM-4.7 : TypeError → repli ChatML SANS outils) et
+                    # échappe < > & ' en \u003c… : un schéma d'outil ne se rendait pas comme chez HF.
+                    def tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
+                        return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent,
+                                          separators=separators, sort_keys=sort_keys)
+                    env.filters["tojson"] = tojson
                     self._templates: dict[str, object] = {}
                     self._env = env
         # Le Template COMPILE est mis en cache, pas seulement l'Environment.
@@ -334,6 +343,153 @@ def extraire_appels(texte: str) -> tuple[str, list[dict]]:
     garder.append(texte[pos:])
     reste = "".join(garder).strip() if appels else texte
     return reste, appels
+
+
+# -- API Anthropic (/v1/messages) : outils ---------------------------------------
+# Claude Code ne parle que cette API ; sans `tools` rendus au gabarit ni
+# `tool_use` rendus au client, il tourne sur un alias local SANS AUCUN OUTIL
+# (bd sf2, edz 28/09). Même chemin que /v1/chat/completions : le gabarit HF
+# décrit les outils, `extraire_appels` relit les appels générés.
+def _texte_blocs(contenu: Any) -> str:
+    if isinstance(contenu, str):
+        return contenu
+    return "".join(b.get("text", "") for b in contenu or []
+                   if isinstance(b, dict) and b.get("type") == "text")
+
+
+def outils_anthropic(tools: Any) -> list[dict]:
+    """``tools`` Anthropic ({name, description, input_schema}) au format que
+    les gabarits HF lisent (celui d'OpenAI). Les outils serveur d'Anthropic
+    (``type`` web_search_…, bash_…) n'ont pas de schéma : écartés."""
+    return [{"type": "function",
+             "function": {"name": t["name"],
+                          "description": t.get("description", ""),
+                          "parameters": t.get("input_schema")
+                          or {"type": "object", "properties": {}}}}
+            for t in tools or []
+            if isinstance(t, dict) and isinstance(t.get("name"), str)
+            and t.get("type", "custom") == "custom"]
+
+
+def messages_anthropic(req: dict) -> list[dict]:
+    """Corps /v1/messages -> messages du gabarit. Sans bloc d'outil, rend
+    exactement ce que rendait la route avant sf2 (texte des blocs joint).
+
+    ``tool_use`` (assistant) -> ``tool_calls`` dont les ``arguments`` restent
+    un dict : les gabarits les écrivent par ``tojson`` ou ``|items``
+    (Qwen3-Coder), une chaîne y serait encodée deux fois. ``tool_result``
+    (user) -> un message ``tool`` par résultat, AVANT le texte du même tour :
+    le gabarit attend la réponse juste après l'appel."""
+    out = []
+    systeme = req.get("system")
+    if systeme:
+        out.append({"role": "system", "content": _texte_blocs(systeme)})
+    noms = {}                                        # tool_use_id -> nom d'outil
+    for m in req.get("messages", []):
+        role, contenu = m.get("role", "user"), m.get("content", "")
+        blocs = ([b for b in contenu if isinstance(b, dict)]
+                 if isinstance(contenu, list) else [])
+        appels = [b for b in blocs if b.get("type") == "tool_use"]
+        resultats = [b for b in blocs if b.get("type") == "tool_result"]
+        for b in resultats:
+            d = {"role": "tool", "content": _texte_blocs(b.get("content", "")),
+                 "tool_call_id": b.get("tool_use_id")}
+            if b.get("tool_use_id") in noms:
+                d["name"] = noms[b["tool_use_id"]]
+            out.append(d)
+        texte = _texte_blocs(contenu)
+        if resultats and not texte:
+            continue
+        d = {"role": role, "content": texte}
+        if appels:
+            d["tool_calls"] = [{"id": b.get("id"), "type": "function",
+                                "function": {"name": b.get("name"),
+                                             "arguments": b.get("input") or {}}}
+                               for b in appels]
+            noms.update((b.get("id"), b.get("name")) for b in appels)
+        out.append(d)
+    return _joindre_systemes_tardifs(out)
+
+
+def _joindre_systemes_tardifs(messages: list[dict]) -> list[dict]:
+    """Claude Code glisse des messages « system » dans ``messages`` (contexte des
+    crochets SessionStart : 17 Ko mesurés, iqm 28/09). La plupart des gabarits
+    n'acceptent le système qu'en tête — KAT lève « System message must be at the
+    beginning », le rendu se replie sur ChatML et les outils DISPARAISSENT sans
+    bruit. Chaque système hors tête est joint au user qui le précède (ou au
+    suivant, ou devient un user) : l'ordre du texte est gardé, seule la fin change."""
+    out, attente = [], []
+    for i, m in enumerate(messages):
+        if m["role"] == "system" and i > 0:
+            if out and out[-1]["role"] == "user" and not attente:
+                out[-1] = {**out[-1], "content": f"{out[-1]['content']}\n\n{m['content']}"}
+            else:
+                attente.append(m["content"])
+            continue
+        if attente and m["role"] == "user":
+            m = {**m, "content": "\n\n".join(attente + [m["content"]])}
+            attente = []
+        out.append(m)
+    if attente:
+        out.append({"role": "user", "content": "\n\n".join(attente)})
+    return out
+
+
+def _entree_outil(arguments: str) -> dict:
+    """``input`` d'un ``tool_use`` : toujours un objet (contrat Anthropic)."""
+    try:
+        v = json.loads(arguments)
+    except (json.JSONDecodeError, TypeError):
+        return {"arguments": arguments}
+    return v if isinstance(v, dict) else {"arguments": v}
+
+
+def blocs_anthropic(texte: str, outils: bool) -> tuple[list[dict], bool]:
+    """Texte généré -> blocs ``content`` Anthropic (texte puis ``tool_use``),
+    et vrai s'il y a au moins un appel (stop_reason ``tool_use``). Les id sont
+    tirés au hasard : ceux d'`extraire_appels` se répètent d'un tour à
+    l'autre pour un appel identique, et Claude Code apparie par id."""
+    if outils:
+        reste, appels = extraire_appels(texte)
+        if appels:
+            blocs = [{"type": "text", "text": reste}] if reste else []
+            blocs += [{"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                       "name": a["function"]["name"],
+                       "input": _entree_outil(a["function"]["arguments"])}
+                      for a in appels]
+            return blocs, True
+    return [{"type": "text", "text": texte}], False
+
+
+class FiltreAppels:
+    """Flux avec outils : le texte passe au fil de l'eau, tout ce qui suit
+    « <tool_call> » est retenu (rendu à la fin en blocs structurés) ; un « < »
+    isolé attend, le temps de savoir s'il ouvre la balise — règle de
+    `_stream_chat`. ``reste()`` rend ce qui n'est pas encore sorti quand
+    aucun appel ne se lit : un bloc illisible reste du texte, jamais perdu."""
+
+    def __init__(self) -> None:
+        self.total, self.pend, self.retenu, self.emis = "", "", False, 0
+
+    def pousser(self, delta: str) -> str:
+        self.total += delta
+        if self.retenu:
+            return ""
+        self.pend += delta
+        if "<tool_call>" in self.pend:
+            self.retenu = True
+            sortie, self.pend = self.pend[:self.pend.index("<tool_call>")], ""
+        elif "<" in self.pend and len(self.pend) < 64:
+            return ""
+        else:
+            sortie, self.pend = self.pend, ""
+        self.emis += len(sortie)
+        return sortie
+
+    def reste(self) -> str:
+        sortie = self.total[self.emis:]
+        self.emis = len(self.total)
+        return sortie
 
 
 # -- images : AutoProcessor -> requête interne ---------------------------------
