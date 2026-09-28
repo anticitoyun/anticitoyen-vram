@@ -1,0 +1,59 @@
+[
+{
+"type": "prompt",
+"node_ids": [
+"5"
+],
+"key": "text"
+},
+{
+"type": "negatif",
+"node_ids": [
+"6"
+],
+"key": "text"
+},
+{
+"type": "width",
+"node_ids": [
+"10"
+],
+"key": "width"
+},
+{
+"type": "height",
+"node_ids": [
+"10"
+],
+"key": "height"
+},
+{
+"type": "length",
+"node_ids": [
+"10"
+],
+"key": "length"
+},
+{
+"type": "fps",
+"node_ids": [
+"14"
+],
+"key": "frame_rate"
+},
+{
+"type": "seed",
+"node_ids": [
+"11"
+],
+"key": "noise_seed"
+},
+{
+"type": "steps",
+"node_ids": [
+"11",
+"12"
+],
+"key": "steps"
+}
+]

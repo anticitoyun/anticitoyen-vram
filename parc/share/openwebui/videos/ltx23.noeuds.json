@@ -1,0 +1,69 @@
+[
+{
+"type": "prompt",
+"node_ids": [
+"4"
+],
+"key": "text"
+},
+{
+"type": "negatif",
+"node_ids": [
+"5"
+],
+"key": "text"
+},
+{
+"type": "width",
+"node_ids": [
+"8",
+"10"
+],
+"key": "width"
+},
+{
+"type": "height",
+"node_ids": [
+"8",
+"10"
+],
+"key": "height"
+},
+{
+"type": "length",
+"node_ids": [
+"8"
+],
+"key": "length"
+},
+{
+"type": "length",
+"node_ids": [
+"12"
+],
+"key": "frames_number"
+},
+{
+"type": "fps",
+"node_ids": [
+"6",
+"12",
+"22"
+],
+"key": "frame_rate"
+},
+{
+"type": "seed",
+"node_ids": [
+"14"
+],
+"key": "noise_seed"
+},
+{
+"type": "image",
+"node_ids": [
+"9"
+],
+"key": "image"
+}
+]
