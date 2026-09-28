@@ -317,9 +317,11 @@ Di mana acvram unggul: model MLA (GLM-4.7-Flash) dalam NVFP4 native sm_120, yang
 
 ## Status
 
-Versi 0.6.38. Semuanya berjalan pada 5090: kernel CUDA dikompilasi untuk `sm_120a` (FP4 native) dan `sm_86`, graf CUDA, kuantisasi NVFP4/INT8/INT4, server HTTP. Pengaman terpasang: kartu tidak terlihat oleh sesi kerja (`CUDA_VISIBLE_DEVICES` kosong) dan hanya `outils/carte.sh` yang menyediakannya, di bawah kunci, untuk satu pengukuran sekaligus; seorang pengawas mencatat setiap akses di luar kunci; pengukuran energi yang mencakup lebih dari satu kartu atau kurang dari 10 s dibatalkan; sebuah model yang dimuat dalam rezim terdegradasi menyatakan hal itu dan tidak masuk ke dalam duel.
+Versi 0.7.10. Semuanya berjalan pada 5090: kernel CUDA dikompilasi untuk `sm_120a` (FP4 native) dan `sm_86`, graf CUDA, kuantisasi NVFP4/INT8/INT4, server HTTP. Pengaman terpasang: kartu tidak terlihat oleh sesi kerja (`CUDA_VISIBLE_DEVICES` kosong) dan hanya `outils/carte.sh` yang menyediakannya, di bawah kunci, untuk satu pengukuran sekaligus; seorang pengawas mencatat setiap akses di luar kunci; pengukuran energi yang mencakup lebih dari satu kartu atau kurang dari 10 s dibatalkan; sebuah model yang dimuat dalam rezim terdegradasi menyatakan hal itu dan tidak masuk ke dalam duel.
 
-4 107 tes (`pytest --collect-only -q`, satu menit pada prosesor; tes GPU hanya berjalan di bawah `carte.sh`). Pelacakan pekerjaan: `acvram-memoire/` (aturan, direktori, buku catatan, tinjauan atas beberapa ratus catatan).
+Baru-baru ini: dirilis sebagai paket Debian/Ubuntu (.deb), Arch (AUR), Fedora (RPM) dan Flatpak, selain dari sumber (lihat «Instal»); mirror GitHub publik kini membawa riwayat lengkap (yang telah disaring). Spekulasi `ngram` tidak lagi diaktifkan secara default (bug token berulang pada transisi biasa→spekulatif telah diperbaiki; `--speculative ngram` tetap tersedia atas permintaan eksplisit). Chunked prefill kini menahan hingga 65 536 token konteks pada model besar. Model visi mengenkode gambarnya selama persiapan, bukan selama decoding. Boot pertama dari paket atau pohon baru tidak lagi mati saat penangkapan graf CUDA.
+
+6 752 tes (`pytest --collect-only -q`, satu menit pada prosesor; tes GPU hanya berjalan di bawah `carte.sh`). Pelacakan pekerjaan: `acvram-memoire/` (aturan, direktori, buku catatan, tinjauan atas beberapa ratus catatan).
 
 ---
 
