@@ -20,11 +20,11 @@ import acvram_parc  # noqa: E402
 MOTIFS = (r"/mnt/", r"/opt/ia", r"/home/[a-z]+", r"/media/")  # chemins de machine seulement : le nom d'auteur (ids GTK fr.anticitoyen.*) n'en est pas un (poste7 20/09)
 
 
-def _gguf(chemin: Path, ctx: int = 4096) -> None:
-    """GGUF v3 minimal : 0 tenseur, 2 clés (general.architecture, llama.context_length)."""
+def _gguf(chemin: Path, ctx: int = 4096, arch: str = "llama") -> None:
+    """GGUF v3 minimal : 0 tenseur, 2 clés (general.architecture, <arch>.context_length)."""
     def s(x: str) -> bytes:
         b = x.encode(); return struct.pack("<Q", len(b)) + b
-    kv = s("general.architecture") + struct.pack("<I", 8) + s("llama") + s("llama.context_length") + struct.pack("<I", 4) + struct.pack("<I", ctx)
+    kv = s("general.architecture") + struct.pack("<I", 8) + s(arch) + s(f"{arch}.context_length") + struct.pack("<I", 4) + struct.pack("<I", ctx)
     chemin.write_bytes(b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, 2) + kv + b"\0" * 64)
 
 
@@ -169,3 +169,66 @@ def test_a_sec_zero_ecriture_hors_tmp(poste, tmp_path):
     (poste["home"] / "TSV" / "gguf-chemins.tsv").write_text("")  # on force une réécriture
     assert _installer(poste).returncode == 0
     assert _etat(tmp_path) != avant2, "l'instrument ne voit pas une écriture"
+
+
+def test_t5eb_fusion_ne_retire_ni_ne_modifie_rien(poste):
+    """t5e-b (28/09 11:41, parc 0.1.4) : parc-installer a RÉÉCRIT le config.toml de l'utilisateur (285 → 150 alias, contextes
+    réglés remis au maximum du modèle, clés à point tronquées) et ajouté aux TSV 109 doublons de chemins sous d'autres noms.
+    Ici : un menu existant (alias à nous, contexte réglé, 3e colonne de gabarit, alias d'un moteur absent) doit rester À
+    L'OCTET ; seul un chemin inconnu s'ajoute, sa clé TOML à point quotée ; un second passage n'écrit rien.
+    Rouge sur l'ancien parc-installer : les blocs [models.llamacpp-*] et [models.yals-*] disparaissaient."""
+    import tomllib
+    home, d1 = poste["home"], poste["d1"]
+    (d1 / "Glm-4.7-Q4").mkdir(); _gguf(d1 / "Glm-4.7-Q4" / "glm-4.7-q4.gguf", 16384)
+    petit = d1 / "Petit-7B-Q4_K_M"
+    cfg = home / ".kimi-code" / "config.toml"
+    cfg.write_text(cfg.read_text() + '\n[models.llamacpp-petit]\nprovider = "llamacpp"\nmodel = "petit-7b-q4_k_m.gguf"\n'
+                   'max_context_size = 4096\nmax_output_size = 8192\ncapabilities = ["tool_use"]\n\n'
+                   '[models.yals-ailleurs]\nprovider = "yals"\nmodel = "ailleurs"\nmax_context_size = 2048\n')
+    tsv = home / "TSV"; tsv.mkdir()
+    ligne = f"llamacpp-petit\t{petit}\t4096\t/gabarits/petit.jinja\n"
+    (tsv / "gguf-chemins.tsv").write_text(ligne)
+    (tsv / "notes-modeles.tsv").write_text("# entête\nllamacpp-petit\tbon\tmesuré\t50\tnote\n")
+    avant_cfg, avant_notes = cfg.read_text(), (tsv / "notes-modeles.tsv").read_text()
+    r = _installer(poste)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-500:]
+    apres = cfg.read_text()
+    assert apres.startswith(avant_cfg.rstrip("\n")), "texte existant du config.toml modifié"
+    m = tomllib.loads(apres)["models"]
+    assert m["llamacpp-petit"] == {"provider": "llamacpp", "model": "petit-7b-q4_k_m.gguf", "max_context_size": 4096,
+                                   "max_output_size": 8192, "capabilities": ["tool_use"]}
+    assert m["yals-ailleurs"]["max_context_size"] == 2048
+    assert "llamacpp-glm-4.7-q4-gguf" in m and "llamacpp-glm-4" not in m, sorted(m)          # clé à point quotée
+    assert not [a for a in m if a.startswith("llamacpp-petit-7b")], "doublon du chemin de llamacpp-petit sous un autre nom"
+    g = (tsv / "gguf-chemins.tsv").read_text()
+    assert g.startswith(ligne) and g.count(str(petit)) == 1 and "glm-4.7-q4" in g.lower(), g
+    assert (tsv / "notes-modeles.tsv").read_text().startswith(avant_notes), "notes réécrites"
+    etat = _empreinte(home)
+    r2 = _installer(poste)
+    assert r2.returncode == 0 and "rien (déjà à jour)" in r2.stdout, r2.stdout[-600:]
+    assert _empreinte(home) == etat
+
+
+def test_t5eb_le_balayage_ecarte_les_non_chat(poste):
+    """t5e-b (28/09) : parc 0.1.4 mettait au menu de chat un plongement (bge-m3), un reranker, le dossier de modèles d'une
+    application mobile (plusieurs GGUF sans rapport), une zone de transit (*_tmp) et un dossier marqué INVALIDE. Un motif
+    par famille ; un encodeur au nom neutre est reconnu à son architecture GGUF. Rouge sur 0.1.4 (les six y entraient)."""
+    d2 = poste["d2"]
+    (d2 / "rag" / "bge-m3-GGUF").mkdir(parents=True); _gguf(d2 / "rag" / "bge-m3-GGUF" / "bge-m3-q4.gguf", 8192, "bert")
+    (d2 / "rag" / "bge-reranker-v2-m3-GGUF").mkdir(); _gguf(d2 / "rag" / "bge-reranker-v2-m3-GGUF" / "r.gguf", 8192, "bert")
+    (d2 / "Encodeur-Mini").mkdir(); _gguf(d2 / "Encodeur-Mini" / "mini.gguf", 512, "xlm-roberta")
+    (d2 / "Appli-models").mkdir()
+    for n in ("rocinante-12b-q4.gguf", "stheno-8b-q4.gguf"):
+        _gguf(d2 / "Appli-models" / n, 8192)
+    (d2 / "models_gguf_tmp").mkdir(); _gguf(d2 / "models_gguf_tmp" / "Gros-27B-bf16.gguf", 32768)
+    (d2 / "Truc-30B-INVALIDE-fautif").mkdir(); _gguf(d2 / "Truc-30B-INVALIDE-fautif" / "t.gguf", 32768)
+    (d2 / "Eclate-70B").mkdir()                                   # un modèle en deux éclats reste UN modèle, servi
+    for i in (1, 2):
+        _gguf(d2 / "Eclate-70B" / f"eclate-70b-q4-0000{i}-of-00002.gguf", 8192)
+    r = _installer(poste)
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-500:]
+    g = (poste["home"] / "TSV" / "gguf-chemins.tsv").read_text().lower()
+    for nom in ("bge-m3", "reranker", "encodeur-mini", "appli-models", "rocinante", "gguf_tmp", "gros-27b", "invalide"):
+        assert nom not in g, (nom, g)
+    assert "petit-7b" in g and "eclate-70b" in g, g
+    assert "écartés du menu de chat : 6" in r.stdout, r.stdout[-1200:]
