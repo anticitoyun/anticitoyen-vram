@@ -13,9 +13,11 @@ plutôt qu'une réécriture au hasard.
 
     outils/bumper-version-readme.py 0.7.10 0.7.11              # essai à blanc
     outils/bumper-version-readme.py 0.7.10 0.7.11 --appliquer  # écrit
+    outils/bumper-version-readme.py 0.7.10 0.7.11 --journal /tmp/j.tsv  # journal ailleurs
 
 Écrit un journal de retour AVANT d'agir (même convention que renommer-convertis.py
-et dedoublonner-alias.py)."""
+et dedoublonner-alias.py) : ~/.cache/acvram/bumper-version-readme.journal.tsv par
+défaut, jamais dans l'arbre du dépôt (--journal pour un autre chemin, tests compris)."""
 import re
 import sys
 from pathlib import Path
@@ -74,17 +76,40 @@ def plan_bascule(ancienne: str, nouvelle: str, chemins: list[Path] | None = None
     return plan, refus
 
 
+JOURNAL_PAR_DEFAUT = Path.home() / ".cache" / "acvram" / "bumper-version-readme.journal.tsv"
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    positionnels = [a for a in argv if not a.startswith("--")]
+    appliquer = "--appliquer" in argv
+    journal = JOURNAL_PAR_DEFAUT
+    positionnels = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--appliquer":
+            pass
+        elif a == "--journal":
+            i += 1
+            if i >= len(argv):
+                print("usage : bumper-version-readme.py <ancienne> <nouvelle> [--appliquer] [--journal <chemin>]",
+                      file=sys.stderr)
+                return 64
+            journal = Path(argv[i])
+        elif a.startswith("--"):
+            print(f"REFUS : argument inconnu « {a} »", file=sys.stderr)
+            return 64
+        else:
+            positionnels.append(a)
+        i += 1
     if len(positionnels) != 2:
-        print("usage : bumper-version-readme.py <ancienne> <nouvelle> [--appliquer]", file=sys.stderr)
+        print("usage : bumper-version-readme.py <ancienne> <nouvelle> [--appliquer] [--journal <chemin>]",
+              file=sys.stderr)
         return 64
     ancienne, nouvelle = positionnels
-    appliquer = "--appliquer" in argv
 
     plan, refus = plan_bascule(ancienne, nouvelle)
-    journal = Path(__file__).with_name("bumper-version-readme.journal.tsv")
+    journal.parent.mkdir(parents=True, exist_ok=True)
     with journal.open("w") as j:
         j.write("fichier\tstatut\n")
         for f in plan:
