@@ -317,9 +317,11 @@ Donde acvram va por delante: modelos MLA (GLM-4.7-Flash) en NVFP4 nativo sm_120,
 
 ## Estado
 
-Versión 0.6.38. Todo funciona en la 5090: núcleos CUDA compilados para `sm_120a` (FP4 nativo) y `sm_86`, grafos CUDA, cuantización NVFP4/INT8/INT4, servidor HTTP. Salvaguardas en su lugar: la tarjeta es invisible para las sesiones de trabajo (`CUDA_VISIBLE_DEVICES` vacío) y solo `outils/carte.sh` la presta, bajo cerrojo, a una medición a la vez; un vigía registra cualquier acceso fuera del cerrojo; una medición de energía que abarque más de una tarjeta o menos de 10 s se invalida; un modelo cargado en régimen degradado lo dice y no entra en un duelo.
+Versión 0.7.10. Todo funciona en la 5090: núcleos CUDA compilados para `sm_120a` (FP4 nativo) y `sm_86`, grafos CUDA, cuantización NVFP4/INT8/INT4, servidor HTTP. Salvaguardas en su lugar: la tarjeta es invisible para las sesiones de trabajo (`CUDA_VISIBLE_DEVICES` vacío) y solo `outils/carte.sh` la presta, bajo cerrojo, a una medición a la vez; un vigía registra cualquier acceso fuera del cerrojo; una medición de energía que abarque más de una tarjeta o menos de 10 s se invalida; un modelo cargado en régimen degradado lo dice y no entra en un duelo.
 
-4 107 pruebas (`pytest --collect-only -q`, un minuto en procesador; las pruebas de GPU solo se ejecutan bajo `carte.sh`). Seguimiento del trabajo: `acvram-memoire/` (reglas, directorio, cuadernos, revisión de varios cientos de notas).
+Recientemente: publicado en paquete Debian/Ubuntu (.deb), Arch (AUR), Fedora (RPM) y Flatpak, además de la fuente (ver «Instalar»); el espejo público de GitHub porta ahora el historial completo (filtrado). La especulación `ngram` ya no está activada por defecto (un error de tokens repetidos en el paso de simple a especulativo está corregido; `--speculative ngram` sigue disponible bajo pedido explícito). El prefill por tramos sostiene hasta 65 536 tokens de contexto en los modelos grandes. Los modelos con visión codifican sus imágenes durante la preparación, no durante la decodificación. El primer arranque de un paquete o árbol nuevo ya no muere en la captura de grafos CUDA.
+
+6 752 pruebas (`pytest --collect-only -q`, un minuto en procesador; las pruebas de GPU solo se ejecutan bajo `carte.sh`). Seguimiento del trabajo: `acvram-memoire/` (reglas, directorio, cuadernos, revisión de varios cientos de notas).
 
 ---
 

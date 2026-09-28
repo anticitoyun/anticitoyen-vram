@@ -317,9 +317,11 @@ acvram'ın önde olduğu yerler: vLLM'nin yalnızca FP8'de sunduğu native NVFP4
 
 ## Durum
 
-Sürüm 0.6.38. Her şey 5090'da çalışıyor: `sm_120a` (native FP4) ve `sm_86` için derlenmiş CUDA çekirdekleri, CUDA grafikleri, NVFP4/INT8/INT4 nicemleme, HTTP sunucusu. Koruyucular yerinde: kart çalışma oturumlarına görünmez (boş `CUDA_VISIBLE_DEVICES`) ve yalnızca `outils/carte.sh` onu, kilit altında, seferde bir ölçüm için sunar; bir gözlemci kilit dışındaki her erişimi günlüğe kaydeder; birden fazla kartı kapsayan veya 10 s'den kısa bir enerji ölçümü geçersiz kılınır; bozulmuş rejimde yüklenen bir model bunu belirtir ve bir düelloya girmez.
+Sürüm 0.7.10. Her şey 5090'da çalışıyor: `sm_120a` (native FP4) ve `sm_86` için derlenmiş CUDA çekirdekleri, CUDA grafikleri, NVFP4/INT8/INT4 nicemleme, HTTP sunucusu. Koruyucular yerinde: kart çalışma oturumlarına görünmez (boş `CUDA_VISIBLE_DEVICES`) ve yalnızca `outils/carte.sh` onu, kilit altında, seferde bir ölçüm için sunar; bir gözlemci kilit dışındaki her erişimi günlüğe kaydeder; birden fazla kartı kapsayan veya 10 s'den kısa bir enerji ölçümü geçersiz kılınır; bozulmuş rejimde yüklenen bir model bunu belirtir ve bir düelloya girmez.
 
-4.107 test (`pytest --collect-only -q`, işlemcide bir dakika; GPU testleri yalnızca `carte.sh` altında çalışır). İşin takibi: `acvram-memoire/` (kurallar, dizin, defterler, birkaç yüz notun incelemesi).
+Son zamanlarda: kaynağa ek olarak (bkz. «Kur»), artık Debian/Ubuntu paketi (.deb), Arch (AUR), Fedora (RPM) ve Flatpak olarak da yayımlanıyor; genel GitHub aynası artık tam (filtrelenmiş) geçmişi taşıyor. `ngram` spekülasyonu artık varsayılan olarak etkin değil (düz→spekülatif geçişte tekrarlanan token hatası giderildi; `--speculative ngram` açıkça istenirse kullanılabilir olmaya devam ediyor). Parçalı prefill artık büyük modellerde 65 536 bağlam tokenine kadar tutabiliyor. Görme modelleri görüntülerini kod çözme sırasında değil, hazırlık sırasında kodluyor. Yeni bir paketin veya ağacın ilk açılışı artık CUDA grafik yakalamasında ölmüyor.
+
+6.752 test (`pytest --collect-only -q`, işlemcide bir dakika; GPU testleri yalnızca `carte.sh` altında çalışır). İşin takibi: `acvram-memoire/` (kurallar, dizin, defterler, birkaç yüz notun incelemesi).
 
 ---
 

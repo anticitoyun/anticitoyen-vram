@@ -30,6 +30,7 @@ def _depot_jetable(tmp_path: pathlib.Path, *, version: str = VNUM, avec_notes: b
     subprocess.run(["git", "-C", str(d), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
     (d / "pyproject.toml").write_text(f'[project]\nname = "acvram"\nversion = "{version}"\n', encoding="utf-8")
+    (d / "README.md").write_text(f"## État\n\nVersion {version}. Reste du texte.\n", encoding="utf-8")  # 295
     outils = d / "outils"; outils.mkdir()
     shutil.copy2(SCRIPT, outils / "sortir-version.sh")
     (outils / "sortir-version.sh").chmod(0o755)
