@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import signal
 import subprocess
 import time
 
@@ -20,12 +21,41 @@ def _env(verrou, **sup):
     return env
 
 
+def _popen(cmd, env, **sup):
+    """Popen dans son PROPRE groupe de processus (start_new_session) : `.terminate()`
+    ne signale que le bash de carte.sh, jamais les enfants qu'il a lancés en
+    arrière-plan (setsid ou non) — piège trouvé par les orphelins `carte.sh
+    sleep N` de ked (27/09). `_finir` signale le GROUPE, pas le seul pid."""
+    return subprocess.Popen(cmd, env=env, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **sup)
+
+
+def _finir(popen):
+    """Termine tout le groupe (le bash de carte.sh + tout ce qu'il a lancé),
+    jamais le seul pid de tête — sinon un enfant détaché (setsid ou simple `&`
+    sans trap) survit, reparenté à init/systemd (ked)."""
+    if popen.poll() is not None:
+        return
+    try:
+        os.killpg(popen.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        popen.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(popen.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    popen.wait(timeout=5)
+
+
 def _partage(verrou, secondes, nom):
     """Lance un PARTAGE détaché (sleep) et rend le Popen de carte.sh."""
-    return subprocess.Popen(
-        ["bash", str(CARTE), "sleep", str(secondes)],
-        env=_env(verrou, ACVRAM_TYPE="partage", ACVRAM_NOM=nom),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return _popen(["bash", str(CARTE), "sleep", str(secondes)],
+                  _env(verrou, ACVRAM_TYPE="partage", ACVRAM_NOM=nom))
 
 
 def test_deux_partages_coexistent(tmp_path):
@@ -37,7 +67,7 @@ def test_deux_partages_coexistent(tmp_path):
     try:
         assert len(quis) == 2, f"deux partages → deux .qui, vu {len(quis)}"
     finally:
-        a.terminate(); b.terminate()
+        _finir(a); _finir(b)
 
 
 def test_un_partage_ne_bloque_pas_un_service(tmp_path):
@@ -54,7 +84,7 @@ def test_un_partage_ne_bloque_pas_un_service(tmp_path):
         srv_pid = r.stdout.strip()
         assert srv_pid.isdigit(), r.stdout
     finally:
-        p.terminate()
+        _finir(p)
         subprocess.run(["pkill", "-f", "sleep 10"], check=False)
 
 
@@ -72,14 +102,13 @@ def test_une_mesure_exclut_les_partages(tmp_path):
         assert dt < 10, f"la mesure a attendu ({dt:.1f}s) au lieu d'un refus immédiat"
         assert "REFUS" in r.stderr and "partage" in r.stderr.lower(), r.stderr[-300:]
     finally:
-        p.terminate()
+        _finir(p)
 
 
 def test_deux_mesures_ne_coexistent_pas(tmp_path):
     verrou = tmp_path / "v.lock"
-    tenant = subprocess.Popen(["bash", str(CARTE), "sleep", "20"],
-                              env=_env(verrou, ACVRAM_TYPE="mesure", ACVRAM_NOM="m1"),
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tenant = _popen(["bash", str(CARTE), "sleep", "20"],
+                     _env(verrou, ACVRAM_TYPE="mesure", ACVRAM_NOM="m1"))
     time.sleep(2)
     try:
         r = subprocess.run(["bash", str(CARTE), "sleep", "1"],
@@ -87,16 +116,15 @@ def test_deux_mesures_ne_coexistent_pas(tmp_path):
                            capture_output=True, text=True, timeout=30)
         assert r.returncode == 3, ("2e mesure aurait dû abandonner (attente bornée)", r.returncode, r.stderr[-200:])
     finally:
-        tenant.terminate()
+        _finir(tenant)
 
 
 def test_partage_refuse_pendant_mesure(tmp_path):
     """Un partagé qui arrive pendant une MESURE est refusé (LOCK_SH sur S bloqué
     par le LOCK_EX de la mesure)."""
     verrou = tmp_path / "v.lock"
-    m = subprocess.Popen(["bash", str(CARTE), "sleep", "20"],
-                         env=_env(verrou, ACVRAM_TYPE="mesure", ACVRAM_NOM="cellule"),
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    m = _popen(["bash", str(CARTE), "sleep", "20"],
+               _env(verrou, ACVRAM_TYPE="mesure", ACVRAM_NOM="cellule"))
     time.sleep(2)
     try:
         r = subprocess.run(["bash", str(CARTE), "sleep", "1"],
@@ -105,7 +133,7 @@ def test_partage_refuse_pendant_mesure(tmp_path):
         assert r.returncode == 4, (r.returncode, r.stderr[-300:])
         assert "REFUS" in r.stderr, r.stderr[-300:]
     finally:
-        m.terminate()
+        _finir(m)
 
 
 def test_partage_admis_pendant_service(tmp_path):
@@ -124,7 +152,7 @@ def test_partage_admis_pendant_service(tmp_path):
         assert quis, "le partagé n'a pas été admis pendant le service"
         assert p.poll() is None, "le partagé s'est arrêté (aurait dû tourner)"
     finally:
-        p.terminate()
+        _finir(p)
         if srv.isdigit():
             subprocess.run(["kill", srv], check=False)
 
@@ -154,4 +182,19 @@ def test_promesse_violee_refuse_sans_kill(tmp_path):
         assert "PROMESSE-VIOLEE" in journal, journal
         assert p.poll() is None, "le partage fautif a été tué (interdit)"
     finally:
-        p.terminate()
+        _finir(p)
+
+
+def test_finir_ne_laisse_aucun_orphelin(tmp_path):
+    """ked (27/09) : `.terminate()` ne signale que le bash de carte.sh, jamais
+    le `sleep` qu'il a lancé en arrière-plan (classe PARTAGE, pas de setsid ni
+    de trap TERM) — orphelin reparenté à init, `carte.sh sleep N` en file
+    après la suite. `_finir` doit couper tout le groupe."""
+    verrou = tmp_path / "v.lock"
+    p = _partage(verrou, 20, "conv")
+    time.sleep(1.5)
+    pgid = os.getpgid(p.pid)
+    _finir(p)
+    time.sleep(0.5)
+    survivants = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
+    assert not survivants, f"processus survivants dans le groupe {pgid} : {survivants}"

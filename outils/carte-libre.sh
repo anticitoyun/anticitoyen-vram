@@ -87,11 +87,20 @@ u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0 2>/dev
 # silencieusement à la lecture (jamais en écriture, un autre process peut
 # écrire pendant qu'on lit).
 JOURNAL_SERVICES=${JOURNAL_SERVICES:-outils/gpu/journal-services.tsv}
+# Pièce poste2 (27/09, nuit) : un llama-server en cours de chargement (pris par
+# carte.sh ACVRAM_TYPE=service, verrou tenu, ligne dans le `.qui` de carte.sh)
+# passait pour un INTRUS — JOURNAL_SERVICES n'existe dans aucun dépôt connu,
+# c'est le `.qui` de carte.sh (contrat 4 champs `<pid> <epoch> <nom> service`,
+# une ligne par service vivant) qui dit la vérité sur ce qui est déclaré.
+QUI_CARTE=${QUI_CARTE:-${ACVRAM_VERROU:-/tmp/acvram-carte-0.lock}.qui}
 service_declare() {
   local pid=$1
-  [ -r "$JOURNAL_SERVICES" ] || return 1
-  awk -v p="$pid" -F'\t' '$1 == p { print $2; found=1 } END { exit !found }' \
-      "$JOURNAL_SERVICES" 2>/dev/null
+  if [ -r "$JOURNAL_SERVICES" ] \
+     && awk -v p="$pid" -F'\t' '$1 == p { found=1 } END { exit !found }' "$JOURNAL_SERVICES" 2>/dev/null; then
+    return 0
+  fi
+  [ -r "$QUI_CARTE" ] || return 1
+  awk -v p="$pid" '$1 == p && $4 == "service" { found=1 } END { exit !found }' "$QUI_CARTE" 2>/dev/null
 }
 
 # DEUX APPELS PARCE QUE `pmon` NE DIT PAS CE QU'ON CROIT. Sa colonne « mem »
