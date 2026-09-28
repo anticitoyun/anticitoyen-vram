@@ -12,6 +12,19 @@
   scellé ≤ 1e-4 de KL non atteint, dit tel quel). `acvram-memoire/revue/poste1-a5v-verdict-28-09.md`,
   `poste5-piece294-verdict-28-09.md`.
 
+### Menus et paquets
+
+* **28/09/2026 — README à jour (pièce 295, poste3 et poste4)** : README.md et ses 31 traductions portent la version et
+  les nouveautés des 0.7.x ; `outils/sortir-version.sh` refuse (code 74) un README qui ne porte pas la version sortie ;
+  `outils/bumper-version-readme.py` bascule le numéro dans les 32 fichiers d'un coup.
+* **28/09/2026 — parc 0.1.5 (poste1, poste1-t5eb 44e480a32) : l'installateur ne détruit plus les menus.** parc 0.1.4
+  réécrivait `~/.kimi-code/config.toml` (285 → 150 alias, contextes remis au maximum, clés à point tronquées) ;
+  `parc-installer` n'ajoute plus que ce qui manque, n'écrase jamais un alias ni un contexte réglé, est idempotent, et
+  écarte les dossiers qui ne sont pas des modèles de chat (plongements, reranker, collections, `*_tmp`, INVALIDE).
+  Menus de l'utilisateur restaurés (285 alias d'avant + 66 nouveaux). **Ne pas réinstaller parc 0.1.4.** Outils de la
+  carte : interblocage carte-libre/campagne en pause corrigé (g2c, poste3), `liberer-vram` ne tue plus les processus
+  d'une autre prise (293).
+
 ### Vision (options, désactivées par défaut)
 
 * **28/09/2026 — pièces 276 i à 276 k (poste6, poste6-276i 9f517b04d).** 276 i : pas de non-déterminisme entre
