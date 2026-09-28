@@ -64,7 +64,14 @@ exit 1
                    f"[moteurs.acvram]\npresent = true\nport = {port}\n")
     env = {**os.environ, "ACVRAM_PARC_CONFIG": str(cfg), "TMR_ETAT": str(tmp_path / "etat"),
            "TMR_RESULTATS": str(tsv / "menus-reels.tsv")}
-    return {"env": env, "port": port, "tsv": tsv / "menus-reels.tsv", "tmp": tmp_path}
+    yield {"env": env, "port": port, "tsv": tsv / "menus-reels.tsv", "tmp": tmp_path}
+    # un test rouge ne laisse pas de faux serveur derrière lui (orphelins du 28/09 : arrêt sauté, port lu à None)
+    r = subprocess.run(["ss", "-tlnpH"], capture_output=True, text=True)
+    for l in r.stdout.splitlines():
+        if f":{port} " in l and "pid=" in l:
+            pid = int(l.split("pid=")[1].split(",")[0])
+            if "serveur.py" in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace"):
+                os.kill(pid, 9)
 
 
 def _lancer(parc, *args):
