@@ -24,8 +24,9 @@ import torch
 
 # 276 j : graphe CUDA de la tour à forme fixe — la tour eager (≈ 8,7 ms/image à 448×448, bornée par ses ~300 lancements)
 # se capture à la première image d'une forme (pixel_values, image_grid_thw) et se rejoue ensuite : mêmes noyaux, même ordre,
-# au bit par construction. 1 = actif (défaut si l'identité de la pièce 276 j tient), 0 = eager (régime 276 g/h).
-_TOUR_GRAPHE = int(os.environ.get("ACVRAM_TOUR_GRAPHE", "1") or "1")
+# au bit par construction (12/12 ×2, jetons 5/5, 28/09). OPT-IN (décision chef 28/09 06 h 5x) : le lot gagne 10 % de mur mais le
+# TTFT p50 perd 10-15 % par regroupement des préfills (pièce 276 j § 3) — défaut quand la 276 k l'aura neutralisé. 0 = eager (276 g/h).
+_TOUR_GRAPHE = int(os.environ.get("ACVRAM_TOUR_GRAPHE", "0") or "0")
 # Formes capturées au plus (une réserve mémoire privée par forme) ; au-delà, eager — jamais une capture sans fin.
 _TOUR_GRAPHE_MAX = max(0, int(os.environ.get("ACVRAM_TOUR_GRAPHE_MAX", "8") or "8"))
 # Une annexe (image_grid_thw : 3 valeurs) entre dans la clé du graphe par ses VALEURS ; au-delà de ce nombre d'éléments

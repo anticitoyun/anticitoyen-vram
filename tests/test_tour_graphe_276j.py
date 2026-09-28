@@ -119,3 +119,14 @@ def test_le_graphe_garde_ses_annexes_precalculees():
     assert "annexes" in GrapheTour.__dataclass_fields__
     src = inspect.getsource(TourVision._capturer)
     assert "annexes=kw" in src
+
+
+def test_defaut_opt_in_decision_chef_28_09(monkeypatch):
+    """Défaut 0 (opt-in) tant que le regroupement des préfills n'est pas neutralisé (276 k) ; 1 = graphe."""
+    import importlib
+    monkeypatch.delenv("ACVRAM_TOUR_GRAPHE", raising=False)
+    assert importlib.reload(vision)._TOUR_GRAPHE == 0
+    monkeypatch.setenv("ACVRAM_TOUR_GRAPHE", "1")
+    assert importlib.reload(vision)._TOUR_GRAPHE == 1
+    monkeypatch.delenv("ACVRAM_TOUR_GRAPHE", raising=False)
+    importlib.reload(vision)
