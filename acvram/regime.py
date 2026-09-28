@@ -238,6 +238,8 @@ VARIABLES: tuple[Variable, ...] = (
              "d19 (27/09) : au-delà du tenu d un seul tenant (chauffe), le cœur GDN tourne par tranches de N jetons (multiple de 64), état porté — borne sa mémoire (245 Ko/jeton sur le 35B) ; 1 ulp bf16 aux dimensions réelles, jamais engagé en dessous ; ligne tranches>N ; 0 = jamais (témoin)"),
     Variable("MOE_MORCEAU", "4096", ("acvram.engine.moe", "_MOE_MORCEAU"), None,
              "d19 (27/09) : au-delà du tenu d un seul tenant (chauffe), le bloc MoE tourne par tranches de N lignes (tampons bornés) — pas au bit du seul tenant, jamais engagé en dessous ; ligne tranches>N ; 0 = jamais (témoin)"),
+    Variable("MLP_MORCEAU", "4096", ("acvram.engine.attention", "_MLP_MORCEAU"), None,
+             "a5v (28/09) : au-delà du tenu résident, le MLP dense tourne par tranches de N jetons (Devstral 34 816 sans exil) ; 0 = témoin"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",

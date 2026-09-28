@@ -287,6 +287,10 @@ VARIABLES_LUES = {
     "ACVRAM_SPEC_REPOS",        # engine/runner.py : 277e, pas de recouvrement après un repli du spéculatif (défaut 2)
     "ACVRAM_GDN_MORCEAU",       # engine/gdn.py : d19, tranches GDN au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
     "ACVRAM_MOE_MORCEAU",       # engine/moe.py : d19, tranches MoE au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
+    "ACVRAM_MLP_MORCEAU",       # engine/attention.py : a5v, tranches du MLP dense au-delà du tenu résident (défaut 4096, 0 = témoin)
+    "ACVRAM_PREFILL_FILE",      # engine/runner.py : 276 k, préfill en file dans le pas (opt-in, défaut 0)
+    "ACVRAM_TOUR_GRAPHE",       # engine/vision.py : 276 j, graphe CUDA de la tour de vision (opt-in, défaut 0)
+    "ACVRAM_TOUR_GRAPHE_MAX",   # engine/vision.py : 276 j, formes d image capturées au plus (défaut 8)
     "ACVRAM_SYNC_COUCHES",
     "ACVRAM_TETE_LIEE",
     "ACVRAM_TRACEBACK",
