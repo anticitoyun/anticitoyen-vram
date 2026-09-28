@@ -60,7 +60,12 @@ import json, pathlib, sys
 cfg = pathlib.Path('$dossier') / 'config.json'
 if cfg.exists():
     d = json.loads(cfg.read_text())
-    print(d.get('max_position_embeddings', 0))
+    # config multimodale (Gemma 4 vision, Qwen-VL…) : la limite du texte est sous text_config (edz 28/09 : lue à 0)
+    for sous in (d, d.get('text_config') or {}, d.get('llm_config') or {}, d.get('language_config') or {}):
+        if sous.get('max_position_embeddings'):
+            print(sous['max_position_embeddings']); break
+    else:
+        print(0)
 else:
     print(0)
 " 2>/dev/null || echo 0)

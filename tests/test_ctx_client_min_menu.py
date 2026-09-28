@@ -94,3 +94,16 @@ def test_ctx_client_min_env_modele_trop_petit(tmp_path):
     assert "65536" in err_txt and "32768" in err_txt, (
         f"chiffres absents du message de refus : {err_txt[:300]}"
     )
+
+
+def test_limite_sous_text_config_multimodal(tmp_path):
+    """Config multimodale : max_position_embeddings sous text_config seulement (Gemma 4 vision) → ajusté, pas « limité à 0 »."""
+    model_dir = tmp_path / "gemma-vision"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"text_config": {"max_position_embeddings": 262144}}))
+    tsv_dir = tmp_path / "TSV"
+    tsv_dir.mkdir()
+    (tsv_dir / "acvram-chemins.tsv").write_text(f"mon-alias\t{model_dir}\t4096\n")
+    res = _run_a_sec("mon-alias", tsv_dir, model_dir, env_extra={"CTX_CLIENT_MIN": "29096"})
+    combined = res.stdout + res.stderr
+    assert "limité à 0" not in combined and "ajusté 4096 → 29096" in combined, combined[:400]
