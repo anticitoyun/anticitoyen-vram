@@ -13,11 +13,13 @@ from acvram.kernels import marlin_port as MP
 RACINE = pathlib.Path(__file__).resolve().parent.parent
 
 
-def _precompile(dossier: pathlib.Path, emp_json: str, emp_so: str, **surcharge) -> pathlib.Path:
+def _precompile(dossier: pathlib.Path, emp_json: str, emp_so: str, so_archs="sm_120f+sm_86+sm_89",
+                **surcharge) -> pathlib.Path:
     from acvram.kernels import _abi_python
     cand = dossier / f"marlin-{MP.empreinte_sources()}"
     cand.mkdir(parents=True)
-    (cand / "acvram_marlin.so").write_bytes(b"\x7fELF...." + MP.MARQUEUR + emp_so.encode() + b"\0....")
+    (cand / "acvram_marlin.so").write_bytes(b"\x7fELF...." + MP.MARQUEUR + emp_so.encode() + b";archs="
+                                            + so_archs.encode() + b"\0....")
     e = {"empreinte": emp_json, "archs": ["sm_120f", "sm_86", "sm_89"], "torch": torch.__version__,
          "cuda": str(torch.version.cuda), "python": _abi_python()}
     e.update(surcharge)
@@ -35,7 +37,8 @@ def test_empreinte_juste_utilisable(tmp_path):
     assert _juger(tmp_path, {(12, 0), (8, 6)}) == (str(so), "précompilé")
 
 
-@pytest.mark.parametrize("cas", ["so_autre_empreinte", "json_autre_empreinte", "torch", "python", "arch"])
+@pytest.mark.parametrize("cas", ["so_autre_empreinte", "json_autre_empreinte", "torch", "python", "arch",
+                                 "so_autres_archs"])
 def test_empreinte_fausse_refusee(tmp_path, cas):
     emp, autre = MP.empreinte_sources(), "000000000000"
     if cas == "so_autre_empreinte":
@@ -46,8 +49,10 @@ def test_empreinte_fausse_refusee(tmp_path, cas):
         _precompile(tmp_path, emp, emp, torch="0.0.0")
     elif cas == "python":
         _precompile(tmp_path, emp, emp, python="cpython-399-x86_64-linux-gnu")
-    else:
-        _precompile(tmp_path, emp, emp, archs=["sm_86"])
+    elif cas == "arch":
+        _precompile(tmp_path, emp, emp, so_archs="sm_86", archs=["sm_86"])
+    else:                                    # 7x8c : la fiche promet sm_120f, le binaire n'a que sm_86
+        _precompile(tmp_path, emp, emp, so_archs="sm_86")
     so, raison = _juger(tmp_path, {(12, 0)})
     assert so is None and raison != "précompilé", cas
 
@@ -60,10 +65,16 @@ def charge(tmp_path, monkeypatch):
     monkeypatch.setenv("ACVRAM_MARLIN_CACHE", str(tmp_path / "cache"))
     monkeypatch.setattr(MP, "_EXT", None)
     monkeypatch.setattr(MP, "PRECOMPILE", None)
+    monkeypatch.setattr(MP, "_SO_CHARGE", None)
     monkeypatch.setattr(torch.ops, "load_library", lambda p: appels["load"].append(str(p)))
 
-    def compiler(verbose=False):
+    def compiler(verbose=False, caps=None):
+        # un .so « compilé » dont le marqueur couvre exactement les cartes demandées
         appels["compiler"] += 1
+        d = MP.dossier_cache(caps)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "acvram_marlin.so").write_bytes(MP.MARQUEUR + MP.empreinte_sources().encode() + b";archs="
+                                             + MP._nom_archs(caps).encode() + b"\0")
 
     monkeypatch.setattr(MP, "_compiler", compiler)
     return tmp_path / "pre", appels
@@ -85,15 +96,17 @@ def test_charger_refuse_l_empreinte_fausse_et_compile(charge):
     with pytest.warns(UserWarning, match="Marlin précompilé refusé"):
         assert MP.charger() is not None
     assert appels["compiler"] == 1
-    assert appels["load"] == [str(MP.chemin_so())]
+    assert appels["load"] == [str(MP.dossier_cache() / "acvram_marlin.so")]
     assert MP.PRECOMPILE is None
 
 
 def test_le_binaire_porte_le_marqueur_que_le_chargeur_cherche():
     # bindings.cpp écrit « acvram_marlin_empreinte=<MARLIN_PORT_EMPREINTE> », que _lancer_ninja pose en -D
     src = (RACINE / "acvram/kernels/marlin_port/bindings.cpp").read_text()
-    assert f'"{MP.MARQUEUR.decode()}" ACVRAM_MARLIN_STR(MARLIN_PORT_EMPREINTE)' in src
-    assert "-DMARLIN_PORT_EMPREINTE=" in (RACINE / "acvram/kernels/marlin_port/__init__.py").read_text()
+    assert (f'"{MP.MARQUEUR.decode()}" ACVRAM_MARLIN_STR(MARLIN_PORT_EMPREINTE) ";archs=" '
+            'ACVRAM_MARLIN_STR(MARLIN_PORT_ARCHS)') in src
+    py = (RACINE / "acvram/kernels/marlin_port/__init__.py").read_text()
+    assert "-DMARLIN_PORT_EMPREINTE=" in py and "-DMARLIN_PORT_ARCHS=" in py
 
 
 def test_la_ci_produit_et_verifie_marlin():

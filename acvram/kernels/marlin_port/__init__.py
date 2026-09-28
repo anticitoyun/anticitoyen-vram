@@ -73,16 +73,59 @@ def empreinte_sources() -> str:
         # Pas les architectures : `_arch_flags()` dépend du contexte (à sec, CUDA_VISIBLE_DEVICES vide, il ne voit
         # pas la carte) et la compilation se fait à sec AVANT la prise — la même empreinte doit sortir des deux côtés
         # (première prise 161 : 9e4f5791 à sec contre 2eb083f8 sur carte → .so « absent », repli). Les cibles sont
-        # constantes sur un poste.
+        # dans la clé du DOSSIER (`dossier_cache`, 7x8c) et dans le marqueur du .so, pas ici.
         _EMPREINTE = h.hexdigest()[:12]
     return _EMPREINTE
 
 
-def dossier_cache() -> pathlib.Path:
-    """Un cache PAR EMPREINTE des sources (pièce 161), sous `~/.cache/acvram/` ou sous `ACVRAM_MARLIN_CACHE`
-    (racine, observation et tests). Jamais le dossier partagé `marlin_port/` d'avant."""
-    racine = pathlib.Path(os.environ.get("ACVRAM_MARLIN_CACHE") or (pathlib.Path.home() / ".cache" / "acvram"))
-    return racine / f"marlin_port-{empreinte_sources()}"
+def _racine_cache() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("ACVRAM_MARLIN_CACHE") or (pathlib.Path.home() / ".cache" / "acvram"))
+
+
+def _caps_requises() -> set:
+    """Capacités à couvrir : imposées (ACVRAM_ARCHS), cartes visibles, sinon les deux du poste (à sec)."""
+    from .. import _archs_cibles
+    return _archs_cibles()
+
+
+def _nom_archs(caps) -> str:
+    return "+".join(f"sm_{a}{b}" for a, b in sorted(caps))
+
+
+def dossier_cache(caps=None) -> pathlib.Path:
+    """Un cache PAR EMPREINTE des sources (pièce 161) ET par architectures (7x8c : le poste a deux cartes, sm_120 et
+    sm_86 ; « les cibles sont constantes sur un poste » était faux), sous `~/.cache/acvram/` ou sous
+    `ACVRAM_MARLIN_CACHE` (racine, observation et tests). Jamais le dossier partagé `marlin_port/` d'avant."""
+    return _racine_cache() / f"marlin_port-{empreinte_sources()}-{_nom_archs(caps or _caps_requises())}"
+
+
+def archs_du_so(so, empreinte: str):
+    """Architectures SASS que le .so déclare dans son marqueur (bindings.cpp), ou None s'il ne porte pas CETTE
+    empreinte avec ses archs (binaire d'avant 7x8c, autre version des sources)."""
+    octets = pathlib.Path(so).read_bytes()
+    tete = MARQUEUR + empreinte.encode() + b";archs="
+    i = octets.find(tete)
+    if i < 0:
+        return None
+    fin = octets.find(b"\0", i)
+    return set(octets[i + len(tete):fin].decode("ascii", "replace").split("+")) - {""}
+
+
+def _couvre(archs, caps) -> bool:
+    return all({f"sm_{a}{b}", f"sm_{a}{b}f", f"sm_{a}{b}a"} & set(archs) for a, b in caps)
+
+
+def _cache_utilisable(caps):
+    """Le .so en cache de cette empreinte dont le MARQUEUR couvre ``caps`` (d'abord le dossier exact, puis tout autre
+    dossier de l'empreinte : une prise qui ne voit qu'une carte réutilise le .so « deux cartes » compilé à sec — pas
+    de nvcc sous le verrou), sinon None. Le nom du dossier ne fait pas foi : le binaire, si."""
+    emp = empreinte_sources()
+    exact = dossier_cache(caps) / "acvram_marlin.so"
+    autres = sorted(set(_racine_cache().glob(f"marlin_port-{emp}-*/acvram_marlin.so")) - {exact})
+    for so in [exact, *autres]:
+        if so.is_file() and (a := archs_du_so(so, emp)) is not None and _couvre(a, caps):
+            return so
+    return None
 
 
 def _sources_en_cache(cache: pathlib.Path) -> pathlib.Path:
@@ -100,14 +143,17 @@ def _sources_en_cache(cache: pathlib.Path) -> pathlib.Path:
     return src
 
 
+_SO_CHARGE = None            # 7x8c : le .so chargé (cache ou précompilé), sinon None
+
+
 def chemin_so() -> pathlib.Path:
-    return dossier_cache() / "acvram_marlin.so"
+    return pathlib.Path(_SO_CHARGE) if _SO_CHARGE else dossier_cache() / "acvram_marlin.so"
 
 
 def sha_so() -> str:
     """sha256 du binaire compilé — l'en-tête d'une cellule (INDEX) le porte."""
     import hashlib
-    p = pathlib.Path(PRECOMPILE) if PRECOMPILE else chemin_so()
+    p = chemin_so()
     if not p.exists():
         return "absent"
     return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
@@ -121,47 +167,56 @@ def charger(verbose: bool = False, compiler: bool = True):
     (nvcc seul, aucune carte requise : archs sm_86 + sm_120 par défaut). Si le
     binaire n'est pas en cache au moment du banc, `COMPILE_ICI` passe à vrai
     et le banc se déclare invalide."""
-    global _EXT, COMPILE_ICI, ECHEC_COMPILATION, PRECOMPILE
+    global _EXT, COMPILE_ICI, ECHEC_COMPILATION, PRECOMPILE, _SO_CHARGE
     if _EXT is not None:
         return _EXT
     # 7x8b : d'abord un .so précompilé qui concorde (Flatpak : pas de nvcc), comme acvram_kernels (pièce 240)
     pre = _charger_precompile()
     if pre:
-        PRECOMPILE = pre
+        PRECOMPILE = _SO_CHARGE = pre
         _EXT = torch.ops.acvram_marlin
         return _EXT
-    so = chemin_so()
-    if not so.exists():
+    caps = _caps_requises()
+    so = _cache_utilisable(caps)
+    if so is None:
         # Pièce 161 (réserve de chef, Marlin étant le DÉFAUT) : empreinte absente → compilation UNE fois par version
         # des sources, sous un verrou de fichier propre au cache ; le cache par empreinte rend le ping-pong impossible,
         # donc les ~25 s ne reviennent qu'à chaque nouvelle version. Seul un échec (nvcc absent…) laisse le repli, nommé.
         # ``compiler`` est gardé pour les appelants (banc) : il ne change plus rien.
         try:
-            _compiler(verbose)
+            _compiler(verbose, caps)
         except Exception as e:                             # noqa: BLE001 — la raison va sur la ligne de régime
             ECHEC_COMPILATION = f"{type(e).__name__}: {str(e).splitlines()[0][:160] if str(e) else ''}"
+            return None
+        so = _cache_utilisable(caps)
+        if so is None:                                     # 7x8c : jamais un .so qui ne couvre pas les cartes
+            ECHEC_COMPILATION = f"le .so compilé ne déclare pas {_nom_archs(caps)} ({dossier_cache(caps)})"
             return None
     # Le .so de CETTE empreinte est chargé tel quel — jamais ninja quand il existe (c'est ce que
     # `load(is_python_module=False)` finit par faire, sans la reconstruction qui le précède).
     torch.ops.load_library(str(so))
+    _SO_CHARGE = str(so)
     _EXT = torch.ops.acvram_marlin
     return _EXT
 
 
-def _compiler(verbose: bool = False) -> None:
+def _compiler(verbose: bool = False, caps=None) -> None:
     """Compile le port dans le cache de son empreinte, sous `flock` (un seul processus compile ; les autres attendent
     puis trouvent le .so). Pose `COMPILE_ICI` (le banc se déclare invalide si la compilation a eu lieu chez lui)."""
     global COMPILE_ICI
     import fcntl
     from torch.utils.cpp_extension import load
-    cache = dossier_cache()
+    from .. import _arch_flags
+    caps = caps or _caps_requises()
+    cache = dossier_cache(caps)
     cache.mkdir(parents=True, exist_ok=True)
     with open(cache / ".verrou-compilation", "w") as verrou:
         fcntl.flock(verrou, fcntl.LOCK_EX)
-        if chemin_so().exists():                           # un autre processus vient de compiler
+        so = cache / "acvram_marlin.so"                   # un autre processus vient de compiler (7x8c : et couvre les cartes)
+        if so.exists() and (a := archs_du_so(so, empreinte_sources())) is not None and _couvre(a, caps):
             return
         COMPILE_ICI = True
-        _lancer_ninja(cache, verbose, load)
+        _lancer_ninja(cache, verbose, load, _arch_flags(archs_forcees=sorted(caps)))
 
 
 def _lancer_ninja(cache: pathlib.Path, verbose: bool, load, arch_flags=None) -> None:
@@ -173,22 +228,23 @@ def _lancer_ninja(cache: pathlib.Path, verbose: bool, load, arch_flags=None) -> 
     sources += sorted(glob.glob(str(moe / "sm80_kernel_*.cu")))
     dense = SRC / "libtorch_stable" / "quantization" / "marlin"                       # pièce 101 : Marlin dense
     sources += [str(dense / "marlin.cu")] + sorted(glob.glob(str(dense / "dense_sm80_kernel_*.cu")))
-    from .. import _arch_flags
+    from .. import _arch_flags, _archs_des_drapeaux
+    arch_flags = arch_flags if arch_flags is not None else _arch_flags()
     empreinte = f"-DMARLIN_PORT_EMPREINTE={empreinte_sources()}"   # 161 : ccache ne rend jamais un objet d'une autre version
+    archs = f"-DMARLIN_PORT_ARCHS={'+'.join(_archs_des_drapeaux(arch_flags))}"   # 7x8c : les archs dans le marqueur
     load(name="acvram_marlin", sources=sources, is_python_module=False, verbose=verbose,   # ninja, une fois par empreinte
          build_directory=str(cache),
          extra_include_paths=[str(SRC)],
          # USE_CUDA : les déclarations du shim CUDA de l'ABI stable (flux courant,
          # cublas) sont derrière cette garde ; l'espace de noms Marlin est posé
          # par kernel.h (moe) et par défaut (repack), pas ici
-         extra_cflags=["-O3", "-std=c++20", "-DUSE_CUDA", empreinte],
+         extra_cflags=["-O3", "-std=c++20", "-DUSE_CUDA", empreinte, archs],
          # -static-global-template-stub=false : depuis CUDA 12.8 nvcc donne une
          # liaison INTERNE aux stubs hôte des gabarits __global__ instanciés
          # explicitement ; sans ce drapeau (que vLLM pose, CMakeLists.txt:1377)
          # l'édition de liens rend « undefined hidden symbol Marlin<…> »
          extra_cuda_cflags=["-O3", "-std=c++20", "--expt-relaxed-constexpr", "-DENABLE_BF16", "-DUSE_CUDA",
-                            "-static-global-template-stub=false", empreinte]
-                           + (arch_flags if arch_flags is not None else _arch_flags()))
+                            "-static-global-template-stub=false", empreinte, archs] + arch_flags)
 
 
 # 7x8b (Flatpak, comme la pièce 240 pour acvram_kernels) : MARLIN PRÉCOMPILÉ. Sans nvcc (bac à sable), `charger()`
@@ -224,12 +280,13 @@ def precompile_utilisable(dossier, empreinte: str, caps, torch_version: str, tor
         return None, f"précompilé pour torch {e.get('torch')} / CUDA {e.get('cuda')}, ici {torch_version} / {torch_cuda}"
     if e.get("python") != python_abi:
         return None, f"précompilé pour l'ABI Python {e.get('python') or 'non renseignée'}, ici {python_abi}"
-    archs = set(e.get("archs") or [])
-    for a, b in caps:
-        if not ({f"sm_{a}{b}", f"sm_{a}{b}f", f"sm_{a}{b}a"} & archs):
-            return None, f"précompilé sans sm_{a}{b} (architectures : {sorted(archs)})"
-    if MARQUEUR + empreinte.encode() not in so.read_bytes():
+    archs = archs_du_so(so, empreinte)
+    if archs is None:
         return None, "le .so ne porte pas l'empreinte annoncée par son empreinte.json"
+    if archs != set(e.get("archs") or []):                  # 7x8c : le binaire fait foi, la fiche doit le dire
+        return None, f"le .so déclare {sorted(archs)}, empreinte.json {sorted(e.get('archs') or [])}"
+    if not _couvre(archs, caps):
+        return None, f"précompilé pour {sorted(archs)}, cartes {_nom_archs(caps)}"
     return str(so), "précompilé"
 
 
@@ -265,8 +322,8 @@ def compiler_precompile(dossier, archs) -> str:
     build = pathlib.Path(tempfile.mkdtemp(prefix="acvram-marlin-precompile-"))
     _lancer_ninja(build, bool(os.environ.get("ACVRAM_VERBOSE_BUILD")), load, flags)
     so, emp = build / "acvram_marlin.so", empreinte_sources()
-    if MARQUEUR + emp.encode() not in so.read_bytes():
-        raise RuntimeError(f"{so} ne porte pas l'empreinte {emp}")
+    if archs_du_so(so, emp) != set(_archs_des_drapeaux(flags)):
+        raise RuntimeError(f"{so} ne porte pas l'empreinte {emp} et les archs {_archs_des_drapeaux(flags)}")
     cand = pathlib.Path(dossier) / f"marlin-{emp}"
     cand.mkdir(parents=True, exist_ok=True)
     shutil.copy2(so, cand / "acvram_marlin.so")

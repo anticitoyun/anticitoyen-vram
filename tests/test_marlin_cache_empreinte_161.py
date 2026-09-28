@@ -11,12 +11,22 @@ from acvram.kernels import marlin_port as MP
 PARTAGE_D_AVANT = pathlib.Path.home() / ".cache" / "acvram" / "marlin_port"
 
 
+def _so_valide() -> bytes:
+    """7x8c : un .so factice qui déclare l'empreinte et les archs demandées."""
+    return MP.MARQUEUR + MP.empreinte_sources().encode() + b";archs=" + MP._nom_archs(MP._caps_requises()).encode() + b"\0"
+
+
+def _sans_nvcc(monkeypatch):
+    import acvram.kernels as K
+    monkeypatch.setattr(K, "_arch_flags", lambda nvcc_ver=None, archs_forcees=None: ["-gencode=arch=compute_86,code=sm_86"])
+
+
 def test_le_cache_porte_l_empreinte_des_sources(monkeypatch):
     monkeypatch.delenv("ACVRAM_MARLIN_CACHE", raising=False)
     e = MP.empreinte_sources()
     d = MP.dossier_cache()
     assert len(e) == 12 and int(e, 16) >= 0
-    assert d.name == f"marlin_port-{e}"
+    assert d.name.startswith(f"marlin_port-{e}-")               # 7x8c : puis les architectures
     assert d != PARTAGE_D_AVANT, "le .so est redevenu partagé entre les worktrees"
 
 
@@ -35,7 +45,7 @@ def test_une_autre_source_un_autre_cache(monkeypatch, tmp_path):
 def test_la_racine_est_une_option_pas_le_dossier(monkeypatch, tmp_path):
     """ACVRAM_MARLIN_CACHE (observation, tests) est une RACINE : l'empreinte reste dans le nom."""
     monkeypatch.setenv("ACVRAM_MARLIN_CACHE", str(tmp_path))
-    assert MP.dossier_cache() == tmp_path / f"marlin_port-{MP.empreinte_sources()}"
+    assert MP.dossier_cache().parent == tmp_path and MP.dossier_cache().name.startswith(f"marlin_port-{MP.empreinte_sources()}-")
 
 
 def test_empreinte_absente_compile_une_fois_puis_charge(monkeypatch, tmp_path):
@@ -43,13 +53,15 @@ def test_empreinte_absente_compile_une_fois_puis_charge(monkeypatch, tmp_path):
     empreinte présente → aucun ninja."""
     monkeypatch.setenv("ACVRAM_MARLIN_CACHE", str(tmp_path))
     monkeypatch.setattr(MP, "_EXT", None)
+    monkeypatch.setattr(MP, "_SO_CHARGE", None)
     monkeypatch.setattr(MP, "COMPILE_ICI", False)
+    _sans_nvcc(monkeypatch)
     so = MP.chemin_so()
     compilations, charges = [], []
 
-    def faux_ninja(cache, verbose, load):
+    def faux_ninja(cache, verbose, load, arch_flags=None):
         compilations.append(str(cache))
-        so.write_bytes(b"faux .so")
+        so.write_bytes(_so_valide())
     monkeypatch.setattr(MP, "_lancer_ninja", faux_ninja)
     monkeypatch.setattr(torch.ops, "load_library", lambda chemin: charges.append(str(chemin)))
     assert MP.charger(compiler=False) is not None
@@ -66,8 +78,9 @@ def test_compilation_echouee_repli_nomme(monkeypatch, tmp_path):
     monkeypatch.setenv("ACVRAM_MARLIN_CACHE", str(tmp_path))
     monkeypatch.setattr(MP, "_EXT", None)
     monkeypatch.setattr(MP, "ECHEC_COMPILATION", None)
+    _sans_nvcc(monkeypatch)
 
-    def nvcc_absent(cache, verbose, load):
+    def nvcc_absent(cache, verbose, load, arch_flags=None):
         raise RuntimeError("nvcc introuvable")
     monkeypatch.setattr(MP, "_lancer_ninja", nvcc_absent)
     monkeypatch.setattr(torch.ops, "load_library", lambda chemin: pytest.fail("chargement d'un .so absent"))
@@ -78,9 +91,10 @@ def test_compilation_echouee_repli_nomme(monkeypatch, tmp_path):
 def test_le_verrou_de_compilation_saute_si_un_autre_a_fini(monkeypatch, tmp_path):
     monkeypatch.setenv("ACVRAM_MARLIN_CACHE", str(tmp_path))
     monkeypatch.setattr(MP, "COMPILE_ICI", False)
+    monkeypatch.setattr(MP, "_SO_CHARGE", None)
     so = MP.chemin_so()
     so.parent.mkdir(parents=True, exist_ok=True)
-    so.write_bytes(b"compile par un autre processus")
+    so.write_bytes(_so_valide())                         # 7x8c : un .so « compilé » porte son marqueur
     monkeypatch.setattr(MP, "_lancer_ninja", lambda *a: pytest.fail("recompilation d'un .so présent"))
     MP._compiler()
     assert not MP.COMPILE_ICI

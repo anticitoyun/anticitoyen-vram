@@ -57,6 +57,20 @@ _MIN_CUDA_FOR_SM120 = (12, 8)
 _MIN_CUDA_FOR_FAMILY = (12, 9)
 
 
+def _archs_cibles(archs_forcees=None) -> set:
+    """Les capacités (majeur, mineur) visées par `_arch_flags` : imposées (argument, puis ``ACVRAM_ARCHS``), sinon les
+    cartes visibles, sinon {(8, 6), (12, 0)} — les deux cartes du poste (5090 et 3080 Ti), à sec. Sans nvcc : le
+    cache Marlin s'en sert pour sa clé (7x8c)."""
+    archs: set[tuple[int, int]] = set()
+    forcees = archs_forcees if archs_forcees is not None else archs_depuis_texte(os.environ.get("ACVRAM_ARCHS", ""))
+    if forcees:
+        archs = set(forcees)
+    elif torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            archs.add(torch.cuda.get_device_capability(i))
+    return archs or {(8, 6), (12, 0)}
+
+
 def _arch_flags(nvcc_ver: tuple[int, int] | None = None, archs_forcees=None) -> list[str]:
     """Émet du code pour exactement les architectures présentes, plus un repli PTX.
 
@@ -74,15 +88,7 @@ def _arch_flags(nvcc_ver: tuple[int, int] | None = None, archs_forcees=None) -> 
     disparaissent d'un coup. Une cible « f » reste compatible avec toute la
     famille (sm_121, sm_128...), contrairement au suffixe « a ».
     """
-    archs: set[tuple[int, int]] = set()
-    forcees = archs_forcees if archs_forcees is not None else archs_depuis_texte(os.environ.get("ACVRAM_ARCHS", ""))
-    if forcees:
-        archs = set(forcees)
-    elif torch.cuda.is_available():
-        for i in range(torch.cuda.device_count()):
-            archs.add(torch.cuda.get_device_capability(i))
-    if not archs:
-        archs = {(8, 6), (12, 0)}
+    archs = _archs_cibles(archs_forcees)
     if nvcc_ver is None:
         nvcc_ver = _nvcc_version(_nvcc_path())
     demande = os.environ.get("ACVRAM_ARCH_FAMILY", "1") != "0"

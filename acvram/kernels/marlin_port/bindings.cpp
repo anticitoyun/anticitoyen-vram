@@ -8,11 +8,13 @@
 // 7x8b : l'empreinte des sources (-DMARLIN_PORT_EMPREINTE, posée par marlin_port/__init__.py) écrite DANS le binaire.
 // Un .so précompilé (Flatpak : pas de nvcc) n'est chargé que s'il porte l'empreinte des sources installées
 // (`precompile_utilisable`), comme acvram_kernels.so porte ACVRAM_SRC_HASH.
+// 7x8c : et ses architectures SASS (-DMARLIN_PORT_ARCHS=sm_120f+sm_86) — le poste a deux cartes ; un .so compilé pour
+// l'une n'est jamais chargé pour l'autre (`archs_du_so`).
 #define ACVRAM_MARLIN_STR2(x) #x
 #define ACVRAM_MARLIN_STR(x) ACVRAM_MARLIN_STR2(x)
-#ifdef MARLIN_PORT_EMPREINTE
+#if defined(MARLIN_PORT_EMPREINTE) && defined(MARLIN_PORT_ARCHS)
 extern "C" __attribute__((used)) const char acvram_marlin_empreinte[] =
-    "acvram_marlin_empreinte=" ACVRAM_MARLIN_STR(MARLIN_PORT_EMPREINTE);
+    "acvram_marlin_empreinte=" ACVRAM_MARLIN_STR(MARLIN_PORT_EMPREINTE) ";archs=" ACVRAM_MARLIN_STR(MARLIN_PORT_ARCHS);
 #endif
 
 STABLE_TORCH_LIBRARY(acvram_marlin, m) {
