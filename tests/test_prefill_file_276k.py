@@ -101,6 +101,6 @@ def test_le_device_du_modele_est_celui_des_embeddings(converted, monkeypatch):
     """Essai 2 : `Model` n'a pas de `.device` — le chemin épinglé se décide sur `embed_tokens.device` (cpu à sec → chemin nu)."""
     import inspect
     src = inspect.getsource(R.Engine._prefill_en_file)
-    assert 'getattr(self.model, "device"' not in src and "embed_tokens" in src
+    assert 'getattr(getattr(self.model, "embed_tokens", None), "device"' in src
     e = _moteur(converted)
     assert e.model.embed_tokens.device.type == "cpu" and not hasattr(e.model, "device")
