@@ -83,8 +83,9 @@ modele_charge() {
 }
 
 # iqm (chef 28/09) : depuis sf2, acvram rend les outils au gabarit. Invite de démarrage de claude mesurée à sec
-# (faux serveur, crochets de l'utilisateur compris, scratchpad/poste1-iqm-28-09) : complète (40 outils + MCP)
-# 24 593-26 076 jetons selon le tokenizer ; essentielle (Read, Edit, Bash, Grep + MCP) 12 107-13 335. Complet seulement
+# (faux serveur, crochets de l'utilisateur compris, scratchpad/poste1-iqm-28-09 comptes.tsv et q40.tsv) : complète
+# (40 outils + MCP) 24 593-26 280 jetons selon le tokenizer ; essentielle sans MCP, variables ci-dessous posées,
+# 9 764-10 300 (13 544 avec MCP : les outils MCP ne passent pas par --tools, d'où --disallowedTools). Complet seulement
 # si la fenêtre servie tient 45 000 ; en dessous, jeu essentiel pour que l'invite passe. Fenêtre inconnue (moteur muet) :
 # complet, comme avant. Un --tools de l'utilisateur prime. Pose MODE_OUTILS, PROMPT_BASE, OUTILS_ARGS, LIGNE_OUTILS ;
 # rend 1 (message nommé) si la fenêtre ne tient pas l'invite du mode plus une réponse minimale.
@@ -95,11 +96,11 @@ mode_outils() {  # $1 fenêtre servie (vide = inconnue)  $2 modèle  $3… args 
   MODE_OUTILS=complet; PROMPT_BASE=27000
   for a in "$@"; do case "$a" in --tools|--tools=*) MODE_OUTILS=utilisateur ;; esac; done
   if [ "$MODE_OUTILS" = complet ] && [ -n "$ctx" ] && [ "$ctx" -lt "$SEUIL_COMPLET" ] 2>/dev/null; then
-    MODE_OUTILS=essentiel; PROMPT_BASE=14000; OUTILS_ARGS=(--tools "Read,Edit,Bash,Grep")
+    MODE_OUTILS=essentiel; PROMPT_BASE=11000; OUTILS_ARGS=(--tools "Read,Edit,Bash,Grep" --disallowedTools "mcp__*")
   fi
   case "$MODE_OUTILS" in
     complet)     LIGNE_OUTILS="complet (fenêtre ${ctx:-inconnue} ≥ $SEUIL_COMPLET)" ;;
-    essentiel)   LIGNE_OUTILS="essentiel Read, Edit, Bash, Grep (fenêtre $ctx < $SEUIL_COMPLET)" ;;
+    essentiel)   LIGNE_OUTILS="essentiel Read, Edit, Bash, Grep, sans MCP (fenêtre $ctx < $SEUIL_COMPLET)" ;;
     utilisateur) LIGNE_OUTILS="choisis par --tools" ;;
   esac
   if [ -n "$ctx" ] && [ "$ctx" -lt $(( PROMPT_BASE + MIN_REPONSE )) ] 2>/dev/null; then
@@ -123,6 +124,9 @@ lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ ar
   export ANTHROPIC_MODEL="$modele" ANTHROPIC_SMALL_FAST_MODEL="$modele"
   export ANTHROPIC_DEFAULT_OPUS_MODEL="$modele" ANTHROPIC_DEFAULT_SONNET_MODEL="$modele" ANTHROPIC_DEFAULT_HAIKU_MODEL="$modele"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
+  # Q40 (poste4 29/09, sources primaires ; effet mesuré à sec, q40.tsv) : auto-mémoire et skills intégrés retirés
+  # de l'invite (−565 jetons) — ni l'une ni les autres ne servent sur un modèle local.
+  export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1
   # Fenêtre RÉELLE : acvram clampe max_model_len à ce que tient sa chauffe (Qwen3-Coder-30B : 39 936 pour 65 536
   # demandés, t5e 27/09) ; la colonne 3 du TSV n'est qu'une demande. Moteur muet sur max_model_len : ctx inchangé.
   local servi
@@ -145,7 +149,12 @@ for m in json.load(sys.stdin).get("data", []):
   printf '%soutils : %s%s\n\n' "$c_t" "$LIGNE_OUTILS" "$c_0"
   # UN SEUL constructeur : --afficher imprime le tableau que l'exec reçoit (poste7 21/09) ;
   # PARC_EXEC=<programme> le reçoit à la place de claude (test à sec, quatre moteurs).
-  local CMD=("${PARC_CLAUDE/#\~/$HOME}" --strict-mcp-config --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" "${OUTILS_ARGS[@]}" "$@")
+  # Q40 : l'en-tête « x-anthropic-billing-header » ouvre l'invite système ; une valeur qui change invalide le cache
+  # de préfixe du moteur local dès le jeton 0. Il ne se coupe que par les réglages (l'export shell ne suffit pas,
+  # renezander.com) ; vérifié à sec : absent de l'invite avec ce --settings.
+  local SETTINGS_LOCAL='{"env":{"CLAUDE_CODE_ATTRIBUTION_HEADER":"0"}}'
+  local CMD=("${PARC_CLAUDE/#\~/$HOME}" --strict-mcp-config --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" \
+    --settings "$SETTINGS_LOCAL" "${OUTILS_ARGS[@]}" "$@")
   if [ "${AFFICHER:-0}" = 1 ]; then   # claude-modele --afficher <alias> : montre sans lancer
     env | grep -E '^(ANTHROPIC_|DISABLE_|CLAUDE_CODE_)' | sort
     printf 'commande :'; printf ' %q' "${CMD[@]}"; printf '\n'

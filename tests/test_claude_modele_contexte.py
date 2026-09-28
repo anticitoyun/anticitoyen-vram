@@ -1,7 +1,7 @@
 """D2 puis iqm — ``mode_outils`` de claude-modele : jeu d'outils selon la fenêtre servie, refus nommé si trop petite.
 
 Depuis sf2, acvram rend les outils au gabarit : l'invite de démarrage de claude pèse 24 593-26 076 jetons avec ses
-40 outils, 12 107-13 335 avec l'essentiel (mesures à sec, scratchpad/poste1-iqm-28-09). Complet à partir d'une
+40 outils, 9 764-10 300 avec l'essentiel sans MCP (q40.tsv) (mesures à sec, scratchpad/poste1-iqm-28-09). Complet à partir d'une
 fenêtre de 45 000 (chef 28/09), essentiel en dessous. Les tests exécutent la fonction EXTRAITE du script (pas une
 copie) : une constante changée dans le script se voit ici.
 """
@@ -37,8 +37,8 @@ def test_fenetre_32k_essentiel():
     rc, out = _mode("32768")
     assert rc == 0
     mode, base, args, ligne = out.strip().split("|")
-    assert (mode, base, args) == ("essentiel", "14000", "--tools Read,Edit,Bash,Grep")
-    assert ligne == "essentiel Read, Edit, Bash, Grep (fenêtre 32768 < 45000)"
+    assert (mode, base, args) == ("essentiel", "11000", "--tools Read,Edit,Bash,Grep --disallowedTools mcp__*")
+    assert ligne == "essentiel Read, Edit, Bash, Grep, sans MCP (fenêtre 32768 < 45000)"
 
 
 def test_seuil_complet_exact():
@@ -47,10 +47,10 @@ def test_seuil_complet_exact():
 
 
 def test_fenetre_trop_petite_refusee():
-    """Essentiel : 14 000 + 4 096 = 18 096 au moins ; en dessous, refus avec les chiffres."""
-    rc, out = _mode("18095")
-    assert rc != 0 and "18095" in out and "18096" in out and "essentiel" in out
-    assert _mode("18096")[0] == 0
+    """Essentiel : 11 000 + 4 096 = 15 096 au moins ; en dessous, refus avec les chiffres."""
+    rc, out = _mode("15095")
+    assert rc != 0 and "15095" in out and "15096" in out and "essentiel" in out
+    assert _mode("15096")[0] == 0
 
 
 def test_fenetre_inconnue_complet():
