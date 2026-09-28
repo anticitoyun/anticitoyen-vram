@@ -34,7 +34,7 @@ def api(chemin, corps=None):
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read() or b"null")
     except urllib.error.HTTPError as e:
-        if e.code == 404 or (e.code == 401 and "/functions/id/" in chemin):
+        if e.code == 404 or (e.code == 401 and ("/functions/id/" in chemin or "/models/model?" in chemin)):
             return None
         raise SystemExit(f"openwebui-medias : {chemin} → {e.code} {e.read()[:300]!r}")
 
@@ -46,10 +46,22 @@ def garder(nom, obj):
 # 1. Pipe
 FID = "comfyui_medias"
 contenu = open(os.path.join(partage, "comfyui_medias.py")).read()
+# Pièce 296 : les workflows vidéo (videos/<gabarit>.api.json + .noeuds.json) sont inlinés dans GABARITS — la Pipe vit
+# dans la base d'OWUI et ne lit pas le parc.
+dossier = os.path.join(partage, "videos")
+gabarits = {}
+for nom in sorted(os.listdir(dossier)) if os.path.isdir(dossier) else []:
+    if nom.endswith(".api.json"):
+        base = nom[:-len(".api.json")]
+        gabarits[base] = {"graphe": json.load(open(os.path.join(dossier, nom))),
+                          "noeuds": json.load(open(os.path.join(dossier, base + ".noeuds.json")))}
+assert contenu.count("\nGABARITS = {}\n") == 1, "comfyui_medias.py : ligne GABARITS absente"
+contenu = contenu.replace("\nGABARITS = {}\n", "\nGABARITS = " + repr(gabarits) + "\n")
+print("gabarits vidéo :", ", ".join(gabarits) or "aucun")
 avant = api(f"/functions/id/{FID}")
 garder("pipe-avant.json", avant)
 form = {"id": FID, "name": "ComfyUI médias", "content": contenu,
-        "meta": {"description": "Images (Flux.2 Klein 9B, DreamShaper 8, SD 1.5) et vidéo (Wan 2.2) par ComfyUI"}}
+        "meta": {"description": "Images (Flux.2 Klein 9B, DreamShaper 8, SD 1.5) et vidéo (Wan 2.2, Wan VACE, LTX-2.3) par ComfyUI"}}
 if avant and avant.get("content") == contenu and avant.get("is_active"):
     print("pipe : déjà à jour et active")
 elif a_sec:
@@ -61,6 +73,29 @@ else:
     f = api(f"/functions/id/{FID}")
     assert f and f["is_active"] and f["content"] == contenu, "pipe non installée"
     print("pipe : installée et active")
+
+# 1 bis. Une fiche par modèle vidéo à gabarit : nom clair et ligne d'usage au sélecteur (meta.description),
+# pièce jointe admise quand le modèle en prend une ; lecture publique comme les modèles de la Pipe sans fiche.
+import importlib.util
+_sp = importlib.util.spec_from_file_location("comfyui_medias", os.path.join(partage, "comfyui_medias.py"))
+cm = importlib.util.module_from_spec(_sp)
+_sp.loader.exec_module(cm)
+for k, m in cm.MODELES.items():
+    if "usage" not in m:
+        continue
+    mid = f"{FID}.{k}"
+    fiche = api(f"/models/model?id={mid}")
+    meta = {**((fiche or {}).get("meta") or {}), "description": m["usage"]}
+    if m.get("entree"):
+        meta["capabilities"] = {**(meta.get("capabilities") or {}), "vision": True, "file_upload": True}
+    if fiche and fiche.get("name") == m["nom"] and fiche.get("meta") == meta:
+        continue
+    garder(f"modele-{k}-avant.json", fiche)
+    form = {"id": mid, "base_model_id": None, "name": m["nom"], "meta": meta, "params": (fiche or {}).get("params") or {},
+            "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}], "is_active": True}
+    print("modèle :", mid, "mise à jour" if fiche else "création")
+    if not a_sec:
+        api("/models/model/update" if fiche else "/models/create", form)
 
 # 2. Réglage Images natif : Flux.2 Klein 9B
 conf = api("/images/config")

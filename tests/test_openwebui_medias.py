@@ -25,7 +25,7 @@ def _liens_valides(g):
                 assert v[0] in g, f"nœud {nid} ({n['class_type']}) lié à {v[0]} absent"
 
 
-@pytest.mark.parametrize("cle", list(cm.MODELES))
+@pytest.mark.parametrize("cle", [k for k, m in cm.MODELES.items() if m["type"] != "gabarit"])
 def test_chaque_graphe_est_ferme_et_porte_l_invite(cle):
     g, desc = cm.construire(cle, "une pomme rouge 768x512 3 s", 42)
     _liens_valides(g)
