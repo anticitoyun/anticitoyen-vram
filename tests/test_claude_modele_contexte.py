@@ -75,3 +75,26 @@ def test_contexte_absent_passe():
 def test_constantes_synchronisees_avec_le_script():
     """La logique ci-dessus est une copie : elle ne vaut que si le script porte les mêmes constantes."""
     assert "local PROMPT_BASE=25000 MIN_REPONSE=4096" in SCRIPT.read_text()
+
+
+def test_fenetre_servie_au_dessus_de_la_colonne_3(tmp_path):
+    """edz 28/09 : acvram-serveur relève le contexte à CTX_CLIENT_MIN (29 096) pour une colonne 3 à 15 360 ; claude-modele
+    ne prenait la fenêtre servie que si elle BAISSAIT le contexte → refus « 15360 insuffisant » d'un serveur qui tient 29 096."""
+    import os, stat, subprocess
+    racine = Path(__file__).resolve().parents[1]
+    def exe(p, corps):
+        p.write_text(corps); p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    home = tmp_path / "home"; home.mkdir(); tsv = home / "TSV"; tsv.mkdir(); b = tmp_path / "bin"; b.mkdir()
+    (tsv / "acvram-chemins.tsv").write_text(f"acvram-un\t{tmp_path}\t15360\n")
+    exe(b / "acvram-serveur", "#!/bin/bash\nexit 0\n")
+    exe(b / "curl", "#!/bin/bash\ncase \"$*\" in *models*) printf '%s' "
+        "'{\"data\":[{\"id\":\"acvram-un\",\"acvram\":{\"max_model_len\":29096}}]}' ;; esac\n")
+    exe(b / "faux-claude", "#!/bin/bash\necho \"CTX=$CLAUDE_CODE_MAX_CONTEXT_TOKENS\"\n")
+    cfg = tmp_path / "parc.toml"
+    cfg.write_text(f'[chemins]\ntsv_dir = "{tsv}"\nbin = "{b}"\nsecrets = "{tmp_path}/absent.env"\n'
+                   f'lib = "{racine}/parc/share/kimi-menu.lib.sh"\n[moteurs.acvram]\npresent = true\nport = 8090\n')
+    env = {**os.environ, "HOME": str(home), "PATH": f"{b}:/usr/bin:/bin", "ACVRAM_PARC_CONFIG": str(cfg),
+           "PARC_EXEC": str(b / "faux-claude")}
+    r = subprocess.run(["bash", str(racine / "parc" / "bin" / "claude-modele"), "acvram-un", "-p", "OK"],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and "CTX=29096" in r.stdout, r.stdout[-400:] + r.stderr[-400:]
