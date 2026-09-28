@@ -1848,7 +1848,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         posé (sinon rendu à la fin du pas). Rend les sorties NON émises."""
         outputs: list[GenerationOutput] = []
         en_vol: Optional[dict] = None
-        cuda = torch.cuda.is_available() and getattr(self.model, "device", torch.device("cpu")).type == "cuda"
+        # le device du modèle : celui de la table d'embeddings (runner:666, chargement de la tour) — `Model` n'a pas de `.device`
+        # (essai 2, 07 h 06 : `getattr(self.model, "device", cpu)` rendait cpu et le chemin épinglé ne s'appliquait jamais)
+        device = getattr(getattr(self.model, "embed_tokens", None), "device", None) or torch.device("cpu")
+        cuda = torch.cuda.is_available() and device.type == "cuda"
 
         def rapatrier(v: dict) -> list[GenerationOutput]:
             if v["event"] is not None:
@@ -1862,7 +1865,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             t0 = time.perf_counter()
             batch = self._build_batch([seq], prefill=True)
             if cuda:
-                batch = self._lot_sans_attente(batch, getattr(self.model, "device"))
+                batch = self._lot_sans_attente(batch, device)
             logits = self.model(batch)
             tokens, logprobs = self._sample_only(logits, [seq])
             tops = self._tops_si_demande(logits, [seq])           # synchrone, seulement si `logprobs` demandé

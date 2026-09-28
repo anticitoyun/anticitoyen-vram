@@ -95,3 +95,12 @@ def test_lot_sans_attente_garde_les_valeurs_et_ignore_le_cpu():
                      block_tables=[torch.tensor([0])], slot_mapping=torch.tensor([0, 1, 2]), is_prefill=True)
     c = R.Engine._lot_sans_attente(b, torch.device("cpu"))
     assert c is b and c.tokens.device.type == "cpu" and c.tokens.tolist() == [1, 2, 3]
+
+
+def test_le_device_du_modele_est_celui_des_embeddings(converted, monkeypatch):
+    """Essai 2 : `Model` n'a pas de `.device` — le chemin épinglé se décide sur `embed_tokens.device` (cpu à sec → chemin nu)."""
+    import inspect
+    src = inspect.getsource(R.Engine._prefill_en_file)
+    assert 'getattr(self.model, "device"' not in src and "embed_tokens" in src
+    e = _moteur(converted)
+    assert e.model.embed_tokens.device.type == "cpu" and not hasattr(e.model, "device")
