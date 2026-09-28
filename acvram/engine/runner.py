@@ -1819,6 +1819,27 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         self._repin_pass()
         return outputs
 
+    @staticmethod
+    def _lot_sans_attente(batch: Any, device: torch.device) -> Any:
+        """276 k (essai 2) : les tenseurs du lot passent sur la carte par mémoire ÉPINGLÉE, sans bloquer — une copie
+        hôte→carte depuis de la mémoire paginée (`batch.tokens.to(device)`, `block_tables[i].to(q.device)` à chaque
+        couche) synchronise le flux AVANT de partir : le forward k + 1 attendait la fin du forward k, aucun
+        recouvrement (essai 1 : +3,7 ms par forward, mur +13 %). Mêmes valeurs (entiers copiés). Sur CPU : tel quel."""
+        if device.type != "cuda":
+            return batch
+
+        def deplacer(t: Any) -> Any:
+            if isinstance(t, torch.Tensor) and t.device.type == "cpu":
+                return t.pin_memory().to(device, non_blocking=True)
+            return t
+        batch.tokens = deplacer(batch.tokens)
+        batch.positions = deplacer(batch.positions)
+        batch.slot_mapping = deplacer(batch.slot_mapping)
+        batch.block_tables = [deplacer(t) for t in batch.block_tables]
+        if getattr(batch, "positions_3d", None) is not None:
+            batch.positions_3d = deplacer(batch.positions_3d)
+        return batch
+
     def _prefill_en_file(self, new: list["Sequence"]) -> list[GenerationOutput]:
         """276 k : préfill EN FILE dans le pas — un forward par séquence dans l'ordre d'admission (même forward que le
         chemin groupé à n = 1 : le premier jeton ne dépend plus de la composition du lot, GEMM à M fixe, 276 i), le jeton de
@@ -1840,6 +1861,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         for seq in new:
             t0 = time.perf_counter()
             batch = self._build_batch([seq], prefill=True)
+            if cuda:
+                batch = self._lot_sans_attente(batch, getattr(self.model, "device"))
             logits = self.model(batch)
             tokens, logprobs = self._sample_only(logits, [seq])
             tops = self._tops_si_demande(logits, [seq])           # synchrone, seulement si `logprobs` demandé

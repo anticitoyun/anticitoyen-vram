@@ -85,3 +85,13 @@ def test_engine_service_pose_le_crochet():
 def test_variable_de_regime_declaree():
     from acvram import regime
     assert "PREFILL_FILE" in {v.nom for v in regime.VARIABLES}
+
+
+def test_lot_sans_attente_garde_les_valeurs_et_ignore_le_cpu():
+    """Essai 1 (28/09 06 h 5x) : des copies hôte→carte paginées synchronisaient le flux à chaque forward — aucun recouvrement,
+    mur +13 %. Le lot passe par mémoire épinglée non bloquante ; sur CPU (à sec) il est rendu tel quel."""
+    from acvram.engine.lot import ForwardBatch
+    b = ForwardBatch(tokens=torch.tensor([1, 2, 3]), positions=torch.tensor([0, 1, 2]), seq_lens=[3], query_lens=[3],
+                     block_tables=[torch.tensor([0])], slot_mapping=torch.tensor([0, 1, 2]), is_prefill=True)
+    c = R.Engine._lot_sans_attente(b, torch.device("cpu"))
+    assert c is b and c.tokens.device.type == "cpu" and c.tokens.tolist() == [1, 2, 3]
