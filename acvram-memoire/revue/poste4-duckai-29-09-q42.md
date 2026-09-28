@@ -34,7 +34,37 @@ seules ci-dessous. À refaire quand l'extension répond.
   seule mention générique de FBCache (inspiré TeaCache) utilisable avec torch.compile côté ComfyUI
   (nœud Comfy-WaveSpeed), sans banc chiffré associé.
 
+## Croisement duck.ai (29/09)
+
+3 modèles interrogés (mode raisonnement, avec recherche web activée pour gpt-oss et Gemma ;
+Luna cherche nativement) : GPT-5.6 Luna, gpt-oss 120B, Gemma 4 31B.
+
+**Accords (3/3)** :
+- FP8 scaled préféré à GGUF sur 5090 32 Go (GGUF réservé si OOM, pénalité de déquantification).
+- LoRA de distillation 4 pas = le plus gros levier de temps, largement documenté (LightX2V officiel,
+  GitHub ModelTC/Wan2.2-Lightning) ; 8-14 pas = compromis qualité/mouvement.
+- TeaCache utile surtout sur pipeline non distillé (20-40 pas), peu d'intérêt à 4 pas.
+- CausVid documenté sur Wan 2.1 seulement, pas Wan 2.2 — les trois s'accordent à ne pas généraliser.
+
+**Chiffres qui se recoupent** : SageAttention seul −14 % (144→124 s) et pipeline complet
+poste7+TeaCache+batching 187→60 s (3,1×) sur un banc 8 GPU (voltagepark.com) — cité par Luna ET
+Gemma, même source, donc UNE seule mesure, pas deux convergentes. Gemma ajoute un second banc
+4090 Wan 2.1 : 1002→516 s (2×) avec la même pile (poste7+TeaCache+compile), sourcé mais autre carte.
+
+**Désaccord réel** : gpt-oss multiplie 5 gains indépendants (FP8×TeaCache×compile×LoRA×poste7 =
+1,3×1,8×1,5×2×1,2) pour annoncer 8-10× combiné — méthode invalide (les gains ne sont pas
+indépendants, ils se recouvrent sur les mêmes calculs), écarté. Aucune des deux autres réponses
+ne fait ce calcul.
+
+**Écarté, non sourcé** : l'estimation gpt-oss « FP8 réduit le calcul de ~30 % sur RTX 5000-series »
+(aucune référence citée) ; le chiffre CausVid « ~50 % de temps en moins » de la synthèse initiale
+reste sans banc, confirmé non trouvé par les 3 modèles aussi.
+
+**LTX-2.3 / SageAttention3** : la synthèse initiale notait déjà « aucun gain mesuré ». Gemma cite un
+chiffre proche mais sur un AUTRE modèle/quant (LTX-2 19B NVFP4, 66 s ComfyUI vs 40-45 s guide NVIDIA
+optimisé) — pas une contradiction, pas une confirmation non plus, à ne pas fusionner avec LTX-2.3.
+
 ## RESTE
-- Chiffres torch.compile/TeaCache combinés sur LTX-2.3+5090 : non trouvés, à chercher côté
-  ComfyUI-WaveSpeed / discussions Comfy-Org si le groupe en a besoin.
-- Croisement 3 modèles duck.ai à refaire (extension Chrome à reconnecter).
+- Chiffres torch.compile/TeaCache combinés sur LTX-2.3+5090 précis : toujours pas de banc direct,
+  seulement des extrapolations depuis Wan/LTX-2 générique.
+- Croisement fait ; désaccord gpt-oss (multiplication de gains) tranché en écarté ci-dessus.
