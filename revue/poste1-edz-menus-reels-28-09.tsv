@@ -1,0 +1,71 @@
+# alias	date	moteur	verdict	etape	cause	prechargement_s	models	completion	kimi_rc	claude_rc	arret	detail
+acvram-gemma-4-31b-it-nvfp4-vision	28/09 15:38	acvram	PANNE	préchargement	rc 1 : [31mAlias refusé : client requiert ctx≥29096, modèle limité à 0 (ctx demandé=4096)[0m	0					ok (rien n'écoutait)	
+acvram-gemma-4-12b-it-bf16	28/09 15:38	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage : [acvram] disposition Marlin refusée : up_proj : 3473 échelles sous-normales non représentables en Marlin même par ligne (S0E5M3)	4					ok (rien n'écoutait)	
+acvram-qwen3-06b-srcgguf-nvfp4	28/09 15:38	acvram	OK			14	ok	ok	0	0	ok	
+acvram-qwen25-coder-3b-nvfp4	28/09 15:39	acvram	OK			14	ok	ok	0	0	ok	
+acvram-cydonia-24b-nvfp4	28/09 15:40	acvram	OK			109	ok	ok	0	0	ok	
+acvram-qwen3-coder-30b-a3b-instruct-srcq4km-nvfp4	28/09 15:46	acvram	OK			58	ok	ok	0	0	ok	
+acvram-qwen3-vl-32b-instruct-heretic-v2-srcq4km-nvfp4	28/09 15:48	acvram	OK			151	ok	ok	0	0	ok	
+acvram-cydonia-magnum-diamond-24b-srcexl360bpw-nvfp4	28/09 15:52	acvram	PANNE	kimi	kimi-modele : réponse sans « Paris » (rejugé sur le journal)	99	ok	ok	0	0	ok	
+acvram-qwen3-coder-30b-abliterated-exl3-5-0bpw-nvfp4	28/09 15:58	acvram	OK			141	ok	ok	0	0	ok	
+acvram-skyfall-31b-v4-2-heretic-exl3-4-0bpw-nvfp4	28/09 16:02	acvram	OK			151	ok	ok	0	0	ok	
+acvram-agents-4b-kimi-nvfp4	28/09 16:08	acvram	OK			42	ok	ok	0	0	ok	
+acvram-ornith-35b-kimi-nvfp4	28/09 16:10	acvram	PANNE	claude	claude-modele rc 1 : alias acvram-ornith-35b-kimi-nvfp4 : contexte 15360 tokens insuffisant (prompt de démarrage ~25000, réponse mini 4096 — il faut ≥ 29096 tokens)	56	ok	ok	0	1	ok	
+acvram-kimi-linear-35b-srcq4km-nvfp4	28/09 16:11	acvram	PANNE	claude	claude-modele rc 1 : alias acvram-kimi-linear-35b-srcq4km-nvfp4 : contexte 15360 tokens insuffisant (prompt de démarrage ~25000, réponse mini 4096 — il faut ≥ 29096 tokens)	113	ok	ok	0	1	ok	
+acvram-qwen35-4b-exl3-nvfp4	28/09 16:13	acvram	OK			16	ok	ok	0	0	ok	
+acvram-qwen3-vl-2b-texte-srcgguf-nvfp4	28/09 16:14	acvram	OK			12	ok	ok	0	0	ok	
+acvram-awaxis-31b-srci1q4km-nvfp4	28/09 16:15	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage : RuntimeError: refus : budget KV insuffisant après 4 tours d'exil — {'cuda:0': 10.28} Gio pour un plancher d'une séquence de 3276	26					ok (rien n'écoutait)	
+acvram-phi-4-srcq4km-nvfp4	28/09 16:16	acvram	PANNE	préchargement	rc 1 : [31mAlias refusé : client requiert ctx≥29096, modèle limité à 16384 (ctx demandé=16384)[0m	0					ok (rien n'écoutait)	
+acvram-granite-30b-srcq5k-nvfp4	28/09 16:16	acvram	OK			40	ok	ok	0	0	ok	
+acvram-glm-4-7-flash-srcq5k-nvfp4	28/09 16:18	acvram	PANNE	claude	claude-modele rc 1 : [claude-code:unrecognized_model] {"model":"acvram-glm-4-7-flash-srcq5k-nvfp4","query_source":"sdk"}	165	ok	ok	0	1	ok	
+acvram-lfm2-5-8b-srci1q4km-nvfp4	28/09 16:33	acvram	OK			20	ok	ok	0	0	ok	
+acvram-nemotron-nano-9b-srcq6k-nvfp4	28/09 16:34	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage :   contexte non tenu : max_model_len=32768 demandé, 30720 jetons tenus par la chauffe (prefill d'une séquence pleine dans le régi	36					ok (rien n'écoutait)	
+acvram-nemotron-lightning-30b-srcq4km-nvfp4	28/09 16:35	acvram	PANNE	claude	claude-modele rc 1 : [claude-code:unrecognized_model] {"model":"acvram-nemotron-lightning-30b-srcq4km-nvfp4","query_source":"sdk"}	123	ok	ok	0	1	ok	
+acvram-falcon-h1r-7b-srcq6k-nvfp4	28/09 16:44	acvram	OK			30	ok	ok	0	0	ok	
+acvram-qwen35-9b-abliterated-exl3-srcexl36bpw-nvfp4	28/09 16:46	acvram	PANNE	claude+kimi	claude-modele : réponse sans « Paris » (rejugé sur le journal) | kimi-modele : réponse sans « Paris » (rejugé sur le journal)	62	ok	ok	0	0	ok	
+acvram-nemotron-lightning-heretic-exl3-nvfp4	28/09 16:48	acvram	PANNE	claude	claude-modele : réponse sans « Paris » (rejugé sur le journal)	115	ok	ok	0	0	ok	
+acvram-gemma4-12b-abliterated-exl3-srcexl34bpw-nvfp4	28/09 16:53	acvram	PANNE	kimi	kimi-modele : réponse sans « Paris » (rejugé sur le journal)	107	ok	ok	0	0	ok	
+acvram-gemma4-12b-heretic-srci1q4km-nvfp4	28/09 16:56	acvram	OK			173	ok	ok	0	0	ok	
+acvram-agentworld-35b-a3b-heretic-srcq4km-nvfp4	28/09 17:02	acvram	OK			177	ok	ok	0	0	ok	
+acvram-deepseek-r1-distill-qwen-32b-srcq4km-nvfp4	28/09 17:06	acvram	OK			215	ok	ok	0	0	ok	
+acvram-dolphin-mistral-glm47-24b-venice-srci1q5k-nvfp4	28/09 17:11	acvram	OK			46	ok	ok	0	0	ok	
+acvram-huihui-nex-n2-mini-abliterated-srcq4km-nvfp4	28/09 17:13	acvram	OK			207	ok	ok	0	0	ok	
+acvram-huihui-qwen3-6-35b-a3b-opus-abl-srci1q4km-nvfp4	28/09 17:17	acvram	OK			191	ok	ok	0	0	ok	
+acvram-huihui-qwen3-6-35b-a3b-abliterated-srcq4km-nvfp4	28/09 17:22	acvram	OK			191	ok	ok	0	0	ok	
+acvram-huihui-qwen3-8-27b-abliterated-srcq5k-nvfp4	28/09 17:31	acvram	OK			185	ok	ok	0	0	ok	
+acvram-kat-coder-v2-5-dev-srcq4km-nvfp4	28/09 17:35	acvram	OK			171	ok	ok	0	0	ok	
+acvram-nvidia-nemotron-3-nano-30b-a3b-heretic-srci1q5k-nvfp4	28/09 17:39	acvram	PANNE	claude+kimi	claude-modele : réponse sans « Paris » (rejugé sur le journal) | kimi-modele : réponse sans « Paris » (rejugé sur le journal)	121	ok	ok	0	0	ok	
+acvram-nemotron-3-5-lightning-30b-a3b-heretic-uncensored-srcq6k-nvfp4	28/09 17:43	acvram	PANNE	complétion+claude	complétion sans « Paris » | claude-modele rc 1 : [claude-code:unrecognized_model] {"model":"acvram-nemotron-3-5-lightning-30b-a3b-heretic-uncensored-srcq6k-nvfp4","query_source":"sdk"}	119	ok	sans Paris	0	1	ok	
+acvram-nemotron-cascade-2-30b-a3b-heretic-ara-srci1q5k-nvfp4	28/09 17:51	acvram	PANNE	claude+kimi	claude-modele : réponse sans « Paris » (314 o : fausse ou dégénérée) | kimi-modele : réponse sans « Paris » (182 o : fausse ou dégénérée)	129	ok	ok	0	0	ok	
+acvram-ornith-1-5-35b-a3b-heretic-apex-i-quality-srcgguf-nvfp4	28/09 17:54	acvram	OK			208	ok	ok	0	0	ok	
+acvram-qwen-3-8-27b-heretic-i1-srci1q5k-nvfp4	28/09 17:59	acvram	PANNE	kimi	kimi-modele : aucune réponse en 600 s	181	ok	ok	délai	0	ok	
+acvram-qwen3-5-35b-a3b-srcq4km-nvfp4	28/09 18:13	acvram	PANNE	complétion	complétion sans « Paris »	73	ok	sans Paris	0	0	ok	
+acvram-qwen3-5-4b-nsfw-heretic-literotica-srcq6k-nvfp4	28/09 18:15	acvram	PANNE	complétion	complétion sans « Paris »	38	ok	sans Paris	0	0	ok	
+acvram-qwen3-5-9b-uncensored-hauhaucs-aggressive-srcq4km-nvfp4	28/09 18:17	acvram	PANNE	complétion	complétion sans « Paris »	57	ok	sans Paris	0	0	ok	
+acvram-qwen3-6-12b-iq-srcq5k-nvfp4	28/09 18:19	acvram	PANNE	complétion+kimi	complétion sans « Paris » | kimi-modele : réponse sans « Paris » (1608 o : fausse ou dégénérée)	69	ok	sans Paris	0	0	ok	
+acvram-qwen3-6-27b-fable-fusion-711-heretic-mtp-srcq5k-nvfp4	28/09 18:22	acvram	PANNE	complétion+kimi	complétion sans « Paris » | kimi-modele : aucune réponse en 600 s	179	ok	sans Paris	délai	0	ok	
+acvram-qwen3-6-27b-fable-fusion-711-heretic-srcq5k-nvfp4	28/09 18:35	acvram	PANNE	complétion	complétion sans « Paris »	175	ok	sans Paris	0	0	ok	
+acvram-qwen3-6-27b-heretic-glm52-q5-srcgguf-nvfp4	28/09 18:40	acvram	OK			194	ok	ok	0	0	ok	
+acvram-qwen3-6-27b-neo-code-here-2t-ot-srcq4km-nvfp4	28/09 18:45	acvram	PANNE	complétion	complétion sans « Paris »	175	ok	sans Paris	0	0	ok	
+acvram-qwen3-6-35b-a3b-uncensored-heretic-apex-i-quality-srcgguf-nvfp4	28/09 18:49	acvram	PANNE	complétion	complétion sans « Paris »	169	ok	sans Paris	0	0	ok	
+acvram-qwen3-8-27b-dominatrix-srcq4km-nvfp4	28/09 18:53	acvram	OK			183	ok	ok	0	0	ok	
+acvram-qwen3-8-27b-fable-distill-heretic-ara-srcq5k-nvfp4	28/09 18:57	acvram	OK			179	ok	ok	0	0	ok	
+acvram-qwen3-8-27b-heretic-abliterated-srcq5k-nvfp4	28/09 19:02	acvram	OK			173	ok	ok	0	0	ok	
+acvram-qwen3-8-27b-heretic-rvn-vision-srcq5k-nvfp4	28/09 19:06	acvram	OK			173	ok	ok	0	0	ok	
+acvram-qwen3-8-27b-uncensored-nomtp-srcq5k-nvfp4	28/09 19:11	acvram	OK			179	ok	ok	0	0	ok	
+acvram-qwen3-8-27b-heretic-ara-srcq6k-nvfp4	28/09 19:16	acvram	PANNE	kimi	kimi-modele : aucune réponse en 600 s	177	ok	ok	délai	0	ok	
+acvram-qwenpaw-flash-9b-heretic-q4-k-l-srcgguf-nvfp4	28/09 19:30	acvram	OK			59	ok	ok	0	0	ok	
+acvram-thinkingcap-qwen3-6-27b-heretic-srcq4km-nvfp4	28/09 19:32	acvram	PANNE	complétion+kimi	complétion sans « Paris » | kimi-modele : réponse sans « Paris » (210 o : fausse ou dégénérée)	175	ok	sans Paris	0	0	ok	
+acvram-ariel-alloy-v1-24b-heretic-srcq4km-nvfp4	28/09 19:36	acvram	PANNE	claude	claude-modele : réponse sans « Paris » (167 o : fausse ou dégénérée)	113	ok	ok	0	0	ok	
+acvram-g4-meromero-31b-uncensored-heretic-exl3-6-00bpw-nvfp4	28/09 19:39	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage : RuntimeError: refus : budget KV insuffisant après 4 tours d'exil — {'cuda:0': 8.81} Gio pour un plancher d'une séquence de 32768	24					ok (rien n'écoutait)	
+acvram-gemma-4-gembrain-31b-uncensored-heretic-exl3-6-0bpw-nvfp4	28/09 19:39	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage : RuntimeError: refus : budget KV insuffisant après 4 tours d'exil — {'cuda:0': 8.81} Gio pour un plancher d'une séquence de 32768	16					ok (rien n'écoutait)	
+acvram-nemotron-3-5-lightning-30b-a3b-srcexl36bpw-nvfp4	28/09 19:39	acvram	PANNE	complétion+claude	complétion sans « Paris » | claude-modele : réponse sans « Paris » (262 o : fausse ou dégénérée)	41	ok	sans Paris	0	0	ok	
+acvram-qwen3-6-27b-fable-fusion-uncensored-heretic-exl3-4-15bpw-nvfp4	28/09 19:41	acvram	PANNE	complétion	complétion sans « Paris »	173	ok	sans Paris	0	0	ok	
+acvram-qwen3-8-27b-abliterated-exl3-3-75bpw-nvfp4	28/09 19:46	acvram	PANNE	kimi	kimi-modele : aucune réponse en 600 s	183	ok	ok	délai	0	ok	
+acvram-qwen3-8-27b-exl3-6-00bpw-nvfp4	28/09 20:00	acvram	PANNE	kimi	kimi-modele : aucune réponse en 600 s	99	ok	ok	délai	0	ok	
+acvram-glm-4-7-grande-heretic-42b-srcq4km-nvfp4	28/09 20:36	acvram	PANNE	complétion+claude+kimi	complétion sans « Paris » | claude-modele : réponse sans « Paris » (153 o : fausse ou dégénérée) | kimi-modele : réponse sans « Paris » (2024 o : fausse ou dégénérée)	55	ok	sans Paris	0	0	ok	
+acvram-gemma-4-26b-a4b-it-ultra-uncensored-heretic-srcq4kxl-nvfp4	28/09 20:38	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage : RuntimeError: GEMM groupee MMA : K multiple de ks[0m	105					ok (rien n'écoutait)	
+acvram-gemma-4-31b-it-uncensored-heretic-srcq4km-nvfp4	28/09 20:39	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage : RuntimeError: refus : budget KV insuffisant après 4 tours d'exil — {'cuda:0': 10.28} Gio pour un plancher d'une séquence de 3276	8					ok (rien n'écoutait)	
+acvram-jan-v2-vl-max-srcgguf-nvfp4	28/09 20:40	acvram	OK			67	ok	ok	0	0	ok	
+acvram-gemma-4-26b-a4b-heretic-apex-i-quality-srcgguf-nvfp4	28/09 21:18	acvram	PANNE	préchargement	rc 1 : [31macvram mort au démarrage : RuntimeError: GEMM groupee MMA : K multiple de ks[0m	37					ok (rien n'écoutait)	
+acvram-agents-4b-kimi-bf16	28/09 21:19	acvram	PANNE	complétion+claude+kimi	complétion sans « Paris » | claude-modele rc 1 : [claude-code:unrecognized_model] {"model":"acvram-agents-4b-kimi-bf16","query_source":"sdk"} | kimi-modele : réponse sans « Paris » (1342 o : fausse ou dégénérée)	24	ok	sans Paris	0	1	ok	

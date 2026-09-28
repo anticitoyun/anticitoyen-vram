@@ -106,7 +106,9 @@ for m in json.load(sys.stdin).get("data", []):
     v = m.get("max_model_len") or (m.get("acvram") or {}).get("max_model_len")   # vLLM à plat, acvram sous « acvram »
     if m.get("id") == sys.argv[1] and str(v or "").isdigit():
         print(v)' "$modele" 2>/dev/null || true)
-  [ -n "$servi" ] && [ -n "$ctx" ] && [ "$servi" -lt "$ctx" ] 2>/dev/null && ctx="$servi"
+  # dans les DEUX sens : servi à 29 096 (CTX_CLIENT_MIN) pour une colonne 3 à 15 360, claude était refusé (edz 28/09,
+  # ornith et kimi-linear 35B) — seule une baisse était prise
+  [ -n "$servi" ] && ctx="$servi"
   # Prompt de démarrage de claude CLI mesuré à sec (27/09, t5e, tokenizer Qwen3 sur la requête réelle depuis ~) :
   # 24 150 jetons avec --strict-mcp-config (40 outils) ; 61 315 sans (170 outils : les MCP globaux de l'utilisateur
   # s'ajoutaient à mcp.json — « Prompt is too long » sur tout alias local). Budget réponse minimal en plus.
