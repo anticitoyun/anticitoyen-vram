@@ -248,7 +248,36 @@ class Fenetre(Adw.ApplicationWindow):
                 action=Gtk.CallbackAction.new(lambda *_a, f=action: (f(), True)[1])))
         self.add_controller(raccourcis)
 
-    def _colonne(self, titre, rendu, tri=None, fixe=None, expand=False):
+    def _sens_courant_descendant(self):
+        """edz (28/09) : direction RÉELLEMENT demandée pour le tri primaire — un clic
+        d'en-tête simple (`sort_by_column`) inverse le comparateur SANS que celui-ci
+        en soit informé ; une valeur figée (« inconnu » en queue) ne survit donc qu'à
+        UN seul sens. Interrogée au moment de comparer, jamais mise en cache."""
+        try:
+            return self.vue_liste.get_sorter().get_primary_sort_order() == Gtk.SortType.DESCENDING
+        except Exception:
+            return False
+
+    def _comparer_inconnu_en_fin(self, f, inconnu):
+        """Comparateur pour une colonne où `inconnu(m)` (fiche absente : « non mesuré »,
+        « inconnu ») doit rester en DERNIÈRE position, dans les DEUX sens — sinon le clic
+        d'en-tête, en inversant tout le comparateur pour DESCENDING, renvoie l'inconnu en
+        TÊTE (bogue trouvé en l'écrivant, edz, contre-mesuré ici puisque GTK inverse en
+        aveugle : on compense par avance selon le sens interrogé en direct)."""
+        def comparer(a, b, _u=None):
+            ia, ib = inconnu(a), inconnu(b)
+            if ia or ib:
+                if ia and ib:
+                    return 0
+                descendant = self._sens_courant_descendant()
+                if ia:      # a inconnu, b connu : b doit finir AVANT a, quel que soit le sens
+                    return -1 if descendant else 1
+                return 1 if descendant else -1  # a connu, b inconnu : a doit finir AVANT b
+            fa, fb = f(a), f(b)
+            return (fa > fb) - (fa < fb)
+        return comparer
+
+    def _colonne(self, titre, rendu, tri=None, fixe=None, expand=False, inconnu=None):
         fabrique = Gtk.SignalListItemFactory()
 
         def setup(_f, item):
@@ -264,7 +293,9 @@ class Fenetre(Adw.ApplicationWindow):
                                    resizable=True)
         if fixe:
             col.set_fixed_width(fixe)
-        if tri:
+        if tri and inconnu:
+            col.set_sorter(Gtk.CustomSorter.new(self._comparer_inconnu_en_fin(tri, inconnu)))
+        elif tri:
             col.set_sorter(Gtk.CustomSorter.new(
                 lambda a, b, _u=None, f=tri: (f(a) > f(b)) - (f(a) < f(b))))
         return col
@@ -323,10 +354,12 @@ class Fenetre(Adw.ApplicationWindow):
             self._colonne("Alias", rendu_alias, lambda m: m.alias.lower(), 232),
             self._colonne("Moteur", lambda l, m: l.set_text(MOTEURS[m.provider].nom),
                           lambda m: ORDRE_MOTEUR.get(m.provider, 9), 104),
-            self._colonne("Qualité", rendu_qual, rang_qualite_de := (lambda m: rang_qualite(m.qual)), 88),
+            self._colonne("Qualité", rendu_qual, rang_qualite_de := (lambda m: rang_qualite(m.qual)), 88,
+                          inconnu=lambda m: m.qual == "non mesuré"),
             self._colonne("tok/s (* avant 20/09)", lambda l, m: l.set_text(str(m.tps or "?")),
-                          lambda m: m.debit, 62),
-            self._colonne("Refus", rendu_refus, lambda m: rang_refus(m.refus), 88),
+                          lambda m: m.debit, 62, inconnu=lambda m: m.tps == "non mesuré"),
+            self._colonne("Refus", rendu_refus, lambda m: rang_refus(m.refus), 88,
+                          inconnu=lambda m: m.refus == "inconnu"),
             self._colonne("Usage", rendu_usage, lambda m: (m.usage or "").lower(), 112),
             self._colonne("Contexte", lambda l, m: l.set_text(f"{m.ctx:,}".replace(",", " ")),
                           lambda m: m.ctx, 96),
@@ -337,7 +370,9 @@ class Fenetre(Adw.ApplicationWindow):
         self.vue_liste.sort_by_column(cols[0], Gtk.SortType.ASCENDING)
         # Tri multi-colonnes (bouton « Tri… ») : les colonnes sans clé (None,
         # ex. Capacités) n'ont pas d'ordre naturel, donc absentes du popover.
-        self.colonnes_tri = [(titre, cle) for titre, cle in
+        # `inconnu` (edz, 28/09) : même contre-mesure que le tri simple, mais le sens
+        # est ici CONNU d'avance (case à cocher du popover), jamais interrogé en direct.
+        self.colonnes_tri = [(titre, cle, inconnu) for titre, cle, inconnu in
                              zip(("Alias", "Moteur", "Qualité", "tok/s", "Refus",
                                   "Usage", "Contexte"),
                                  (lambda m: m.alias.lower(),
@@ -346,7 +381,12 @@ class Fenetre(Adw.ApplicationWindow):
                                   lambda m: m.debit,
                                   lambda m: rang_refus(m.refus),
                                   lambda m: (m.usage or "").lower(),
-                                  lambda m: m.ctx))]
+                                  lambda m: m.ctx),
+                                 (None, None,
+                                  lambda m: m.qual == "non mesuré",
+                                  lambda m: m.tps == "non mesuré",
+                                  lambda m: m.refus == "inconnu",
+                                  None, None))]
         return Gtk.ScrolledWindow(child=self.vue_liste, hexpand=True, vexpand=True)
 
     def _construire_detail(self):
@@ -441,7 +481,7 @@ class Fenetre(Adw.ApplicationWindow):
         boite = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
                         margin_start=10, margin_end=10, margin_top=10, margin_bottom=10)
         actifs = {idx: desc for idx, desc in self.tri_multi}
-        for idx, (titre, _cle) in enumerate(self.colonnes_tri):
+        for idx, (titre, _cle, _inconnu) in enumerate(self.colonnes_tri):
             ligne = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             priorite = [i for i, (j, _d) in enumerate(self.tri_multi) if j == idx]
             libelle = titre if not priorite else f"{priorite[0] + 1}. {titre}"
@@ -488,11 +528,25 @@ class Fenetre(Adw.ApplicationWindow):
             return
         combine = Gtk.MultiSorter()
         for idx, descendant in self.tri_multi:
-            _titre, cle = self.colonnes_tri[idx]
+            _titre, cle, inconnu = self.colonnes_tri[idx]
 
-            def comparer(a, b, _u=None, f=cle, inverse=descendant):
-                r = (f(a) > f(b)) - (f(a) < f(b))
-                return -r if inverse else r
+            if inconnu:
+                # edz : sens CONNU d'avance ici (case à cocher), donc compensé
+                # directement — jamais une lecture live de GTK comme le tri simple.
+                def comparer(a, b, _u=None, f=cle, ic=inconnu, inverse=descendant):
+                    ia, ib = ic(a), ic(b)
+                    if ia or ib:
+                        if ia and ib:
+                            return 0
+                        if ia:      # a inconnu : b doit finir avant a, quel que soit le sens
+                            return -1 if inverse else 1
+                        return 1 if inverse else -1
+                    r = (f(a) > f(b)) - (f(a) < f(b))
+                    return -r if inverse else r
+            else:
+                def comparer(a, b, _u=None, f=cle, inverse=descendant):
+                    r = (f(a) > f(b)) - (f(a) < f(b))
+                    return -r if inverse else r
 
             combine.append(Gtk.CustomSorter.new(comparer))
         self.modele_trie.set_sorter(combine)
@@ -559,22 +613,38 @@ class Fenetre(Adw.ApplicationWindow):
                 # ColumnView) ; laisse deux tours de boucle pour que la disposition
                 # (et le texte des cellules) se stabilise avant/après, puis imprime
                 # et quitte lui-même (retour anticipé : pas le print/quit générique).
-                col = next((c for c in self.vue_liste.get_columns() if c.get_title() == arg), None)
+                # edz (28/09, pièce 296) : « :inverse » en suffixe demande DESCENDING —
+                # aucun titre de colonne ne porte de « : ». `r["ordre"]` (avant/apres)
+                # donne l'alias ET les champs bruts de tri dans l'ordre RÉEL du modèle
+                # trié (pas le texte des Label affichés : un ColumnView virtualise les
+                # lignes hors écran, `_textes_visibles` n'en verrait qu'une partie).
+                titre, _, suffixe = arg.rpartition(":")
+                if suffixe == "inverse" and titre:
+                    titre_colonne, sens = titre, Gtk.SortType.DESCENDING
+                else:
+                    titre_colonne, sens = arg, Gtk.SortType.ASCENDING
+                col = next((c for c in self.vue_liste.get_columns() if c.get_title() == titre_colonne), None)
                 if col is None:
-                    r["erreur"], rc = f"colonne inconnue : {arg}", 2
+                    r["erreur"], rc = f"colonne inconnue : {titre_colonne}", 2
                     print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
                     self.get_application().rc_test = rc
                     self.get_application().quit()
                     return
+                def _ordre():
+                    return [{"alias": m.alias, "qual": m.qual, "tps": m.tps, "refus": m.refus,
+                             "ctx": m.ctx, "provider": m.provider, "usage": m.usage}
+                            for m in (self.selection.get_item(i) for i in range(self.selection.get_n_items()))]
                 def apres_tri():
+                    r["ordre_apres"] = _ordre()
                     r["apres"] = self._textes_visibles()
                     print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
                     self.get_application().rc_test = 0
                     self.get_application().quit()
                     return False
                 def avant_tri():
+                    r["ordre_avant"] = _ordre()
                     r["avant"] = self._textes_visibles()
-                    self.vue_liste.sort_by_column(col, Gtk.SortType.ASCENDING)
+                    self.vue_liste.sort_by_column(col, sens)
                     GLib.timeout_add(200, apres_tri)
                     return False
                 GLib.timeout_add(200, avant_tri)

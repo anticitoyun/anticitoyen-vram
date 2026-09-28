@@ -136,7 +136,9 @@ for m in json.load(sys.stdin).get("data", []):
     v = m.get("max_model_len") or (m.get("acvram") or {}).get("max_model_len")   # vLLM à plat, acvram sous « acvram »
     if m.get("id") == sys.argv[1] and str(v or "").isdigit():
         print(v)' "$modele" 2>/dev/null || true)
-  [ -n "$servi" ] && [ -n "$ctx" ] && [ "$servi" -lt "$ctx" ] 2>/dev/null && ctx="$servi"
+  # dans les DEUX sens : servi à 29 096 (CTX_CLIENT_MIN) pour une colonne 3 à 15 360, claude était refusé (edz 28/09,
+  # ornith et kimi-linear 35B) — seule une baisse était prise
+  [ -n "$servi" ] && ctx="$servi"
   mode_outils "$ctx" "$modele" "$@" || exit 1
   [ -n "$ctx" ] && export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx"   # fenêtre réelle du moteur
   # claude réserve sa sortie maximale (32 000) DANS la fenêtre : à 32 768 il refuse sans rien envoyer

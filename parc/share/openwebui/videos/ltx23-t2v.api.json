@@ -1,0 +1,223 @@
+{
+ "1": {
+  "class_type": "CheckpointLoaderSimple",
+  "inputs": {
+   "ckpt_name": "LTXV2/ltx-2.3/ltx23FP4_ltx2322BDevNVFP4.safetensors"
+  }
+ },
+ "2": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "lora_name": "LTXV2/ltx23_ltx2322bDistilled.safetensors",
+   "strength_model": 1.0
+  }
+ },
+ "3": {
+  "class_type": "LTXAVTextEncoderLoader",
+  "inputs": {
+   "text_encoder": "ltx/gemma_3_12B_it_ltx2.safetensors",
+   "ckpt_name": "LTXV2/ltx-2.3/ltx23FP4_ltx2322BDevNVFP4.safetensors",
+   "device": "default"
+  }
+ },
+ "4": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "text": "A cat walks slowly across a sunlit wooden floor, tail up, soft natural light, cinematic",
+   "clip": [
+    "3",
+    0
+   ]
+  }
+ },
+ "5": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "text": "pc game, console game, video game, cartoon, childish, ugly",
+   "clip": [
+    "3",
+    0
+   ]
+  }
+ },
+ "6": {
+  "class_type": "LTXVConditioning",
+  "inputs": {
+   "positive": [
+    "4",
+    0
+   ],
+   "negative": [
+    "5",
+    0
+   ],
+   "frame_rate": 24
+  }
+ },
+ "7": {
+  "class_type": "LTXVAudioVAELoader",
+  "inputs": {
+   "ckpt_name": "LTXV2/ltx-2.3/ltx23FP4_ltx2322BDevNVFP4.safetensors"
+  }
+ },
+ "8": {
+  "class_type": "EmptyLTXVLatentVideo",
+  "inputs": {
+   "width": 1024,
+   "height": 576,
+   "length": 121,
+   "batch_size": 1
+  }
+ },
+ "12": {
+  "class_type": "LTXVEmptyLatentAudio",
+  "inputs": {
+   "audio_vae": [
+    "7",
+    0
+   ],
+   "frames_number": 121,
+   "frame_rate": 24,
+   "batch_size": 1
+  }
+ },
+ "14": {
+  "class_type": "RandomNoise",
+  "inputs": {
+   "noise_seed": 42
+  }
+ },
+ "15": {
+  "class_type": "KSamplerSelect",
+  "inputs": {
+   "sampler_name": "euler"
+  }
+ },
+ "16": {
+  "class_type": "ManualSigmas",
+  "inputs": {
+   "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+  }
+ },
+ "17": {
+  "class_type": "CFGGuider",
+  "inputs": {
+   "model": [
+    "2",
+    0
+   ],
+   "positive": [
+    "6",
+    0
+   ],
+   "negative": [
+    "6",
+    1
+   ],
+   "cfg": 1.0
+  }
+ },
+ "19": {
+  "class_type": "LTXVSeparateAVLatent",
+  "inputs": {
+   "av_latent": [
+    "18",
+    0
+   ]
+  }
+ },
+ "20": {
+  "class_type": "VAEDecodeTiled",
+  "inputs": {
+   "samples": [
+    "19",
+    0
+   ],
+   "vae": [
+    "1",
+    2
+   ],
+   "tile_size": 768,
+   "overlap": 64,
+   "temporal_size": 4096,
+   "temporal_overlap": 4
+  }
+ },
+ "21": {
+  "class_type": "LTXVAudioVAEDecode",
+  "inputs": {
+   "samples": [
+    "19",
+    1
+   ],
+   "audio_vae": [
+    "7",
+    0
+   ]
+  }
+ },
+ "22": {
+  "class_type": "VHS_VideoCombine",
+  "inputs": {
+   "images": [
+    "20",
+    0
+   ],
+   "frame_rate": 24,
+   "loop_count": 0,
+   "filename_prefix": "openwebui/ltx23-t2v",
+   "format": "video/h264-mp4",
+   "pingpong": false,
+   "save_output": true,
+   "pix_fmt": "yuv420p",
+   "crf": 19,
+   "save_metadata": true,
+   "audio": [
+    "21",
+    0
+   ]
+  }
+ },
+ "13": {
+  "class_type": "LTXVConcatAVLatent",
+  "inputs": {
+   "video_latent": [
+    "8",
+    0
+   ],
+   "audio_latent": [
+    "12",
+    0
+   ]
+  }
+ },
+ "18": {
+  "class_type": "SamplerCustomAdvanced",
+  "inputs": {
+   "noise": [
+    "14",
+    0
+   ],
+   "guider": [
+    "17",
+    0
+   ],
+   "sampler": [
+    "15",
+    0
+   ],
+   "sigmas": [
+    "16",
+    0
+   ],
+   "latent_image": [
+    "13",
+    0
+   ]
+  }
+ }
+}

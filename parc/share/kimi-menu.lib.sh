@@ -20,6 +20,34 @@ choisir_alias() {
   # s'arrêter proprement (parc-installer n'a pas encore tourné).
   [ "${#alias[@]}" -gt 0 ] || { err "parc vide : aucun modèle dans $CONFIG (lancez parc-installer)"; return 0; }
 
+  # Alias en PANNE au test réel des menus (outils/test-menus-reels.py, edz 28/09) pour CE client ou au chargement : masqués
+  # à l'affichage, config intacte ; l'alias tapé en entier reste accepté ; ACVRAM_MENU_TOUT=1 montre tout. Un alias
+  # rejoué OK par la campagne réapparaît de lui-même.
+  local client="${PARC_CLIENT:-$(basename "$0")}" res="${TMR_RESULTATS:-${PARC_TSV_DIR:-$HOME/TSV}/menus-reels.tsv}"
+  local -A masque=()
+  local -a garde=() tous=()
+  client="${client%-modele}"
+  if [ "${ACVRAM_MENU_TOUT:-0}" != 1 ] && [ -r "$res" ]; then
+    local ra rd rm rv re rest
+    while IFS=$'\t' read -r ra rd rm rv re rest; do
+      [ "$rv" = PANNE ] || continue
+      case "+$re+" in
+        *"+$client+"*|*+préchargement+*|*+/v1/models+*|*+complétion+*) masque["$ra"]="$rd" ;;
+      esac
+    done < "$res"
+    for i in "${!alias[@]}"; do [ -n "${masque[${alias[$i]}]+x}" ] || garde+=("$i"); done
+    if [ "${#garde[@]}" -gt 0 ] && [ "${#garde[@]}" -lt "${#alias[@]}" ]; then
+      local -a a2=() m2=() c2=() r2=() t2=() q2=() u2=()
+      for i in "${garde[@]}"; do
+        a2+=("${alias[$i]}"); m2+=("${modeles[$i]}"); c2+=("${ctx[$i]}"); r2+=("${refus[$i]}")
+        t2+=("${tps[$i]}"); q2+=("${qual[$i]}"); u2+=("${usage[$i]}")
+      done
+      local n_masques=$(( ${#alias[@]} - ${#garde[@]} ))
+      tous=("${alias[@]}")
+      alias=("${a2[@]}"); modeles=("${m2[@]}"); ctx=("${c2[@]}"); refus=("${r2[@]}"); tps=("${t2[@]}"); qual=("${q2[@]}"); usage=("${u2[@]}")
+    fi
+  fi
+
   local filtre="" choix i n point bas
   while :; do
     local -a vus=()
@@ -59,6 +87,8 @@ choisir_alias() {
         "${refus[$i]}" "${usage[$i]}" "$c_d" "${modeles[$i]:0:34}" "${ctx[$i]}" "$c_0" >&2
     done
     [ -n "$charge" ] && printf '  %s● = modèle actuellement chargé%s\n' "$c_d" "$c_0" >&2
+    [ -n "${n_masques:-}" ] && printf '  %s%d alias masqués : en panne au test réel des menus pour %s (%s) — ACVRAM_MENU_TOUT=1 pour tout voir%s\n' \
+      "$c_d" "$n_masques" "$client" "$res" "$c_0" >&2
     printf '  %s* après un débit = mesuré avant le 20/09 (poste précédent), sans mise à l’échelle%s\n' "$c_d" "$c_0" >&2
 
     printf '\n%sNuméro, texte pour filtrer (code, créatif, nsfw…), entrée = %s > %s' \
@@ -76,9 +106,9 @@ choisir_alias() {
       err "Entre un nombre entre 1 et ${#vus[@]}."
       continue
     fi
-    # correspondance exacte d'alias → sélection directe
-    for i in "${!alias[@]}"; do
-      if [ "${alias[$i]}" = "$choix" ]; then
+    # correspondance exacte d'alias → sélection directe (un alias masqué, tapé en entier, reste accepté)
+    for a in "${alias[@]}" "${tous[@]}"; do
+      if [ "$a" = "$choix" ]; then
         echo "$choix"
         return 0
       fi

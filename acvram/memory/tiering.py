@@ -245,6 +245,10 @@ class Plan:
     # destiné à l'utilisateur a silencieusement cessé de fonctionner le jour où
     # ce message est passé en français.
     overflowed: bool = False
+    # Garde falaise (pièce 295 poste5) : dict chiffré posé par
+    # `loader._signaler_falaise` quand l'exil fait tomber le débit prévu sous
+    # le seuil ; lu par `Engine.regime_ligne`. None sinon.
+    falaise: Optional[dict] = None
     est_decode_tok_s: float = 0.0
     est_prefill_tok_s: float = 0.0
     est_bytes_per_token: int = 0
@@ -1137,6 +1141,10 @@ def estimer_cout_exil(plan: "Plan", seuil: float = 0.20) -> Optional[dict]:
         "t_transfert_s": t_transfert,
         "t_pas_resident_s": t_pas_resident,
         "ratio": ratio,
+        # débit prévu rapporté au débit résident : BORNE HAUTE — un seul poids
+        # en flux coupe aussi les graphes (non chiffré ici ; Devstral 32 k,
+        # pièce 294 : 7,9 mesuré contre 94,5 résident, 8 %)
+        "debit_relatif": t_pas_resident / (t_pas_resident + t_transfert),
         "seuil": seuil,
         "franchit_seuil": ratio > seuil,
     }

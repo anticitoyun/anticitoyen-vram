@@ -24,7 +24,8 @@ def poste(tmp_path):
     subprocess.run(["git", "init", "-q", "-b", "main", str(arbre)], check=True)
     subprocess.run(["git", "-C", str(arbre), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
     # le lanceur lit ~/TSV et tue ce qui écoute sur $PORT : HOME factice, port fermé
-    src = LANCEUR.read_text().replace("PORT=8090", "PORT=1")
+    src = LANCEUR.read_text().replace("PORT=${PARC_PORT_ACVRAM:-8090}", "PORT=1")
+    assert "PORT=1" in src, "fixture : la ligne PORT du lanceur a changé — le test viserait le vrai port"
     lanceur = tmp_path / "acvram-serveur"; lanceur.write_text(src); lanceur.chmod(0o755)
     env = {**os.environ, "HOME": str(home), "ACVRAM_SERVEUR_A_SEC": "1", "ACVRAM_PAQUET_BIN": str(paquet)}
     env.pop("ACVRAM_ARBRE", None)

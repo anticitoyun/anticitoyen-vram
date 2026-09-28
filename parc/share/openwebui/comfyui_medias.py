@@ -1,7 +1,7 @@
 """
 title: ComfyUI médias
-description: Images (Flux.2 Klein 9B, DreamShaper 8, SD 1.5) et vidéo (Wan 2.2 TI2V-5B) par ComfyUI, comme modèles du sélecteur.
-version: 0.1.0
+description: Images (Flux.2 Klein 9B, DreamShaper 8, SD 1.5) et vidéo (Wan 2.2 TI2V-5B, Wan 2.2 14B I2V/T2V, Wan VACE, LTX-2.3) par ComfyUI, comme modèles du sélecteur.
+version: 0.2.0
 licence: MIT
 """
 # Pipe « manifold » d'Open WebUI (pièce 53j-b, 27/09) : le réglage Images natif ne sert qu'UN workflow, et Klein
@@ -10,6 +10,8 @@ licence: MIT
 # stockage d'OWUI (lien /api/v1/files/<id>/content, survit à l'arrêt de ComfyUI) et affiché dans la réponse.
 # Installé par parc/bin/openwebui-medias ; graphes testés à sec par tests/test_openwebui_medias.py.
 import asyncio
+import base64
+import copy
 import json
 import random
 import re
@@ -32,7 +34,30 @@ MODELES = {
              "fichier": "SD 1.5/v1-5-pruned-emaonly.ckpt", "taille": (512, 512), "pas": 25},
     "wan22": {"nom": "Vidéo · Wan 2.2 TI2V-5B", "type": "video",
               "fichier": "Wan Video 2.2 TI2V-5B/wanVideo22_ti2v5BFp16.safetensors", "taille": (832, 480), "pas": 20},
+    # Pièce 296 : workflows testés fournis par poste6 (parc/share/openwebui/videos/<gabarit>.{api,noeuds}.json),
+    # inlinés dans GABARITS par openwebui-medias. `entree` : pièces jointes exigées (image ; video+image : vidéo de
+    # contrôle ET image du sujet, les deux obligatoires dans le graphe VACE) ; `multiple` : longueur = multiple·k + 1.
+    # Pas ni négatif : ceux du workflow testé (LTX distillé : 8 sigmas fixes, sans pas).
+    "wan22_i2v": {"nom": "Vidéo · Wan 2.2 14B image → vidéo", "type": "gabarit", "gabarit": "wan22-14b-i2v",
+                  "usage": "Joignez une image et décrivez le mouvement : l'image ouvre la vidéo. Meilleure qualité, lent.",
+                  "entree": "image", "taille": (832, 480), "fps": 16, "multiple": 4, "duree": 5.0},
+    "wan22_t2v": {"nom": "Vidéo · Wan 2.2 14B texte → vidéo", "type": "gabarit", "gabarit": "wan22-14b-t2v",
+                  "usage": "Décrivez la scène ; « 1280x720 » ou « 3 s » dans le message règlent taille et durée.",
+                  "entree": None, "taille": (832, 480), "fps": 16, "multiple": 4, "duree": 5.0},
+    "wan_vace": {"nom": "Vidéo · Wan VACE (contrôle par référence)", "type": "gabarit", "gabarit": "wan-vace",
+                 "usage": "Joignez une vidéo de référence (mouvement, pose) ET une image du sujet : le sujet reprend le mouvement.",
+                 "entree": "video+image", "taille": (832, 480), "fps": 16, "multiple": 4, "duree": 5.0},
+    "ltx23": {"nom": "Vidéo · LTX-2.3 image → vidéo (rapide)", "type": "gabarit", "gabarit": "ltx23",
+              "usage": "Joignez une image et décrivez la scène : rapide (secondes à chaud), avec son ; qualité sous Wan 14B.",
+              "entree": "image", "taille": (1024, 576), "fps": 24, "multiple": 8, "duree": 5.0},
+    "ltx23_t2v": {"nom": "Vidéo · LTX-2.3 texte → vidéo (rapide)", "type": "gabarit", "gabarit": "ltx23-t2v",
+                  "usage": "Décrivez la scène : rapide (secondes à chaud), avec son ; qualité sous Wan 14B.",
+                  "entree": None, "taille": (1024, 576), "fps": 24, "multiple": 8, "duree": 5.0},
 }
+
+# {gabarit: {"graphe": workflow API ComfyUI, "noeuds": [{"type", "node_ids", "key"}]}} — REMPLI À L'INSTALLATION par
+# parc/bin/openwebui-medias (la Pipe vit dans la base d'OWUI, pas à côté des fichiers du parc).
+GABARITS = {}
 
 # « 1024x768 », « 3 s » ou « 3 secondes » dans l'invite règlent taille et durée ; le reste est l'invite.
 _TAILLE = re.compile(r"\b(\d{3,4})\s*[x×]\s*(\d{3,4})\b")
@@ -113,24 +138,115 @@ def graphe_video(m, invite, l, h, graine, duree, fps=24):
     }
 
 
-def construire(cle, texte, graine):
-    """(graphe, description) pour le modèle `cle` du manifold."""
+def longueur_images(duree, fps, multiple):
+    """Nombre d'images multiple·k + 1 le plus proche par défaut de `duree` s à `fps` (au moins multiple + 1)."""
+    return max(multiple + 1, int(duree * fps) // multiple * multiple + 1)
+
+
+def appliquer(gabarit, valeurs):
+    """Copie du workflow `gabarit["graphe"]` avec `valeurs` ({type: valeur}) posées aux nœuds de `gabarit["noeuds"]`.
+    Un nœud ou une entrée absents du workflow sont une ERREUR nommée, jamais une valeur ignorée en silence."""
+    g = copy.deepcopy(gabarit["graphe"])
+    for n in gabarit["noeuds"]:
+        if n["type"] not in valeurs:
+            continue
+        for nid in n["node_ids"]:
+            if nid not in g or n["key"] not in g[nid].get("inputs", {}):
+                raise KeyError(f"gabarit : {n['type']} → nœud {nid}.{n['key']} absent du workflow")
+            g[nid]["inputs"][n["key"]] = valeurs[n["type"]]
+    return g
+
+
+def types_du_gabarit(gabarit):
+    return {n["type"] for n in gabarit["noeuds"]}
+
+
+def construire(cle, texte, graine, entrees=()):
+    """(graphe, description) pour le modèle `cle` du manifold ; `entrees` = [(type, nom ComfyUI)] des pièces jointes
+    téléversées ("image" ou "video")."""
     m = MODELES[cle]
-    invite, l, h, duree = lire_options(texte, m["taille"])
+    invite, l, h, duree = lire_options(texte, m["taille"], m.get("duree", 2.0))
     if m["type"] == "klein":
         g = graphe_klein(m, invite, l, h, graine)
     elif m["type"] == "sd15":
         g = graphe_sd15(m, invite, l, h, graine)
-    else:
+    elif m["type"] == "video":
         g = graphe_video(m, invite, l, h, graine, duree)
-    desc = f"{m['nom']} · {l}×{h} · {m['pas']} pas · graine {graine}" + (f" · {duree:g} s" if m["type"] == "video" else "")
+    else:
+        gab = GABARITS.get(m["gabarit"])
+        if gab is None:
+            raise KeyError(f"gabarit {m['gabarit']} absent : réinstaller par openwebui-medias")
+        valeurs = {"prompt": invite, "width": l, "height": h, "seed": graine, "fps": m["fps"],
+                   "length": longueur_images(duree, m["fps"], m["multiple"])}
+        for genre, nom in entrees:
+            if genre not in types_du_gabarit(gab):
+                raise KeyError(f"{m['nom']} ne prend pas de {genre} en entrée")
+            valeurs[genre] = nom
+        g = appliquer(gab, valeurs)
+    video = m["type"] in ("video", "gabarit")
+    pas = f" · {m['pas']} pas" if "pas" in m else ""
+    desc = f"{m['nom']} · {l}×{h}{pas} · graine {graine}" + (f" · {duree:g} s" if video else "")
     return g, desc
+
+
+_FICHIER_OWUI = re.compile(r"/api/v1/files/([0-9a-fA-F-]{8,})")
+
+
+def references_jointes(messages, fichiers):
+    """Pièces jointes du DERNIER message utilisateur : [{"mime", "data"} | {"mime", "id"}], images d'abord.
+    OWUI met les images dans le contenu (image_url : data: base64 ou /api/v1/files/<id>/content) et les autres
+    fichiers (vidéo) dans __files__ ({"id", "content_type"|"file.meta.content_type"})."""
+    refs = []
+    dernier = next((m for m in reversed(messages or []) if m.get("role") == "user"), {})
+    contenu = dernier.get("content")
+    for p in contenu if isinstance(contenu, list) else []:
+        if p.get("type") != "image_url":
+            continue
+        url = (p.get("image_url") or {}).get("url", "")
+        if url.startswith("data:"):
+            tete, _, donnees = url.partition(",")
+            refs.append({"mime": tete[5:].split(";")[0] or "image/png", "data": base64.b64decode(donnees)})
+        elif _FICHIER_OWUI.search(url):
+            refs.append({"mime": "image/png", "id": _FICHIER_OWUI.search(url).group(1)})
+    for f in fichiers or []:
+        fid = f.get("id") or (f.get("file") or {}).get("id")
+        mime = (f.get("content_type") or ((f.get("file") or {}).get("meta") or {}).get("content_type")
+                or (f.get("meta") or {}).get("content_type") or "")
+        if fid and mime.startswith(("video/", "image/")) and not any(r.get("id") == fid for r in refs):
+            refs.append({"mime": mime, "id": fid})
+    return refs
+
+
+def choisir_entree(m, refs):
+    """[(type, référence)] que le modèle `m` consomme parmi `refs` (la première de chaque type exigé) ; ValueError
+    portant la ligne d'usage si une pièce exigée manque."""
+    voulu = (m.get("entree") or "").split("+") if m.get("entree") else []
+    choix = []
+    for genre in voulu:
+        r = next((r for r in refs if r["mime"].startswith(genre + "/")), None)
+        if r is None:
+            raise ValueError(m["usage"])
+        choix.append((genre, r))
+    return choix
+
+
+def corps_multipart(nom, octets, mime):
+    """(corps, content-type) d'un POST /upload/image de ComfyUI (vidéos comprises : même dossier input/)."""
+    borne = uuid.uuid4().hex
+    tete = (f'--{borne}\r\nContent-Disposition: form-data; name="image"; filename="{nom}"\r\n'
+            f"Content-Type: {mime}\r\n\r\n").encode()
+    champs = "".join(f'\r\n--{borne}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}'
+                     for k, v in (("type", "input"), ("overwrite", "true")))
+    return tete + octets + (champs + f"\r\n--{borne}--\r\n").encode(), f"multipart/form-data; boundary={borne}"
+
+
+_MIME = {".mp4": "video/mp4", ".webm": "video/webm", ".gif": "image/gif", ".webp": "image/webp", ".png": "image/png"}
 
 
 def premier_fichier(sorties):
     """Premier fichier de sortie (type output) de l'historique ComfyUI : dict filename/subfolder/type, ou None."""
     for sortie in sorties.values():
-        for cle in ("images", "gifs", "videos", "video"):
+        for cle in ("gifs", "videos", "video", "images"):
             for f in sortie.get(cle) or []:
                 if f.get("type") == "output":
                     return f
@@ -165,6 +281,27 @@ class Pipe:
         except Exception:
             return False
 
+    def _televerser(self, nom, octets, mime):
+        corps, ct = corps_multipart(nom, octets, mime)
+        req = urllib.request.Request(self.valves.COMFYUI_URL + "/upload/image", data=corps, headers={"Content-Type": ct})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            rep = json.loads(r.read())
+        return f"{rep['subfolder']}/{rep['name']}" if rep.get("subfolder") else rep["name"]
+
+    async def _octets(self, ref, user):
+        """Octets d'une référence jointe : inline (data:) ou fichier du stockage d'OWUI (droit de lecture vérifié)."""
+        if "data" in ref:
+            return ref["data"], ref["mime"]
+        from open_webui.models.files import Files
+        from open_webui.storage.provider import Storage
+        f = await Files.get_file_by_id(ref["id"])
+        if f is None or (f.user_id != user.id and user.role != "admin"):
+            raise ValueError("pièce jointe illisible")
+        chemin = await asyncio.to_thread(Storage.get_file, f.path)
+        mime = ((f.meta or {}).get("content_type") or ref["mime"])
+        with open(chemin, "rb") as h:
+            return h.read(), mime
+
     async def pipe(self, body, __user__=None, __request__=None, __metadata__=None, __event_emitter__=None, __task__=None):
         # OWUI appelle aussi le modèle choisi pour ses tâches (titre, suggestions, tags) : jamais de génération là.
         if __task__:
@@ -190,9 +327,26 @@ class Pipe:
             if not self._vivant():
                 return "ComfyUI n'a pas démarré : " + ((p.stdout + p.stderr).strip()[-400:] or f"code {p.returncode}")
 
+        from open_webui.models.users import Users
+        user = await Users.get_user_by_id(__user__["id"])
+        m = MODELES[cle]
+        try:
+            choix = choisir_entree(m, references_jointes(body.get("messages"), (__metadata__ or {}).get("files")))
+        except ValueError as e:
+            return f"{m['nom']} : {e}"
+        entrees = []
+        for genre, ref in choix:
+            octets, mime = await self._octets(ref, user)
+            ext = {"video/webm": ".webm", "image/jpeg": ".jpg", "image/webp": ".webp"}.get(
+                mime, ".mp4" if genre == "video" else ".png")
+            nom = await asyncio.to_thread(self._televerser, f"owui-{uuid.uuid4().hex[:12]}{ext}", octets, mime)
+            entrees.append((genre, nom))
         graine = random.randint(0, 2**48)
-        graphe, desc = construire(cle, texte, graine)
-        video = MODELES[cle]["type"] == "video"
+        try:
+            graphe, desc = construire(cle, texte, graine, entrees)
+        except KeyError as e:
+            return f"{m['nom']} : {e.args[0]}"
+        video = m["type"] in ("video", "gabarit")
         await etat(desc + " — en file ComfyUI")
         t0 = time.time()
         envoi = await asyncio.to_thread(self._requete, "/prompt", {"prompt": graphe, "client_id": str(uuid.uuid4())})
@@ -225,11 +379,10 @@ class Pipe:
         q = urllib.parse.urlencode({"filename": f["filename"], "subfolder": f.get("subfolder", ""), "type": "output"})
         donnees = await asyncio.to_thread(self._requete, "/view?" + q, None, 120)
         duree = time.time() - t0
-        type_mime = "video/mp4" if f["filename"].endswith(".mp4") else "image/png"
+        type_mime = _MIME.get(f["filename"][f["filename"].rfind("."):].lower(), "image/png")
+        video = type_mime.startswith("video/")
 
-        from open_webui.models.users import Users
         from open_webui.routers.images import upload_image
-        user = await Users.get_user_by_id(__user__["id"])
         meta = {k: (__metadata__ or {}).get(k) for k in ("chat_id", "message_id")}
         _, fichier = await upload_image(__request__, donnees, type_mime, {**meta, "prompt": texte, "graine": graine}, user)
         await etat(f"{desc} — {duree:.1f} s", fini=True)

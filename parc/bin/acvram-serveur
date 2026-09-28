@@ -7,7 +7,7 @@
 # 3080 Ti, graphes CUDA au décodage). Journal : /tmp/acvram-serveur.log
 set -euo pipefail
 TSV="$HOME/TSV/acvram-chemins.tsv"
-PORT=8090
+PORT=${PARC_PORT_ACVRAM:-8090}   # le port que les menus interrogent (claude-modele, kimi-modele)
 err() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
 [ $# -ge 1 ] || { err "Usage : acvram-serveur <alias|dossier> [contexte]"; exit 1; }
@@ -60,7 +60,12 @@ import json, pathlib, sys
 cfg = pathlib.Path('$dossier') / 'config.json'
 if cfg.exists():
     d = json.loads(cfg.read_text())
-    print(d.get('max_position_embeddings', 0))
+    # config multimodale (Gemma 4 vision, Qwen-VL…) : la limite du texte est sous text_config (edz 28/09 : lue à 0)
+    for sous in (d, d.get('text_config') or {}, d.get('llm_config') or {}, d.get('language_config') or {}):
+        if sous.get('max_position_embeddings'):
+            print(sous['max_position_embeddings']); break
+    else:
+        print(0)
 else:
     print(0)
 " 2>/dev/null || echo 0)
@@ -167,14 +172,18 @@ if [ -n "${ACVRAM_EXEC:-}" ]; then exec "$ACVRAM_EXEC" "${CMD[@]}"; fi
 # verrou si carte.sh est introuvable (paquet installe hors depot) — avec un
 # avertissement, jamais en silence.
 CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
+# journal ouvert en ajout : la cause d une mort se lit dans CE lancement seulement (edz 28/09 : une ligne d un
+# lancement précédent pouvait être citée)
+LOG=${ACVRAM_SERVEUR_LOG:-/tmp/acvram-serveur.log}
+debut_log=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
 if [ -x "$CARTE_SH" ]; then
-    srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$alias_nom" ACVRAM_SERVICE_LOG=/tmp/acvram-serveur.log \
+    srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$alias_nom" ACVRAM_SERVICE_LOG="$LOG" \
               ACVRAM_CARTE="${ACVRAM_CARTE:-$CUDA_VISIBLE_DEVICES}" \
               "$CARTE_SH" "${CMD[@]}") \
         || { err "carte.sh a refuse le verrou de la carte (voir ci-dessus)"; exit 1; }
 else
     err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
-    setsid nohup "${CMD[@]}" >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
+    setsid nohup "${CMD[@]}" >> "$LOG" 2>&1 < /dev/null &
     srv_pid=$!
 fi
 
@@ -184,10 +193,14 @@ for _ in $(seq 1 120); do
     # mort au démarrage (refus de budget KV, OOM, contexte non tenu) : le dire tout de suite, pas après 240 s
     # (t5e 27/09 : devstral à 65 536 refusé en quelques secondes, le menu attendait 4 min)
     if [ -n "${srv_pid:-}" ] && ! kill -0 "$srv_pid" 2>/dev/null; then
-        err "acvram mort au démarrage : $(grep -vE CUDACachingAllocator /tmp/acvram-serveur.log 2>/dev/null | grep -E 'refus|non tenu|Error' | tail -1 | cut -c1-240)"
+        # la cause, pas un avertissement : « disposition Marlin refusée … pile naturelle gardée » n est pas fatale
+        # (edz 28/09, gemma 12B bf16 : seule ligne citée, la vraie cause perdue) ; à défaut, la dernière ligne
+        neuf=$(tail -c +$(( debut_log + 1 )) "$LOG" 2>/dev/null | grep -vE 'CUDACachingAllocator|gardée|^[[:space:]]*$' || true)
+        cause=$(grep -E 'Error|Exception|non tenu|refus :|Killed' <<< "$neuf" | tail -1 || true)
+        err "acvram mort au démarrage : $(printf '%s' "${cause:-$(tail -1 <<< "$neuf")}" | cut -c1-240) (journal : $LOG)"
         exit 1
     fi
     sleep 2
 done
-err "acvram n'a pas démarré (voir /tmp/acvram-serveur.log)"
+err "acvram n'a pas démarré (voir $LOG)"
 exit 1

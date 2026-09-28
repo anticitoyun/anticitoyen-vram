@@ -161,6 +161,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("EXIL_COUCHES", "", None, None, "couches exilées forcées"),
     Variable("EXIL_EXPERTS_FRACTION", "", None, None, "fraction d'experts exilés forcée"),
     Variable("SEUIL_EXIL", "0.20", None, None, "seuil d'exil du planificateur"),
+    Variable("SEUIL_FALAISE", "0.25", None, None, "débit prévu sous exil (part du résident) qui déclenche l'avertissement falaise"),
     Variable("REPIN", "64", None, None, "période (pas) du ré-épinglage des experts"),
     Variable("MAX_GRAPHS", "64", None, None, "graphes CUDA gardés (au-delà : eager, aucune éviction)"),
     Variable("INSTA_MAX", "3", None, None, "relevés instantanés gardés"),

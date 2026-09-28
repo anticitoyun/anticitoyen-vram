@@ -352,6 +352,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
                          reserve=_reserve_prefill(spec, max_model_len, manifest, plan), embed_charge=embed_charge)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
+    _signaler_falaise(plan, max_model_len, lambda n: _reserve_prefill(spec, n, manifest, plan))
     # Pièce 146 (a) : la capacité du chemin par défaut, bornée au MÊME instant que B (poids pas encore chargés),
     # référence de la garde Marlin — la disposition ne doit pas coûter de KV ; sans plan du manifeste, la demande.
     kv_ref = None
@@ -1717,6 +1718,59 @@ def _signaler_cout_exil(plan: Plan) -> None:
         print(f"[acvram] ATTENTION — {msg} ; au-delà du seuil "
               f"{seuil * 100:.0f} % : falaise de l'exil (docs/TEST-EXIL.md)",
               flush=True)
+
+
+def _contexte_sans_exil(plan: Plan, max_model_len: int, reserve_de) -> Optional[int]:
+    """Plus grand contexte < `max_model_len` dont la réserve de préfill libère
+    au moins les octets exilés (MLP et attention en RAM hôte) ; None si aucun.
+
+    Borne BASSE : le plancher KV (une séquence de max_model_len) rétrécit lui
+    aussi avec le contexte, et n'est pas compté. `reserve_de(n)` rend la
+    réserve en octets pour un contexte de n jetons (croissante en n)."""
+    exiles = sum(l.mlp_bytes for l in plan.layers if l.mlp_storage == "cpu") \
+        + sum(l.attn_bytes for l in plan.layers if l.attn_storage == "cpu")
+    if exiles <= 0:
+        return None
+    cible = reserve_de(max_model_len) - exiles
+    if reserve_de(1) > cible:
+        return None
+    bas, haut = 1, max_model_len - 1          # invariant : bas tient
+    while bas < haut:
+        m = (bas + haut + 1) // 2
+        if reserve_de(m) <= cible:
+            bas = m
+        else:
+            haut = m - 1
+    return bas
+
+
+def _signaler_falaise(plan: Plan, max_model_len: Optional[int], reserve_de) -> Optional[dict]:
+    """Garde falaise (pièce 295, option C de la 294) : l'exil décidé pour loger
+    la réserve de préfill fait tomber le débit prévu sous `ACVRAM_SEUIL_FALAISE`
+    (part du débit résident, 0,25 par défaut) → avertissement NOMMÉ et chiffré,
+    avec le contexte qui tiendrait sans exil, posé sur `plan.falaise` pour la
+    ligne de régime. Ne refuse pas : Devstral 32 k servait en silence à 7,9
+    tok/s (94,5 à 16 k), pièce 294."""
+    from ..memory.tiering import estimer_cout_exil
+    try:
+        seuil = float(os.environ.get("ACVRAM_SEUIL_FALAISE", "0.25"))
+    except ValueError:
+        seuil = 0.25
+    c = estimer_cout_exil(plan)
+    if c is None or c["debit_relatif"] >= seuil:
+        return None
+    ctx = _contexte_sans_exil(plan, int(max_model_len or 8192), reserve_de)
+    plan.falaise = {"debit_relatif": c["debit_relatif"], "seuil": seuil,
+                    "n_couches_exilees": c["n_couches_exilees"],
+                    "couches_total": len(plan.layers), "ctx_sans_exil": ctx}
+    conseil = (f"--max-model-len {ctx} tiendrait sans exil (borne basse)" if ctx
+               else "aucun contexte ne suffit à loger les poids exilés")
+    msg = (f"FALAISE D'EXIL : {c['n_couches_exilees']}/{len(plan.layers)} couches en RAM hôte, "
+           f"débit prévu ≤ {c['debit_relatif'] * 100:.0f} % du résident (seuil {seuil * 100:.0f} %, "
+           f"graphes coupés en plus) ; {conseil}")
+    plan.warnings.append(msg)
+    print(f"[acvram] ATTENTION — {msg}", flush=True)
+    return plan.falaise
 
 
 def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
