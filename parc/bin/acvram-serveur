@@ -128,7 +128,7 @@ esac
 
 # remplacer le serveur en place — pièce ECONNREFUSED (5xw) : l'arrêt est signé dans le journal des arrêts
 if [ -n "$pid" ]; then
-    _j="${ACVRAM_ARRETS_JOURNAL:-$HOME/.cache/acvram/arrets.journal}"; mkdir -p "$(dirname "$_j")" 2>/dev/null || true
+    _j="${ACVRAM_JOURNAL_ARRETS:-$HOME/.cache/acvram/arrets.journal}"; mkdir -p "$(dirname "$_j")" 2>/dev/null || true
     printf '%s\t%s\tSIGTERM\t%s\t%s\n' "$(date +%FT%T)" "$pid" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-160)" \
         "acvram-serveur : remplacé par $alias_nom (servait ${servi:-?}) session=${ACVRAM_SESSION:-?} poste=${ACVRAM_POSTE:-?}" >> "$_j" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true; sleep 4

@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 def chemin_journal() -> Path:
-    return Path(os.environ.get("ACVRAM_ARRETS_JOURNAL")
+    return Path(os.environ.get("ACVRAM_JOURNAL_ARRETS")
                 or os.path.join(os.path.expanduser("~"), ".cache", "acvram", "arrets.journal"))
 
 

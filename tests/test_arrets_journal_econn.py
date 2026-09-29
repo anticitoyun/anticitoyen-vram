@@ -1,7 +1,7 @@
 """Pièce ECONNREFUSED (poste6, 29/09, bd 5xw) : deux services edz morts d'un SIGTERM propre pendant la première
 requête de Claude Code, tueur inconnu. Journal des arrêts (`acvram/server/arrets.py`) : le lanceur acvram-serveur
 signe le serveur qu'il remplace, la console signe `POST /moteurs/arreter`, le serveur signe son propre arrêt.
-Hermétique : ACVRAM_ARRETS_JOURNAL dans tmp, faux serveur HTTP sur un port libre, lanceur à sec (ACVRAM_SERVEUR_A_SEC)."""
+Hermétique : ACVRAM_JOURNAL_ARRETS dans tmp, faux serveur HTTP sur un port libre, lanceur à sec (ACVRAM_SERVEUR_A_SEC)."""
 from __future__ import annotations
 
 import json
@@ -34,7 +34,7 @@ def _port_libre():
 
 
 def test_journal_arret_ecrit_pid_cmdline_et_motif(tmp_path, monkeypatch):
-    monkeypatch.setenv("ACVRAM_ARRETS_JOURNAL", str(tmp_path / "j" / "arrets.journal"))
+    monkeypatch.setenv("ACVRAM_JOURNAL_ARRETS", str(tmp_path / "j" / "arrets.journal"))
     from acvram.server.arrets import journal_arret
     journal_arret(os.getpid(), "essai\tavec tabulation", signal="SIGTERM")
     l = (tmp_path / "j" / "arrets.journal").read_text(encoding="utf-8").splitlines()
@@ -58,7 +58,7 @@ def test_le_lanceur_signe_le_serveur_qu_il_remplace(poste, tmp_path):
         poste["lanceur"].write_text(src)
         journal = tmp_path / "arrets.journal"
         r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True, timeout=60,
-                           env={**poste["env"], "ACVRAM_ARRETS_JOURNAL": str(journal), "ACVRAM_SESSION": "essai-econn"})
+                           env={**poste["env"], "ACVRAM_JOURNAL_ARRETS": str(journal), "ACVRAM_SESSION": "essai-econn"})
         assert r.returncode == 0, r.stdout + r.stderr
         l = journal.read_text(encoding="utf-8").splitlines()
         assert len(l) == 1, l
@@ -80,7 +80,7 @@ def test_le_serveur_signe_son_arret_et_la_console_ne_signe_pas_un_404(converted,
     from acvram.server.app import create_app
     from acvram.server.chat import load_tokenizer
 
-    monkeypatch.setenv("ACVRAM_ARRETS_JOURNAL", str(tmp_path / "arrets.journal"))
+    monkeypatch.setenv("ACVRAM_JOURNAL_ARRETS", str(tmp_path / "arrets.journal"))
     vocab = {f"tok{i}": i for i in range(1024)}
     for i, w in enumerate(["<|im_start|>", "<|im_end|>", "hello", "</s>"]):
         vocab[w] = 1000 + i

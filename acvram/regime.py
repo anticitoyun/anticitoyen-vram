@@ -437,6 +437,7 @@ HORS_REGIME = frozenset({
     "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
     "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
     "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
+    "ACVRAM_JOURNAL_ARRETS",                                                      # journal des arrêts de moteurs (5xw) : observation
     "ACVRAM_KERNELS_PRECOMPILES",                                                # 240 : dossier d'un .so précompilé — un chemin ; le .so servi est nommé par son empreinte
     "ACVRAM_ARCHS",                                                              # 070a (241) : architectures de compilation des noyaux précompilés, sans effet sur le calcul servi
     "ACVRAM_ARBRE",                                                               # 276 f : arbre attendu du bras d'une prise A/B (garde d'import), aucun chemin de calcul
