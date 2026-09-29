@@ -417,21 +417,31 @@ def _joindre_systemes_tardifs(messages: list[dict]) -> list[dict]:
     n'acceptent le système qu'en tête — KAT lève « System message must be at the
     beginning », le rendu se replie sur ChatML et les outils DISPARAISSENT sans
     bruit. Chaque système hors tête est joint au user qui le précède (ou au
-    suivant, ou devient un user) : l'ordre du texte est gardé, seule la fin change."""
-    out, attente = [], []
+    suivant, ou devient un user), AVANT son texte : le contexte d'abord, la
+    question de l'utilisateur en dernier. Pièce claude-2 (poste6, 29/09) : joint
+    APRÈS le texte (0.7.13), les 17 Ko du crochet suivaient la question et
+    Devstral, Nemo-12B-Claude, Qwen3-0.6B répondaient au crochet (versions,
+    .deb, tests) ou répétaient la question — edz liste-2, « sans Paris »."""
+    out: list[dict] = []
+    attente: list[str] = []
+    avant: dict[int, list[str]] = {}                 # indice dans out -> systèmes à placer avant le texte
     for i, m in enumerate(messages):
         if m["role"] == "system" and i > 0:
             if out and out[-1]["role"] == "user" and not attente:
-                out[-1] = {**out[-1], "content": f"{out[-1]['content']}\n\n{m['content']}"}
+                avant.setdefault(len(out) - 1, []).append(m["content"])
             else:
                 attente.append(m["content"])
             continue
         if attente and m["role"] == "user":
-            m = {**m, "content": "\n\n".join(attente + [m["content"]])}
+            avant[len(out)] = attente
             attente = []
         out.append(m)
     if attente:
-        out.append({"role": "user", "content": "\n\n".join(attente)})
+        out.append({"role": "user", "content": ""})
+        avant[len(out) - 1] = attente
+    for k, blocs in avant.items():
+        texte = out[k]["content"]
+        out[k] = {**out[k], "content": "\n\n".join(blocs + ([texte] if texte else []))}
     return out
 
 
