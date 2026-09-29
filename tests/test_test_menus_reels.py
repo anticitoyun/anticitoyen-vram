@@ -237,3 +237,15 @@ def test_doublons_reportes_depuis_le_representant(parc):
     l = _lignes(parc)
     assert l["acvram-bon-bis"][3] == l["acvram-bon"][3] == "OK" and "doublon de acvram-bon" in l["acvram-bon-bis"][12]
     assert "acvram-orphelin" not in l
+
+
+def test_lanceur_change_pendant_la_passe_arrete_net(parc):
+    """cni 29/09 : acvram-serveur & co. vivent dans l'arbre principal (liens de ~/.local/bin) ; une fusion pendant la
+    campagne changerait le chemin mesuré. Un lanceur modifié entre deux alias arrête la passe (rc 66), nommé."""
+    b = parc["tmp"] / "bin"
+    (b / "kimi-modele").write_text(f'#!/bin/sh\necho "# fusion" >> {b}/claude-modele\necho Paris\n')
+    liste = parc["tmp"] / "deux.tsv"
+    liste.write_text("acvram-bon\nacvram-muet\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 66 and "claude-modele" in r.stderr, r.stdout[-1500:] + r.stderr[-1500:]
+    assert list(_lignes(parc)) == ["acvram-bon"]

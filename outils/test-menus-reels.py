@@ -484,6 +484,14 @@ def rejuger() -> int:
     return 0
 
 
+def empreinte_lanceurs(p) -> dict[str, str]:
+    """sha256 de chaque lanceur du parc, lien SUIVI (cni 29/09 : ~/.local/bin/acvram-serveur et six autres pointent
+    dans l'arbre principal, hors paquet — une fusion de main pendant la campagne changerait le chemin mesuré)."""
+    import hashlib
+    return {f.name: hashlib.sha256(f.resolve().read_bytes()).hexdigest()[:16]
+            for f in sorted(p.bin.iterdir()) if f.is_file()}
+
+
 def reporter(chemin: Path) -> int:
     """Doublons (cni) : `alias<TAB>représentant` — même moteur, dossier, contexte et gabarit, donc même serveur servi
     sous un autre nom ; la DERNIÈRE ligne du représentant est recopiée sous le nom du doublon, marquée « reporté ».
@@ -572,9 +580,18 @@ def main() -> int:
     RESULTATS.parent.mkdir(parents=True, exist_ok=True)
     if not RESULTATS.exists():
         RESULTATS.write_text("# " + "\t".join(COLONNES[1:2] + COLONNES[:1] + COLONNES[2:]) + "\n", encoding="utf-8")
+    empreinte = empreinte_lanceurs(p)
+    print("lanceurs : " + " ".join(f"{k}={v}" for k, v in empreinte.items()), flush=True)
+
     def passe(liste, marque=""):
         pannes = []
         for i, (al, m, e) in enumerate(liste, 1):
+            maintenant = empreinte_lanceurs(p)
+            if maintenant != empreinte:
+                change = sorted(k for k in set(empreinte) | set(maintenant) if empreinte.get(k) != maintenant.get(k))
+                print(f"ARRÊT : lanceur(s) changé(s) pendant la passe : {change} — chemin mesuré différent, "
+                      f"passe à reprendre sur un parc figé.", file=sys.stderr, flush=True)
+                sys.exit(66)
             if PAUSE.exists():
                 print(f"PAUSE ({PAUSE}) : en attente, aucun alias lancé.", flush=True)
                 while PAUSE.exists():
