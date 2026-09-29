@@ -1,6 +1,6 @@
 # Journal des changements
 
-## 0.7.15 (en préparation)
+## En préparation (0.7.15)
 
 ### Masque d'attention : découpé d'emblée au-delà de 256 Mio (cqy)
 
