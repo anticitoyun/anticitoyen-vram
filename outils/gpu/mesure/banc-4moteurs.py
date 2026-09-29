@@ -544,6 +544,18 @@ def modele_servi(moteur):
         return None
 
 
+def _texte_delta(delta: dict) -> str:
+    """poste2-banc (29/09) : vLLM ≥ 0.13 rend le raisonnement dans « reasoning » (protocol.py:71
+    en 0.29), plus dans « reasoning_content » — ne lire que l'ancien champ comptait un
+    raisonnement en train de couler pour un delta vide (jetons perdus, TTFT/débit faussés).
+    Même correctif que syy/poste5-menus dans test-menus-reels.py."""
+    for cle in ("content", "reasoning", "reasoning_content"):
+        v = delta.get(cle)
+        if v:
+            return v
+    return ""
+
+
 def generer(moteur):
     """Une génération en streaming : (jetons, ttft_s, duree_decodage_s, Energie, texte)."""
     port = PORTS[moteur]
@@ -596,8 +608,9 @@ def generer(moteur):
                     usage = ev["usage"]
                 for ch in ev.get("choices") or []:
                     delta = ch.get("delta") or {}
-                    if delta.get("content") or delta.get("reasoning_content"):
-                        texte.append(delta.get("content") or delta.get("reasoning_content") or "")
+                    morceau = _texte_delta(delta)
+                    if morceau:
+                        texte.append(morceau)
                         maintenant = time.time()
                         if premier is None:
                             premier = maintenant
