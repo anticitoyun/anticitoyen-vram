@@ -8,6 +8,8 @@ Contrôles qui peuvent rendre faux (poste7-deb-parc-portable-20-09 § 3) :
   4. génération alias <moteur>-<nom>-<format>, ctx depuis config.json ou l'en-tête GGUF, notes « non mesuré » / « inconnu »
   5. idempotent fusion : ajoutés, ABSENT marqués, notes conservées ; deux passages = fichiers identiques
   6. rc ≠ 0     un alias qui ne résout pas, un balayage tronqué en --auto, un moteur présent qui ne répond pas est dit « arrêté »
+  7. secrets   ia-secrets.env absent : clés des clients (kimi, openwebui.env), défaut des lanceurs sinon, aléatoires sur
+               un poste sans client ; deux clients en désaccord → rc 4, rien d'écrit ; présent : jamais touché (i61)
 
 Usage : parc-installer [--auto] [--racine DIR ...] [--sans-balayage] [--importer parc.tar] [--exporter parc.tar] [--verifier]
 """
@@ -333,7 +335,50 @@ def _cle_toml(alias: str) -> str:
     return alias if re.fullmatch(r"[A-Za-z0-9_-]+", alias) else json.dumps(alias)
 
 
-def fusionner_config_kimi(cfg: Path, moteurs: dict[str, dict], modeles: dict[str, tuple[str, str, int]], routeur: int | None) -> bool:
+def cles_des_clients(P, moteurs: dict[str, dict]) -> tuple[dict[str, str], dict[str, list[str]], list[str]]:
+    """i61 (29/09) : les clés que portent DÉJÀ les clients, par variable CLE_* — (retenues, conflits, sources lues).
+    Le 28/09 11 h 42, ce programme a créé ia-secrets.env avec des clés aléatoires sur un poste dont les clients
+    (config kimi, Open WebUI) portaient les défauts des lanceurs : kimi, Open WebUI et quatre scripts en 401
+    (revue/poste5-cles-verdict-29-09.md). Clients lus : [providers.<moteur>].api_key du config.toml kimi, et
+    OPENAI_API_BASE_URLS / OPENAI_API_KEYS de <extras.openwebui_dir>/openwebui.env (URL → moteur par la route
+    /<moteur>/ du routeur ou par le port). Conflits = deux clients, deux clés pour le même moteur : noms des
+    sources seulement, jamais les clés."""
+    import tomllib
+    vus: dict[str, dict[str, list[str]]] = {}
+    sources: list[str] = []
+    def noter(k: str, cle: str, source: str) -> None:
+        if k in moteurs and k in MOTEURS_CONNUS and cle:
+            vus.setdefault(MOTEURS_CONNUS[k][3], {}).setdefault(cle, []).append(source)
+    if P.config_kimi.exists():
+        try:
+            fournisseurs = tomllib.loads(P.config_kimi.read_text(encoding="utf-8")).get("providers", {})
+        except tomllib.TOMLDecodeError:
+            fournisseurs = {}
+        sources.append(str(P.config_kimi).replace(str(Path.home()), "~"))
+        for k, f in fournisseurs.items():
+            noter(k, str(f.get("api_key", "")), "config kimi")
+    d = P.extras.get("openwebui_dir")
+    env = Path(os.path.expanduser(d)) / "openwebui.env" if d else None
+    if env and env.exists():
+        sources.append(str(env).replace(str(Path.home()), "~"))
+        val = {}
+        for l in env.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*(?:export\s+)?([A-Z_]+)=[\"']?([^\"']*)[\"']?\s*$", l)
+            if m:
+                val[m.group(1)] = m.group(2)
+        urls, cles = val.get("OPENAI_API_BASE_URLS", "").split(";"), val.get("OPENAI_API_KEYS", "").split(";")
+        for u, c in zip(urls, cles):
+            for k, m in moteurs.items():
+                if f"/{k}/" in u or re.search(rf":{int(m['port'])}(/|$)", u):
+                    noter(k, c, "openwebui.env")
+                    break
+    retenues = {v: next(iter(c)) for v, c in vus.items() if len(c) == 1}
+    conflits = {v: sorted({s for ss in c.values() for s in ss}) for v, c in vus.items() if len(c) > 1}
+    return retenues, conflits, sources
+
+
+def fusionner_config_kimi(cfg: Path, moteurs: dict[str, dict], modeles: dict[str, tuple[str, str, int]], routeur: int | None,
+                          cles: dict[str, str] | None = None) -> bool:
     """FUSION par ajout seul (t5e-b, 28/09 : la version « remplace les blocs gérés » a réécrit le config.toml de
     l'utilisateur, 285 → 150 alias, contextes réglés remis au maximum du modèle). Le texte existant est gardé À
     L'OCTET ; on ajoute à la fin les [providers.<moteur>] absents et les [models.<alias>] de ``modeles`` absents.
@@ -354,7 +399,9 @@ def fusionner_config_kimi(cfg: Path, moteurs: dict[str, dict], modeles: dict[str
             if fournisseurs[k].get("base_url") != base:
                 dire(f"[providers.{k}] : base_url {fournisseurs[k].get('base_url')} gardée (détecté : {base}) — à changer à la main si voulu")
             continue
-        ajout += f'[providers.{k}]\ntype = "openai"\nbase_url = "{base}"\napi_key = "{m.get("cle_defaut", "")}"\n\n'
+        # i61 : la clé que les serveurs attendent (ia-secrets.env, sinon celle des autres clients), le défaut sinon
+        cle = (cles or {}).get(MOTEURS_CONNUS[k][3] if k in MOTEURS_CONNUS else "") or m.get("cle_defaut", "")
+        ajout += f'[providers.{k}]\ntype = "openai"\nbase_url = "{base}"\napi_key = "{cle}"\n\n'
     for a in sorted(modeles):
         if a in alias:
             continue
@@ -382,6 +429,25 @@ def ecrire_parc_toml(p: Path, chemins: dict, racines: list[Path], profondeur: in
                 s.append(f"{kk} = {q(m[kk])}")
     s += ["", "[extras]"] + [f"{k} = " + (q(v) if isinstance(v, str) else str(v)) for k, v in extras.items()]
     return ecrire_si_change(p, "\n".join(s) + "\n")
+
+
+def lire_secrets(p: Path) -> dict[str, str]:
+    """VAR=valeur de ia-secrets.env (lignes « export » ou guillemets tolérés)."""
+    out = {}
+    for l in p.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\s*(?:export\s+)?([A-Z_]+)=[\"']?([^\"']*)[\"']?\s*$", l)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def refus_secrets(P, conflits: dict[str, list[str]]) -> int:
+    for v, src in sorted(conflits.items()):
+        dire(f"REFUS : {P.secrets} absent et {v} diffère entre {' et '.join(src)} — impossible de savoir laquelle vos "
+             f"serveurs attendent.")
+    dire(f"  À faire : créer {P.secrets} (mode 600) avec, pour chaque variable ci-dessus, la clé que vos serveurs "
+         f"utilisent (VAR=clé), mettre le client divergent à la même clé, puis relancer parc-installer.")
+    return 4
 
 
 def main() -> int:
@@ -561,14 +627,32 @@ def main() -> int:
         if ajouter(P.tsv("vision"), vision):
             changes.append("vision-modeles.tsv")
         routeur = P.extras.get("routeur_port")
-        if fusionner_config_kimi(P.config_kimi, moteurs, nouveaux, int(routeur) if routeur else None):
+        # i61 (29/09) : jamais de clés aléatoires quand des clients existent — le 28/09 elles ont cassé kimi, Open WebUI
+        # et quatre scripts (401). Les clés sont décidées AVANT la fusion kimi, qui les reçoit pour ses nouveaux
+        # fournisseurs : clients et serveurs ont la même. ia-secrets.env présent : lui. Absent : les clés des clients,
+        # le défaut des lanceurs sinon (ce que les serveurs servaient sans fichier) ; aléatoires seulement sur un poste
+        # sans aucun client ; deux clients en désaccord : refus (rc 4), ni kimi ni secrets écrits.
+        connus = {k: MOTEURS_CONNUS[k] for k in moteurs if k in MOTEURS_CONNUS}
+        if P.secrets.exists():
+            cles, origine = lire_secrets(P.secrets), ""
+        else:
+            du_client, conflits, sources = cles_des_clients(P, moteurs)
+            if conflits:
+                return refus_secrets(P, conflits)
+            if sources:
+                cles = {c[3]: du_client.get(c[3]) or c[4] for c in connus.values()}
+                origine = f"clés reprises des clients ({', '.join(sources)}), défaut des lanceurs sinon"
+            else:
+                import secrets as sec
+                cles = {c[3]: sec.token_hex(8) for c in connus.values()}
+                origine = "aucun client : clés aléatoires (poste neuf)"
+        if fusionner_config_kimi(P.config_kimi, moteurs, nouveaux, int(routeur) if routeur else None, cles):
             changes.append("config.toml")
-        # secrets : clés aléatoires si absentes
-        if not P.secrets.exists():
-            import secrets as sec
+        if origine:
             P.secrets.parent.mkdir(parents=True, exist_ok=True)
-            P.secrets.write_text("".join(f"{MOTEURS_CONNUS[k][3]}={sec.token_hex(8)}\n" for k in moteurs), encoding="utf-8")
+            P.secrets.write_text("".join(f"{v}={c}\n" for v, c in cles.items() if c), encoding="utf-8")
             os.chmod(P.secrets, 0o600); changes.append(P.secrets.name)
+            dire(f"{P.secrets.name} absent : {origine}")
         chemins = {"kimi_dir": str(P.kimi_dir).replace(str(Path.home()), "~"), "tsv_dir": str(P.tsv_dir).replace(str(Path.home()), "~"),
                    "secrets": str(P.secrets).replace(str(Path.home()), "~"), "bin": str(P.bin).replace(str(Path.home()), "~"),
                    "mcp_claude": str(P.mcp_claude).replace(str(Path.home()), "~"), "icone_claude": str(P.icone_claude).replace(str(Path.home()), "~"),
