@@ -1209,6 +1209,17 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             self.waiting.append(seq)
         return seq
 
+    def echec_du_pas(self) -> list[str]:
+        """8fx (29/09) : un pas qui lève (OOM de préfill) laissait ses séquences dans `running`, jamais préfillées, leurs
+        blocs tenus ; le service diffusait l'erreur à TOUTES les files, et la requête suivante (kimi) n'était plus
+        servie pendant 300 s. Retire les séquences en cours (celles du pas), rend leurs blocs sans les publier, et
+        rend leurs request_id ; les séquences en attente n'ont pas été touchées et restent servies."""
+        with self._lock:
+            seqs = list(self.running)
+            for seq in seqs:
+                self._finish(seq, "erreur", publier=False)
+        return [s.request_id for s in seqs]
+
     def abort(self, request_id: str) -> None:
         with self._lock:
             for seq in list(self.running) + list(self.waiting):
@@ -1537,7 +1548,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         seq.blocks.extend(self.allocator.allocate(need - len(seq.blocks)))
         return True
 
-    def _finish(self, seq: Sequence, reason: str) -> None:
+    def _finish(self, seq: Sequence, reason: str, publier: bool = True) -> None:
         seq.finished = True
         if self.speculator is not None:
             self.speculator.release(seq)
@@ -1548,7 +1559,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # `_register_complete_blocks` s'execute apres `_emit` et ne trouvait
             # plus aucun bloc. Les invites courtes — un systeme partage, une
             # question breve — ne peuplaient donc jamais le cache de prefixe.
-            self._register_complete_blocks(seq)
+            # Sauf après un pas en échec (8fx) : un préfill interrompu n'a pas écrit son KV, et le publier
+            # servirait des blocs vides à la prochaine requête qui partage l'invite.
+            if publier:
+                self._register_complete_blocks(seq)
             self.allocator.free(seq.blocks)
             seq.blocks = []
         # HORS du bloc ci-dessus : l'état récurrent n'a aucun rapport avec le

@@ -201,7 +201,7 @@ class EngineService:
                               f"max {durees[-1]:.1f} ms", flush=True)
                         durees.clear()
             except Exception as exc:                 # noqa: BLE001
-                self._broadcast_error(exc)
+                self._echec_du_pas(exc)
                 continue
             t1 = time.perf_counter()
             for out in outputs:
@@ -215,6 +215,35 @@ class EngineService:
         if q is None or self._loop is None:
             return
         self._loop.call_soon_threadsafe(q.put_nowait, out)
+
+    def _echec_du_pas(self, exc: Exception) -> None:
+        """8fx (29/09, silences kimi de 300 s) : après un OOM de préfill, la mémoire n'était jamais rendue (3 Gio libres
+        → 25 Mio) et chaque requête suivante refaisait un OOM. Deux rétentions : les séquences du pas restaient au
+        moteur, et l'exception diffusée gardait sa trace, donc les tenseurs locaux du pas (masque, activations).
+        Désormais : trace imprimée une fois, séquences du pas retirées sans publier leurs blocs, erreur SANS trace
+        envoyée à elles seules, cache de l'allocateur rendu. Les requêtes en attente continuent."""
+        import gc
+        import traceback
+        traceback.print_exception(exc)
+        erreur = RuntimeError(f"{type(exc).__name__} : {exc}")
+        exc.__traceback__ = None
+        del exc
+        ids = self.engine.echec_du_pas() if hasattr(self.engine, "echec_du_pas") else []
+        if ids:
+            with self._lock:
+                files = [self._queues[i] for i in ids if i in self._queues]
+            if self._loop is not None:
+                for q in files:
+                    self._loop.call_soon_threadsafe(q.put_nowait, erreur)
+        else:
+            self._broadcast_error(erreur)             # rien d'identifiable : comportement d'avant
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:                             # noqa: BLE001
+            pass
 
     def _broadcast_error(self, exc: Exception) -> None:
         with self._lock:
