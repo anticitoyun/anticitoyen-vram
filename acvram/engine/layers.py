@@ -1037,8 +1037,27 @@ def masque_images(q_len: int, kv_len: int, q_offset: int,
     return ouvert
 
 
-# Taille d'un bloc de masque dense (octets) quand `attention` doit découper après un OOM (8fx).
-_MASQUE_OCTETS_MAX = 256 << 20
+# cqy (29/09) : préfill dont les requêtes sont les DERNIÈRES positions (préfixe en cache, tranches : kv = q_offset + q) →
+# biais causal aligné en bas à droite (SDPA), sans matérialiser [q × kv]. Décision d'arithmétique : actif par défaut
+# seulement si l'équivalence au bit contre le masque dense tient sur carte (tests/test_masque_bas_droite_cqy.py).
+_BIAIS_BAS_DROITE = False
+# cqy (29/09, 0.7.15) : un masque dense [q × kv] au-delà de MASQUE_OCTETS_MAX (256 Mio) est découpé D'EMBLÉE par blocs de
+# lignes — au bit du seul tenant sur carte à partir de 1 024 lignes (blocs de 7 : 2 cas sur 20 différaient), d'où un
+# plancher : jamais moins de MASQUE_LIGNES_MIN lignes par bloc, et refus nommé si on le règle sous PLANCHER_LIGNES.
+# MASQUE_OCTETS_MAX=0 : témoin, le seul tenant partout (découpage après OOM seulement, comme en 0.7.14).
+PLANCHER_LIGNES = 1024
+_MASQUE_OCTETS_MAX = int(os.environ.get("ACVRAM_MASQUE_OCTETS_MAX", str(256 << 20)))
+_MASQUE_LIGNES_MIN = int(os.environ.get("ACVRAM_MASQUE_LIGNES_MIN", str(PLANCHER_LIGNES)))
+if _MASQUE_LIGNES_MIN < PLANCHER_LIGNES:
+    raise ValueError(f"ACVRAM_MASQUE_LIGNES_MIN={_MASQUE_LIGNES_MIN} refusé : sous {PLANCHER_LIGNES} lignes par bloc, "
+                     "le masque découpé n'est plus au bit du seul tenant sur carte (cqy, 29/09)")
+
+
+def _lignes_par_bloc(kv_len: int, octets: int) -> int:
+    """Lignes par bloc d'un masque dense découpé : ≈ MASQUE_OCTETS_MAX d'un bloc, jamais sous le plancher."""
+    if _MASQUE_LIGNES_MIN < PLANCHER_LIGNES:
+        raise ValueError(f"plancher de {PLANCHER_LIGNES} lignes par bloc : {_MASQUE_LIGNES_MIN} refusé (cqy)")
+    return max(_MASQUE_LIGNES_MIN, (_MASQUE_OCTETS_MAX or (256 << 20)) // max(1, kv_len * octets))
 
 
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -1056,25 +1075,29 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     q_len, kv_len = q.shape[0], k.shape[0]
     # le chemin à masque dense d'en dessous, exactement (un bloc d'images qui ne touche pas les requêtes n'en ouvre pas)
     touche = bool(images and causal and any(int(d) < q_offset + q_len and int(f) > q_offset for d, f in images))
+    bas_droite = bool(_BIAIS_BAS_DROITE and causal and window <= 0 and not touche and q_len > 1
+                      and q_offset > 0 and kv_len == q_offset + q_len)
     masque = bool(window > 0 or touche
-                  or (causal and q_len > 1 and not (q_offset == 0 and q_len == kv_len)))
+                  or (causal and q_len > 1 and not (q_offset == 0 and q_len == kv_len) and not bas_droite))
     if masque and q_len > 1 and not _en_blocs:
-        # 8fx (29/09) : le masque [q, kv] est dense ; une invite claude de ~30 k jetons dont le préfixe est en cache
-        # (q_offset > 0) en faisait 2,10 Gio → OOM en service, alors que la chauffe (q_offset = 0, masque None)
-        # tenait 34 816. On garde le calcul d'un seul tenant (sortie inchangée partout où il passait) et, s'il
-        # manque de mémoire, on le refait par blocs de lignes — seul cas où le découpage produit une sortie
-        # (bf16 identique au bit sur CPU, fp32 à ≤ 1e-6 : tests/test_masque_par_blocs_8fx.py).
+        # 8fx : garder le seul tenant là où il passe, refaire par blocs après un OOM ; cqy : découper d'emblée au-delà
+        # de MASQUE_OCTETS_MAX (2 Gio de masque à 34 k faisaient l'OOM, et le repli arrivait trop tard, mémoire prise).
+        lignes = _lignes_par_bloc(kv_len, q.element_size())
+
+        def par_blocs():
+            return torch.cat([attention(q[i:i + lignes], k, v, causal, scale, q_offset + i, window, n_rep, images,
+                                        _en_blocs=True)
+                              for i in range(0, q_len, lignes)], dim=0)
+        if 0 < _MASQUE_OCTETS_MAX < q_len * kv_len * q.element_size() and q_len > lignes:
+            return par_blocs()
         try:
             return attention(q, k, v, causal, scale, q_offset, window, n_rep, images, _en_blocs=True)
         except torch.OutOfMemoryError:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            lignes = max(1, _MASQUE_OCTETS_MAX // max(1, kv_len * q.element_size()))
             print(f"[acvram] masque d'attention {q_len}×{kv_len} hors mémoire : par blocs de {lignes} lignes",
                   flush=True)
-            return torch.cat([attention(q[i:i + lignes], k, v, causal, scale, q_offset + i, window, n_rep, images,
-                                        _en_blocs=True)
-                              for i in range(0, q_len, lignes)], dim=0)
+            return par_blocs()
     qh = q.transpose(0, 1).unsqueeze(0)          # [1, heads, tq, dim]
     kh = k.transpose(0, 1).unsqueeze(0)
     vh = v.transpose(0, 1).unsqueeze(0)
@@ -1095,6 +1118,11 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
         allowed = (cols <= rows) | ouvert
         mask = torch.zeros(q_len, kv_len, device=q.device, dtype=q.dtype)
         mask = mask.masked_fill(~allowed, float("-inf"))
+    elif bas_droite:
+        from torch.nn.attention.bias import causal_lower_right
+        out = F.scaled_dot_product_attention(qh, kh, vh, attn_mask=causal_lower_right(q_len, kv_len),
+                                             scale=scale, **gqa)
+        return out.squeeze(0).transpose(0, 1).contiguous()
     else:
         mask = causal_mask(q_len, kv_len, q_offset, q.device, q.dtype) if causal else None
     if mask is not None:

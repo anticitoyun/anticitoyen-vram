@@ -1,5 +1,18 @@
 # Journal des changements
 
+## En préparation (0.7.15)
+
+### Masque d'attention : découpé d'emblée au-delà de 256 Mio (cqy)
+
+* Une invite qui réutilise un préfixe en cache (q_offset > 0), une fenêtre glissante ou des images faisaient construire
+  un masque dense [q × kv] : 2 Gio pour une requête de 34 k jetons (Claude Code), d'où un OOM en service alors que la
+  chauffe tenait le contexte (8fx). Au-delà de `ACVRAM_MASQUE_OCTETS_MAX` (défaut 256 Mio), le masque est désormais
+  découpé d'emblée par blocs de lignes, **au bit du seul tenant sur carte** (grille bf16 et fp32, GQA, q de 1 à 34 k) ;
+  jamais moins de `ACVRAM_MASQUE_LIGNES_MIN` = 1 024 lignes par bloc (refus en dessous : à 7 lignes, le découpage
+  n'était pas au bit). `ACVRAM_MASQUE_OCTETS_MAX=0` = témoin (seul tenant, découpage après OOM seulement).
+* Le biais causal aligné en bas à droite de SDPA (`causal_lower_right`) n'est PAS au bit (10 cas sur 14, |Δ| ≤ 3,9e-3) :
+  présent, inactif (`_BIAIS_BAS_DROITE`).
+* La chauffe prouve aussi un préfill à préfixe en cache au contexte tenu, et descend sinon.
 ## 0.7.14 (29/09/2026)
 
 ### Menus claude-modeles et kimi-modeles (paquet parc 0.1.8)

@@ -11,7 +11,7 @@ from typing import Optional
 
 import torch
 
-from ..memory.kvcache import BlockAllocator
+from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
 from .sampler import SamplingParams
 
 __all__ = ["ChauffeContexte", "ContexteNonTenu", "CTX_TENU_MIN", "_ctx_texte"]
@@ -73,12 +73,21 @@ class ChauffeContexte:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
-    def _essai_de_chauffe(self, L: int, max_tokens: int = 1) -> bool:
+    def _essai_de_chauffe(self, L: int, max_tokens: int = 1, prefixe: bool = False) -> bool:
         """Une passe de chauffe de ``L`` jetons dans le régime courant : tenue ssi pas d OOM ET ≥ max(5 %, 64 Mio)
-        libres après elle. ``max_tokens=2`` force un pas de décodage (les graphes, s ils sont actifs, rejouent)."""
+        libres après elle. ``max_tokens=2`` force un pas de décodage (les graphes, s ils sont actifs, rejouent).
+        ``prefixe`` (cqy, 29/09) : deux blocs de la séquence passent d'abord et restent au cache de préfixe, puis la
+        séquence entière les réutilise → préfill à q_offset > 0, le chemin d'une requête claude qui répète son
+        début (8fx : masque dense de 2 Gio à 34 k, que la passe depuis 0 ne voyait pas)."""
         self._avant_essai_de_chauffe()                                   # (3) chaque pas part d un allocateur vide
+        seq = self.sequence_de_chauffe(L - 2)
+        en_cache = self.stats.cached_prompt_tokens
         try:
-            for _ in self.generate(self.sequence_de_chauffe(L - 2), SamplingParams(max_tokens=max_tokens, temperature=0.0)):
+            if prefixe:
+                for _ in self.generate(seq[:2 * BLOCK_SIZE], SamplingParams(max_tokens=1, temperature=0.0)):
+                    pass
+                self._avant_essai_de_chauffe()                           # la passe mesurée part d un allocateur vide
+            for _ in self.generate(seq, SamplingParams(max_tokens=max_tokens, temperature=0.0)):
                 pass
         except Exception as exc:                                         # noqa: BLE001
             oom = isinstance(exc, getattr(torch, "OutOfMemoryError", ())) or "out of memory" in str(exc).lower() \
@@ -87,6 +96,9 @@ class ChauffeContexte:
                 raise
             self._apres_oom_de_chauffe()
             return False
+        finally:
+            # le préfixe réutilisé par la chauffe ne compte pas comme un cache servi
+            self.stats.cached_prompt_tokens = en_cache
         libre, total = self._libre_apres_chauffe()
         seuil = max(total * 5 // 100, 64 << 20)
         self._oublier_la_chauffe()
@@ -172,7 +184,7 @@ class ChauffeContexte:
         essai = self._essai_de_chauffe
 
         t0 = time.time()
-        def dichotomie(bas: int, haut: int) -> int:                     # bas tenu (0 : rien), haut non tenu
+        def dichotomie(bas: int, haut: int, essai=essai) -> int:        # bas tenu (0 : rien), haut non tenu
             for _ in range(8):
                 milieu = max(pas, ((bas + haut) // 2) // pas * pas)
                 if milieu <= bas or milieu >= haut:
@@ -204,6 +216,13 @@ class ChauffeContexte:
                 self.moe_seuil, tenu = tenu, tenu2
             else:
                 seuils(None)
+        # cqy : le tenu doit aussi tenir quand l invite réutilise un préfixe en cache (q_offset > 0) ; sinon on descend.
+        if tenu and self.allocator.enable_prefix_cache:
+            # sous deux blocs + 2, le « préfixe » serait l invite entière : rien de plus à prouver que la passe depuis 0
+            essai_p = lambda L: L - 2 <= 2 * BLOCK_SIZE or self._essai_de_chauffe(L, prefixe=True)   # noqa: E731
+            if not essai_p(tenu):
+                avant, tenu = tenu, dichotomie(0, tenu, essai_p)
+                print(f"[acvram] chauffe avec préfixe en cache : {tenu} jetons tenus (sans préfixe : {avant})", flush=True)
         self._oublier_la_chauffe()
         self.graphs = graphes
         self.ctx_demande = n

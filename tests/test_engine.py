@@ -366,10 +366,13 @@ def test_chaque_pas_de_chauffe_part_d_un_allocateur_vide(converted, monkeypatch)
             monkeypatch.setattr(eng, "_avant_essai_de_chauffe", lambda: None)
         return eng
     e1 = moteur(vider=True)
-    assert e1.chauffer_contexte(pas=8) == 64 and etat["vidages"] == etat["essais"] == 1
+    # cqy : la passe depuis 0, puis la passe à préfixe en cache (préfixe puis séquence), un vidage avant chacune
+    assert e1.chauffer_contexte(pas=8) == 64 and etat["vidages"] == etat["essais"] == 3
     etat.update(reserve=0, vidages=0, essais=0)
     e2 = moteur(vider=False)
-    assert e2.chauffer_contexte(pas=8) == 64, "un seul pas : rien à cumuler, le témoin doit tenir aussi"
+    # cqy : depuis la passe à préfixe en cache, un pas fait deux passes ; sans vidage elles se cumulent et le témoin
+    # descend déjà au premier pas (avant : « un seul pas, rien à cumuler », 64)
+    assert e2.chauffer_contexte(pas=8) < 64, "sans vidage, les deux passes d un même pas se cumulent"
     # même simulation, pas de 4 % par jeton : 64 ne tient pas (32 % + 5 % ... ) → la dichotomie fait plusieurs pas
     etat.update(reserve=0, vidages=0, essais=0)
     e3 = moteur(vider=False)

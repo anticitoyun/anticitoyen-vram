@@ -289,6 +289,8 @@ VARIABLES_LUES = {
     "ACVRAM_GDN_MORCEAU",       # engine/gdn.py : d19, tranches GDN au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
     "ACVRAM_MOE_MORCEAU",       # engine/moe.py : d19, tranches MoE au-delà du tenu d'un seul tenant (défaut 4096, 0 = témoin)
     "ACVRAM_MLP_MORCEAU",       # engine/attention.py : a5v, tranches du MLP dense au-delà du tenu résident (défaut 4096, 0 = témoin)
+    "ACVRAM_MASQUE_OCTETS_MAX", # engine/layers.py : cqy, masque dense découpé d emblée au-delà (défaut 256 Mio, 0 = témoin)
+    "ACVRAM_MASQUE_LIGNES_MIN", # engine/layers.py : cqy, lignes par bloc au moins (défaut 1024, refus en dessous)
     "ACVRAM_PREFILL_FILE",      # engine/runner.py : 276 k, préfill en file dans le pas (opt-in, défaut 0)
     "ACVRAM_TOUR_GRAPHE",       # engine/vision.py : 276 j, graphe CUDA de la tour de vision (opt-in, défaut 0)
     "ACVRAM_TOUR_GRAPHE_MAX",   # engine/vision.py : 276 j, formes d image capturées au plus (défaut 8)
