@@ -49,6 +49,14 @@ PROFIL = {
     "comfy_url": COMFY_URL,
     "port_web": PORT_WEB,
     "kimi_bin": None,
+    # chef 29/09 (vérification GUI P1) : repris de claude-modele, pas recopié à la main.
+    # SEUIL_COMPLET (parc/bin/claude-modele:94) : sous ce seuil, mode_outils() (:98-99)
+    # bascule en « essentiel » (Read/Edit/Bash/Grep, sans MCP) — l'alias se lance quand même.
+    "seuil_complet": 45000,
+    "mention_reduit": "mode réduit : Read, Edit, Bash, Grep, sans MCP",
+    # seuil_minimum : refus au lancement — PROMPT_BASE(11000, mode essentiel, :99) +
+    # MIN_REPONSE(4096, :94) = 15096, contrôlé à claude-modele:106-107 (err + exit 1).
+    "seuil_minimum": 15096,
 }
 
 
