@@ -249,3 +249,18 @@ def test_lanceur_change_pendant_la_passe_arrete_net(parc):
     r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
     assert r.returncode == 66 and "claude-modele" in r.stderr, r.stdout[-1500:] + r.stderr[-1500:]
     assert list(_lignes(parc)) == ["acvram-bon"]
+
+
+def test_cli_claude_mis_a_jour_n_arrete_pas_la_passe(parc):
+    """29/09 21:49 : la mise à jour automatique du CLI claude (~/.local/bin/claude) a arrêté la passe — il n'est pas un
+    lanceur du parc ; la garde l'ignore et sa version est écrite sur chaque ligne."""
+    b = parc["tmp"] / "bin"
+    v = parc["tmp"] / "versions"; v.mkdir(); (v / "2.1.284").write_text("a"); (v / "2.1.285").write_text("b")
+    (b / "claude").symlink_to(v / "2.1.284")
+    (b / "kimi-modele").write_text(f'#!/bin/sh\nln -sfn {v}/2.1.285 {b}/claude\necho Paris\n')
+    liste = parc["tmp"] / "deux.tsv"
+    liste.write_text("acvram-bon\nacvram-degenere\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    l = _lignes(parc)
+    assert "cli claude 2.1.284" in l["acvram-bon"][12] and "cli claude 2.1.285" in l["acvram-degenere"][12], l

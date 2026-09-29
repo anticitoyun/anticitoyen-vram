@@ -424,7 +424,7 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                             "sans contenu final": "complétion : raisonnement seul, aucun contenu final"}[ligne["completion"]])]
         # PID du moteur relevé avant et après chaque client (cni) : un client qui recharge l'alias (kimi relance à
         # 65 536 ou 34 816, claude à la fenêtre du TSV) change le PID — noté, c'est le chemin réel de l'utilisatrice.
-        pids = [f"préch {pid_ecoute(port_moteur) if port_moteur else '-'}"]
+        pids = [f"préch {pid_ecoute(port_moteur) if port_moteur else '-'}", f"cli claude {cli_claude(p)}"]
         hors = []
         for nom, etape, hc in (("claude-modele", "claude", hc_claude), ("kimi-modele", "kimi", hc_kimi)):
             col = f"{etape}_rc"
@@ -487,9 +487,21 @@ def rejuger() -> int:
 def empreinte_lanceurs(p) -> dict[str, str]:
     """sha256 de chaque lanceur du parc, lien SUIVI (cni 29/09 : ~/.local/bin/acvram-serveur et six autres pointent
     dans l'arbre principal, hors paquet — une fusion de main pendant la campagne changerait le chemin mesuré)."""
+    # les LANCEURS du parc seulement : le 29/09 21:49 la mise à jour automatique du CLI claude (~/.local/bin/claude,
+    # 2.1.284 → 2.1.285) a arrêté la passe — il n'est pas figeable, sa version est écrite sur chaque ligne (cli_claude)
     import hashlib
     return {f.name: hashlib.sha256(f.resolve().read_bytes()).hexdigest()[:16]
-            for f in sorted(p.bin.iterdir()) if f.is_file()}
+            for f in sorted(p.bin.iterdir()) if f.name in LANCEURS and f.is_file()}
+
+
+LANCEURS = {"acvram-serveur", "claude-modele", "kimi-modele", "llamacpp-serveur", "vllm-serveur", "llamacpp-appoint",
+            "liberer-vram", "kimi-yals", "kimi-tabby", "claude-modeles", "kimi-modeles", "kimi-menu.lib.sh"}
+
+
+def cli_claude(p) -> str:
+    """Version du CLI claude servi (cible du lien ~/.local/bin/claude : …/versions/<x.y.z>)."""
+    f = p.bin / "claude"
+    return f.resolve().name if f.exists() else "absent"
 
 
 def reporter(chemin: Path) -> int:
