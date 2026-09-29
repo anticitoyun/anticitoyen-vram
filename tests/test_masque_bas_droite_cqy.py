@@ -48,7 +48,7 @@ def test_au_bit_processeur(monkeypatch, forme, dt, n_rep):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="équivalence sur carte : sous carte.sh")
 @pytest.mark.parametrize("n_rep", [1, 4])
-@pytest.mark.parametrize("forme", FORMES)
+@pytest.mark.parametrize("forme", FORMES + [(16, 8192, 8208), (1024, 7168, 8192)])   # préfixe d'un bloc (8fx), long préfixe
 def test_au_bit_carte(monkeypatch, forme, n_rep):
     q_offset, q_len, kv_len = forme
     dense, biais, appels = _paire(monkeypatch, q_offset, q_len, kv_len, torch.bfloat16, "cuda", n_rep)
