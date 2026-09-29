@@ -3,6 +3,7 @@
 Repères pour qui reprend ce code. Lisez d'abord [`REPRISE.md`](REPRISE.md) :
 il contient l'état du projet, les invariants, les pièges déjà rencontrés et les
 décisions prises. Ce fichier-ci ne couvre que les conventions de travail.
+Pour contribuer de l'extérieur (déroulement, exigences, certificat d'origine) : [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Langue
 
