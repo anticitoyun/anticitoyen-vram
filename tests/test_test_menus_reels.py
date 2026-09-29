@@ -47,6 +47,7 @@ def parc(tmp_path):
     (tmp_path / "serveur.py").write_text(SERVEUR)
     # acvram-serveur factice : « acvram-panne » échoue ; « acvram-autre » sert un autre id ; sinon sert l'alias
     (b / "acvram-serveur").write_text(f'''#!/bin/sh
+echo "$1 ctx=$2 graphes=$GRAPHES min=$CTX_CLIENT_MIN" >> {tmp_path}/lanceur.log
 [ "$1" = acvram-panne ] && {{ echo "RuntimeError: cause au journal serveur" >> "$ACVRAM_SERVEUR_LOG"; echo "OOM simulé au chargement" >&2; exit 1; }}
 id="$1"; [ "$1" = acvram-autre ] && id=un-autre-modele
 setsid {sys.executable} {tmp_path}/serveur.py {port} "$id" >/dev/null 2>&1 < /dev/null &
@@ -120,3 +121,24 @@ def test_rejuger_passe_en_panne_un_ok_sans_paris(parc):
     l = _lignes(parc)
     assert l["acvram-bon"][3] == "OK" and l["acvram-degenere"][3:5] == ["PANNE", "kimi"], l
     assert parc["tsv"].with_name("menus-reels.tsv.avant-rejuger").exists() and not _ecoute(parc["port"])
+
+
+def test_rapide_modele_servi_seul_contexte_court_pannes_rejouees_une_fois(parc):
+    """--rapide (chef 29/09) : lanceur à 4096 sans graphes ni CTX_CLIENT_MIN ; preuve = id servi conforme + réponse
+    non vide, clients non joués (muet et dégénéré passent, notés « rapide ») ; chaque panne rejouée UNE fois en fin."""
+    r = _lancer(parc, "--pour-de-vrai", "--rapide", "--attente", "30")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    brut = [l.split("\t") for l in parc["tsv"].read_text().splitlines() if l and not l.startswith("#")]
+    par = {}
+    for c in brut:
+        par.setdefault(c[0], []).append(c)
+    for a in ("acvram-bon", "acvram-muet", "acvram-degenere"):
+        assert len(par[a]) == 1 and par[a][0][3] == "OK" and par[a][0][9:11] == ["rapide", "rapide"], par[a]
+    for a, etape in (("acvram-panne", "préchargement"), ("acvram-autre", "/v1/models")):
+        assert [c[3:5] for c in par[a]] == [["PANNE", etape]] * 2, par[a]              # une fois, puis un rejeu
+        assert "rejeu" in par[a][1][12] and "rejeu" not in par[a][0][12]
+    lance = (parc["tmp"] / "lanceur.log").read_text().splitlines()
+    assert "acvram-bon ctx=4096 graphes=1 min=" in lance, lance
+    assert len(lance) == 7                                                              # 5 alias + 2 rejeux
+    time.sleep(0.3)
+    assert not _ecoute(parc["port"])

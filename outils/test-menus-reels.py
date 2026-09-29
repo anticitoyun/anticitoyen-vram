@@ -37,6 +37,9 @@ PAUSE = ETAT / "pause"
 # journal du serveur (acvram-serveur, en ajout) : sa part de CE lancement est copiée dans le journal d alias quand
 # le préchargement échoue — le 28/09 la seule cause lisible était un avertissement, et /tmp s est vidé au redémarrage
 LOG_SERVEUR = Path(os.environ.get("ACVRAM_SERVEUR_LOG", "/tmp/acvram-serveur.log"))
+# --rapide (chef 29/09, 164 alias à passer) : la preuve se réduit au modèle servi — /v1/models conforme à l'alias ET
+# réponse non vide ; claude/kimi exigent ≥ 15 k de contexte et ne sont pas joués (passe réelle sur échantillon ensuite).
+CTX_RAPIDE, JETONS_RAPIDE, PLAFOND_RAPIDE = 4096, 16, 300
 QUESTION = "Réponds en un seul mot : quelle est la capitale de la France ?"
 # rc 0 et réponse non vide ne jugent rien : le 28/09, GLM-4.7-Flash rendait « ``| » en boucle (kimi rc 0 compté OK) et
 # claude enchaînait les suites jusqu'au « Prompt is too long ». La réponse doit contenir ATTENDU (casse ignorée) ;
@@ -79,19 +82,21 @@ def alias_du_menu(p) -> list[tuple[str, str, dict]]:
                   key=lambda t: (rang.get(t[1], 99), list(m).index(t[0])))
 
 
-def lanceur(p, alias: str, moteur: str) -> tuple[list[str], dict[str, str], str | None] | str:
+def lanceur(p, alias: str, moteur: str, rapide: bool = False) -> tuple[list[str], dict[str, str], str | None] | str:
     """(argv, env, id attendu sur /v1/models) — ou la cause pour laquelle rien n'est lançable. Même résolution que
     claude-modele/kimi-modele (colonnes des TSV), mêmes lanceurs ; CTX_CLIENT_MIN : celui de claude (29 096,
     claude-modele:151) — kimi-modele pose le sien (34 816) et relance si besoin ; un alias trop court pour kimi garde
     ainsi le résultat de claude au lieu de tomber au préchargement."""
     b = p.bin
     if moteur == "acvram":
+        if rapide:   # --rapide : contexte court, sans graphes CUDA (chauffe et capture courtes), pas de CTX_CLIENT_MIN
+            return [str(b / "acvram-serveur"), alias, str(CTX_RAPIDE)], {"GRAPHES": "1"}, alias
         return [str(b / "acvram-serveur"), alias], {"CTX_CLIENT_MIN": "29096"}, alias
     if moteur in ("llamacpp", "vllm"):
         t = lire_tsv(p.tsv("gguf" if moteur == "llamacpp" else "vllm")).get(alias)
         if not t:
             return f"alias absent de {p.tsv('gguf' if moteur == 'llamacpp' else 'vllm').name}"
-        dossier, ctx = t[0], (t[1] if len(t) > 1 else "0")
+        dossier, ctx = t[0], (str(CTX_RAPIDE) if rapide else (t[1] if len(t) > 1 else "0"))
         if not Path(dossier).exists():
             return f"chemin absent : {dossier}"
         if moteur == "vllm":
@@ -209,7 +214,7 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
         if moteur not in AUTO_CHARGES:
             if port is None:
                 return panne("préchargement", f"moteur {moteur} absent de parc.toml (présent = false)")
-            lz = lanceur(p, alias, moteur)
+            lz = lanceur(p, alias, moteur, a.rapide)
             if isinstance(lz, str):
                 return panne("préchargement", lz)
             argv, env, attendu = lz
@@ -217,9 +222,10 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
             debut = LOG_SERVEUR.stat().st_size if LOG_SERVEUR.exists() else 0
             try:
                 r = subprocess.run(argv, env={**os.environ, "ACVRAM_ATTENTE": str(a.attente), **env},
-                                   capture_output=True, text=True, timeout=a.attente + 600, stdin=subprocess.DEVNULL)
+                                   capture_output=True, text=True, timeout=a.attente + (PLAFOND_RAPIDE if a.rapide else 600),
+                                   stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
-                return panne("préchargement", f"délai {a.attente + 600} s")
+                return panne("préchargement", f"délai {a.attente + (PLAFOND_RAPIDE if a.rapide else 600)} s")
             ligne["prechargement_s"] = f"{time.monotonic() - t0:.0f}"
             with journal.open("a", encoding="utf-8") as f:
                 f.write(f"--- lanceur rc={r.returncode}\n{r.stdout[-6000:]}\n{r.stderr[-6000:]}\n")
@@ -240,8 +246,8 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
             ligne["models"] = "ok"
             try:
                 rep = get_json(f"http://127.0.0.1:{port}/v1/chat/completions", cle,
-                               {"model": servi, "messages": [{"role": "user", "content": QUESTION}], "max_tokens": 64,
-                                "temperature": 0}, delai=a.delai_client)
+                               {"model": servi, "messages": [{"role": "user", "content": QUESTION}], "max_tokens": JETONS_RAPIDE if a.rapide else 64,
+                                "temperature": 0}, delai=min(a.delai_client, PLAFOND_RAPIDE) if a.rapide else a.delai_client)
                 msg = rep["choices"][0]["message"]
                 texte = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
             except Exception as e:  # noqa: BLE001
@@ -250,6 +256,10 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                 return panne("complétion", "réponse vide (contenu et raisonnement)")
             # sans « Paris » : noté, mais les clients sont joués quand même (64 jetons de raisonnement peuvent finir avant)
             ligne["completion"] = "ok" if ATTENDU in texte.casefold() else "sans Paris"
+        if a.rapide:
+            # 16 jetons ne suffisent pas toujours à écrire « Paris » (raisonnement d'abord) : noté, pas jugé
+            ligne.update(claude_rc="rapide", kimi_rc="rapide", verdict="OK", detail="rapide : modèle servi seul")
+            return ligne
         # les deux clients sont joués indépendamment : claude d abord (serveur préchargé à son contexte), puis kimi
         # (kimi-modele relance à 34 816 si besoin) ; une panne de l un ne masque pas l autre.
         pannes = [("complétion", "complétion sans « Paris »")] if ligne["completion"] == "sans Paris" else []
@@ -313,6 +323,9 @@ def main() -> int:
     ap.add_argument("--max", type=int, default=0, help="au plus N alias dans ce passage (0 : tous)")
     ap.add_argument("--attente", type=int, default=1800, help="ACVRAM_ATTENTE des lanceurs (verrou de carte)")
     ap.add_argument("--delai-client", type=int, default=600, help="délai de chaque client (s)")
+    ap.add_argument("--rapide", action="store_true",
+                    help=f"preuve réduite au modèle servi (/v1/models + réponse non vide), contexte {CTX_RAPIDE}, sans "
+                         f"graphes, {JETONS_RAPIDE} jetons, plafond {PLAFOND_RAPIDE} s ; pannes rejouées une fois en fin")
     ap.add_argument("--rejuger", action="store_true",
                     help="rejuge les lignes OK du TSV sur leurs journaux (contrôle « Paris »), sans rien lancer")
     a = ap.parse_args()
@@ -340,16 +353,29 @@ def main() -> int:
     RESULTATS.parent.mkdir(parents=True, exist_ok=True)
     if not RESULTATS.exists():
         RESULTATS.write_text("# " + "\t".join(COLONNES[1:2] + COLONNES[:1] + COLONNES[2:]) + "\n", encoding="utf-8")
-    for i, (al, m, e) in enumerate(choix, 1):
-        if PAUSE.exists():
-            print(f"PAUSE ({PAUSE}) : en attente, aucun alias lancé.", flush=True)
-            while PAUSE.exists():
-                time.sleep(5)
-            print("reprise.", flush=True)
-        l = tester(p, cles, al, m, e, a)
-        with RESULTATS.open("a", encoding="utf-8") as f:
-            f.write("\t".join([l["alias"], l["date"]] + [l[c] for c in COLONNES[2:]]) + "\n")
-        print(f"[{i}/{len(choix)}] {l['verdict']:5s} {m:9s} {al} {l['etape']} {l['cause'][:120]}", flush=True)
+    def passe(liste, marque=""):
+        pannes = []
+        for i, (al, m, e) in enumerate(liste, 1):
+            if PAUSE.exists():
+                print(f"PAUSE ({PAUSE}) : en attente, aucun alias lancé.", flush=True)
+                while PAUSE.exists():
+                    time.sleep(5)
+                print("reprise.", flush=True)
+            l = tester(p, cles, al, m, e, a)
+            if marque:
+                l["detail"] = (l["detail"] + " ; " if l["detail"] else "") + marque
+            with RESULTATS.open("a", encoding="utf-8") as f:
+                f.write("\t".join([l["alias"], l["date"]] + [l[c] for c in COLONNES[2:]]) + "\n")
+            print(f"[{marque}{i}/{len(liste)}] {l['verdict']:5s} {m:9s} {al} {l['etape']} {l['cause'][:120]}", flush=True)
+            # une cause de configuration (alias ou chemin absent) ne change pas au second essai : pas de rejeu
+            if l["verdict"] == "PANNE" and not re.search(r"absent", l["cause"]):
+                pannes.append((al, m, e))
+        return pannes
+
+    pannes = passe(choix)
+    if a.rapide and pannes:
+        print(f"rejeu unique de {len(pannes)} panne(s) en fin de liste", flush=True)
+        passe(pannes, "rejeu ")
     return 0
 
 
