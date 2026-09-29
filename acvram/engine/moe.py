@@ -728,7 +728,7 @@ class MoEBlock(nn.Module):
         tq, tb = self._tables_adresses(pile)
         y = kernels.get_extension().nvfp4_gemm_grouped_mma(
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
-            qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow)
+            qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, ks_mma(k), grow)
         return y if brut else y[:, :m]
 
     def _decal_marlin(self, nom: str) -> int:
@@ -765,7 +765,7 @@ class MoEBlock(nn.Module):
         N = w.shape[2] // 2
         return kernels.get_extension().nvfp4_gemm_grouped_mma(
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
-            N, k, bt or 16, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow, self._decal_marlin(nom))
+            N, k, bt or 16, _MOE_MMA_ETAGES, ks_mma(k), grow, self._decal_marlin(nom))
 
     # Chemins de DÉCODAGE MoE, tels que `_chemin` les compte : la ligne de régime
     # imprime celui qui a été atteint (runner.chemin_moe_atteint), jamais l env.
@@ -1890,6 +1890,13 @@ _MOE_MMA_ETAGES = int(os.environ.get("ACVRAM_MOE_MMA_ETAGES", "4"))
 # synchronisation. Mesuré le 14/09/2026 (bead 0si), Coder-30B prefill chaud :
 # L=2048 16 911 → 19 148 j/s, L=512 8 761 → 9 853 (revue/mma-fp4-native-sm120.md).
 _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
+
+
+def ks_mma(k: int) -> int:
+    """Profondeur d'étage pour une GEMM de profondeur K : le noyau exige K % ks == 0 (acvram_kernels.cu, « K multiple
+    de ks »), la porte du chemin MMA ne vérifie que K % 64. poste5-menus 29/09 : Gemma-4-26B-A4B (K = 704 ≡ 64 mod 128)
+    mourait au démarrage ; repli sur 64, l'ancien défaut mesuré le 14/09. K multiple de 128 : inchangé."""
+    return _MOE_MMA_KS if k % _MOE_MMA_KS == 0 else 64
 # Décodage MoE par la MMA groupée (levier (3) de poste7, 14/09) : OUVERT par
 # défaut depuis le 15/09 (revue/poste7-moe-mma-qualite-15-09.md § 2) — PPL par
 # le chemin de décodage MMA=1 / MMA=0 = 0,9995 (poste2, teacher forcing,

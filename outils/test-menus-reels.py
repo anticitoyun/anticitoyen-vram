@@ -300,7 +300,10 @@ def queue(texte: str, n: int = 160) -> str:
 
 # Pièce claude (29/09) : claude termine TOUJOURS par « [claude-code:unrecognized_model] {…} » (116 réussites de la
 # liste-1 le portent) — la dernière ligne n'est pas la cause. La cause est la première ligne d'erreur nommée.
-MOTIFS_CAUSE = ("API Error", "Error:", "REFUS", "refus", "erreur", "mort au démarrage")
+# poste5-menus (29/09) : phi-4 sous claude — cause « Prompt is too long » (stdout), mais le repli rendait la dernière
+# ligne de stderr, l'avertissement « ⚠ claude.ai connectors are disabled » que claude imprime à CHAQUE lancement.
+MOTIFS_CAUSE = ("API Error", "Error:", "REFUS", "refus", "erreur", "mort au démarrage", "Prompt is too long")
+BRUIT_REPLI = ("connectors are disabled", "Permission allow rule")   # jamais une cause, même en dernière ligne
 
 
 def cause_de(stderr: str, stdout: str) -> str:
@@ -308,7 +311,8 @@ def cause_de(stderr: str, stdout: str) -> str:
         for l in (texte or "").splitlines():
             if any(m in l for m in MOTIFS_CAUSE) and "unrecognized_model" not in l:
                 return l.strip()[:160].replace("\t", " ")
-    return queue(stderr) or queue(stdout)
+    net = ["\n".join(l for l in (t or "").splitlines() if not any(b in l for b in BRUIT_REPLI)) for t in (stderr, stdout)]
+    return queue(net[0]) or queue(net[1]) or queue(stderr) or queue(stdout)
 
 
 def client(p, nom: str, alias: str, journal: Path, delai: int) -> tuple[str, str]:
@@ -384,7 +388,10 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                                 "temperature": 0}, delai=min(a.delai_client, PLAFOND_RAPIDE) if a.rapide else a.delai_client)
                 msg = rep["choices"][0]["message"]
                 fin = rep["choices"][0].get("finish_reason")
-                brut = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+                # vLLM ≥ 0.13 rend le raisonnement dans « reasoning » (protocol.py:71 en 0.29), plus dans
+                # « reasoning_content » : ne lire que l'ancien champ comptait un raisonnement coupé pour une réponse vide
+                brut = next((s for s in (str(msg.get(k) or "").strip()
+                                         for k in ("content", "reasoning", "reasoning_content")) if s), "")
                 final = contenu_final(msg.get("content") or "")
             except Exception as e:  # noqa: BLE001
                 return panne("complétion", f"{type(e).__name__} : {e}"[:200])
