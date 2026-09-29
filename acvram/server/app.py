@@ -1198,6 +1198,19 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # tool_result (sf2), tool_choice « none », stop_sequences,
     # temperature/top_p/top_k, stream (evenements message_start,
     # content_block_delta, message_delta, message_stop).
+    # menus (poste6 29/09) : compte de l'invite AVANT de lancer claude. claude-modele mesure ainsi ce que Claude
+    # Code enverra (invite de démarrage + crochets de l'utilisateur, capturée à blanc) avec le tokenizer du modèle
+    # servi, et choisit une réserve de sortie qui laisse la compaction possible — voir parc/bin/claude-modele. Même
+    # rendu que /v1/messages (gabarit, outils), rien n'est soumis au moteur ; jamais un 400 : compter n'est pas servir.
+    @app.post("/v1/messages/count_tokens")
+    async def anthropic_count_tokens(raw: Request):
+        req = await raw.json()
+        messages = messages_anthropic(req)
+        tools = outils_anthropic(req.get("tools"))
+        prompt = await asyncio.to_thread(render_chat, tokenizer, messages, True,
+                                         {"tools": tools} if tools else None)
+        return {"input_tokens": len(_encode(tokenizer, prompt))}
+
     @app.post("/v1/messages")
     async def anthropic_messages(raw: Request):
         with service.entree():                       # 269 b : compte les requêtes entrées non soumises
