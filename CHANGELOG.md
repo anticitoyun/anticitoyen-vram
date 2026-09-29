@@ -1,5 +1,45 @@
 # Journal des changements
 
+## 0.7.14 (29/09/2026)
+
+### Menus claude-modeles et kimi-modeles (paquet parc 0.1.8)
+
+* **Test réel des menus** (poste1, edz, `acvram-memoire/revue/poste1-edz-verdict-29-09.md`) : 163 alias démarrés et
+  interrogés (140 OK en passe rapide), puis 80 alias sous Claude Code et kimi au contexte de service : claude 69/80,
+  kimi 51/80 en 0.7.13 ; les pannes ci-dessous en sont tirées.
+* **kimi hors acvram** (poste5, `poste5-kimi-verdict-29-09.md`) : 0/19 alias llama.cpp, vLLM et « rapide » passaient.
+  Le 28/09, parc-installer avait créé `ia-secrets.env` avec des clés aléatoires ; le routeur les exigeait, la config
+  kimi gardait les anciennes (401). `kimi-modele` reprend désormais les clés courantes dans sa copie locale.
+  **parc-installer ne crée plus de clés** quand des clients existent : il reprend les leurs, ou refuse en disant quoi
+  faire (`poste5-i61-verdict-29-09.md`). Les postes touchés remettent les clés d'avant dans `ia-secrets.env` ou mettent
+  à jour Open WebUI et leurs scripts (`poste5-cles-verdict-29-09.md`).
+* **vLLM sur RTX 5090** (poste5, `poste5-bim-verdict-29-09.md`) : les 9 alias vLLM mouraient au démarrage. FlashInfer
+  était choisi sans nvcc (mort au profilage) → `TRITON_ATTN` par défaut ; les GLM (MLA) dépassaient la mémoire partagée
+  de sm_120 avec un cache KV fp8 (102 400 > 101 376 o) → cache KV bf16. 4/4 HTTP 200.
+* **claude-modele** (poste6, `poste6-piece-claude-verdict-29-09.md`, `poste6-piece-claude2-verdict-29-09.md`) : le
+  crochet de démarrage que Claude Code glisse en message `system` est placé AVANT la question (0.7.13 le collait après :
+  le modèle répondait au crochet) ; gabarit assoupli pour llama.cpp (Mistral Small 4 refusait un `system` tardif) ;
+  jetons de fin de tour de Gemma 4 (conversion et chargement) ; le pool d'experts est rendu après un OOM de chauffe.
+
+### Moteur
+
+* **Piles d'experts construites avant la chauffe** (poste5, ya1, `poste5-ya1-verdict-29-09.md`) : sans graphes CUDA, les
+  piles Marlin étaient bâties pendant la première passe de chauffe, par-dessus le préfill plein ; Qwen3-Coder-30B ne
+  tenait que 3 072 jetons sur 4 096. Désormais 4 096/4 096 (comme avec graphes). Test `tests/test_piles_avant_chauffe_ya1.py`.
+* **Reprise après un OOM de préfill** (poste1, 8fx, `poste1-8fx-verdict-29-09.md`) : une longue invite d'outils avec
+  préfixe en cache fabriquait un masque d'attention dense de 2 Gio ; l'OOM ne rendait pas la mémoire et chaque requête
+  suivante échouait (kimi relançait 300 s). La séquence fautive est retirée, la mémoire rendue, les autres files servies ;
+  après un OOM seulement, le masque est refait par blocs. Chemin nominal inchangé. Limite connue : en mémoire très
+  serrée, la requête fautive échoue encore (sans cascade) ; masque non dense en cours.
+* Contrôle au bit (poste5, `poste5-p0bit-verdict-29-09.md`) : 0.7.12, 0.7.13, main avec et sans Marlin, contextes
+  32 768 et 34 816 donnent les mêmes jetons à temperature 0 sur les deux alias où edz voyait un écart ; l'écart d'edz
+  reste non expliqué, aucune optimisation n'en est la cause.
+
+### Outils
+
+* `sortir-version.sh` : le doctor Flatpak de la vérification tourne sous `carte.sh` ; `verifier-release.sh` refuse (67)
+  si `CUDA_VISIBLE_DEVICES` est vide au lieu de conclure « Marlin absent » (poste6, 3zo).
+
 ## 0.7.13 (29/09/2026)
 
 ### Noyaux Marlin : absents des paquets depuis 0.6.13, rétablis
