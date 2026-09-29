@@ -289,6 +289,10 @@ class ChauffeContexte:
         self.running.clear(); self.waiting.clear()
         self._oublier_la_chauffe()
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        from .layers import oublier_precharges                           # emplacements du pool dense en vol : rendus
+        oublier_precharges(self.model)
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def _oublier_la_chauffe(self) -> None:

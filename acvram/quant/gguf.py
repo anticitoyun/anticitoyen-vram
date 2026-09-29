@@ -666,10 +666,16 @@ class GGUFFile:
         # les modèles instruits terminent par un marqueur (<|im_end|>...) que
         # llama.cpp reconnaît par heuristique de nom. Sans lui, la génération
         # continue après la réponse.
+        # Pièce claude (29/09) : Gemma 4 termine par <turn|> (absent d'ici → la génération enchaînait les tours,
+        # claude sans réponse en 300 s) et son vocabulaire contient « </s> » comme jeton ORDINAIRE (212, type 1)
+        # que le nom seul prenait pour une fin → seuls les jetons de contrôle (type 3) ou définis par l'utilisateur
+        # (type 4) comptent, quand le GGUF déclare les types.
         toks = self.kv.get("tokenizer.ggml.tokens") or []
+        ttypes = self.kv.get("tokenizer.ggml.token_type") or []
         FINS = ("<|im_end|>", "<|eot_id|>", "<|endoftext|>", "<|end|>",
-                "<|eot|>", "<end_of_turn>", "</s>")
-        eog = [i for i, t in enumerate(toks) if t in FINS]
+                "<|eot|>", "<end_of_turn>", "<turn|>", "</s>")
+        eog = [i for i, t in enumerate(toks) if t in FINS
+               and (i >= len(ttypes) or ttypes[i] in (3, 4))]
         if eog and "eos_token_id" in gen:
             gen["eos_token_id"] = sorted({int(gen["eos_token_id"]), *eog})
         if gen:

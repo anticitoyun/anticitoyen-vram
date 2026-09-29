@@ -305,6 +305,33 @@ class StreamedWeight:
         return self.plat.numel()
 
 
+def oublier_precharges(model: torch.nn.Module) -> int:
+    """Après un OOM de chauffe (contexte._apres_oom_de_chauffe) : chaque QuantLinear en flux oublie son emplacement
+    préchargé et chaque pool rend tout ce qui était distribué. Rend le nombre d'emplacements rendus."""
+    n = 0
+    pools: list = []
+    for m in model.modules():
+        st = getattr(m, "streamed", None)
+        if st is None:
+            continue
+        slot = getattr(m, "_pending_slot", None)
+        if slot is not None:
+            try:
+                st.release(slot)
+            except Exception:                                            # noqa: BLE001
+                pass
+            m._pending_slot = None
+            n += 1
+        pool = getattr(st, "pool", None)
+        if pool is not None and all(pool is not p for p in pools):
+            pools.append(pool)
+    for pool in pools:
+        rendre = getattr(pool, "rendre_tout", None)
+        if rendre is not None:
+            n += rendre()
+    return n
+
+
 class ExpertPool:
     """Tampons GPU partagés par tous les experts exilés d'une même couche.
 
@@ -417,6 +444,17 @@ class ExpertPool:
             return
         jeu["libre"][i].record(torch.cuda.current_stream(self.device))
 
+    def rendre_tout(self) -> int:
+        """Rend tous les emplacements distribués (pièce claude, 29/09) : après un OOM de chauffe, aucun calcul
+        ne lira plus ce qui était en vol — l'appelant a synchronisé. Rend le nombre d'emplacements rendus."""
+        n = 0
+        for d, jeu in self._par_disposition.items():
+            for i, pris in enumerate(jeu["distribue"]):
+                if pris:
+                    self.liberer(jeu["base"] + i)
+                    n += 1
+        return n
+
     @property
     def nbytes(self) -> int:
         return sum(pl.numel() for jeu in self._par_disposition.values() for pl in jeu["plats"])
@@ -469,6 +507,12 @@ class QuantLinear(nn.Module):
             # sans pool, ou pool DENSE partagé (17/09) : un poids par couche,
             # le pool garde ses emplacements par événements — jamais pour un
             # pool d'experts (les 512 d'une couche rempliraient la carte)
+            if self._pending_slot is not None:
+                # Pièce claude (29/09) : un emplacement déjà pris et jamais consommé (passe interrompue par un
+                # OOM de chauffe avant le calcul de cette couche) était REPRIS ici sans être rendu — quatre
+                # essais de la dichotomie suffisaient à distribuer les 4 emplacements du pool dense
+                # (gemma-4-12B bf16-vision, 21/48 couches exilées : « ExpertPool saturé » au démarrage).
+                return
             self._pending_slot = self.streamed.prefetch()
 
     def precharger(self) -> None:

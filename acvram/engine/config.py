@@ -605,6 +605,40 @@ def _as_id_list(v: Any) -> list[int]:
     return []
 
 
+# Marqueurs de fin de tour des gabarits de chat : un point de contrôle converti avant la pièce claude (29/09) peut
+# déclarer un eos incomplet (gemma4-12b-heretic : [1, 212] — 212 = « </s> » ordinaire, <turn|> 106 absent → la
+# génération enchaînait les tours et claude attendait 300 s). Ajouté ici si le jeton est SPÉCIAL dans tokenizer.json
+# ET cité par le gabarit de chat du dossier — jamais sur le nom seul.
+FINS_DE_TOUR = ("<turn|>", "<|im_end|>", "<|eot_id|>", "<end_of_turn>", "<|end|>", "<|eot|>",
+                "<|endoftext|>", "</s>")
+
+
+def _fins_de_tour_du_gabarit(dossier: str) -> list[int]:
+    """Ids des marqueurs de FINS_DE_TOUR spéciaux dans tokenizer.json et présents dans le gabarit de chat ; [] sans
+    tokenizer.json, sans gabarit, ou sur une lecture impossible (jamais une exception au chargement)."""
+    try:
+        with open(os.path.join(dossier, "tokenizer.json"), "r", encoding="utf-8") as fh:
+            speciaux = {t["content"]: int(t["id"]) for t in json.load(fh).get("added_tokens", [])
+                        if t.get("special") and t.get("content") in FINS_DE_TOUR}
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    if not speciaux:
+        return []
+    gabarit = ""
+    try:
+        cj = os.path.join(dossier, "chat_template.jinja")
+        if os.path.isfile(cj):
+            with open(cj, "r", encoding="utf-8") as fh:
+                gabarit = fh.read()
+        else:
+            with open(os.path.join(dossier, "tokenizer_config.json"), "r", encoding="utf-8") as fh:
+                ct = json.load(fh).get("chat_template")
+            gabarit = ct if isinstance(ct, str) else ""
+    except (OSError, ValueError):
+        return []
+    return sorted(i for t, i in speciaux.items() if t in gabarit)
+
+
 def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     """Lit un répertoire de modèle Hugging Face, ou un simple ``config.json``."""
     cfg_path = path if path.endswith(".json") else os.path.join(path, "config.json")
@@ -716,6 +750,10 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
                 cfg = {**cfg, "eos_token_id": sorted(set(merged))}
         except (OSError, json.JSONDecodeError):
             pass
+    if os.path.isfile(cfg_path):
+        fins = _fins_de_tour_du_gabarit(os.path.dirname(os.path.abspath(cfg_path)))
+        if fins:
+            cfg = {**cfg, "eos_token_id": sorted(set(_as_id_list(cfg.get("eos_token_id")) + fins))}
 
     archs = cfg.get("architectures") or ["LlamaForCausalLM"]
     mt = str(cfg.get("model_type", ""))
