@@ -80,9 +80,14 @@ if [ "$taille" -gt 40000000000 ]; then
   # (-ot exps=CPU, 19/09, Mistral-Small-4-119B Q4_K_M 74 Go), le reste sur les GPU
   printf '%sTrès grand modèle (%d Go) : experts en RAM (-ot exps=CPU), attention sur RTX 5090 + 3080 Ti%s\n' "$c_d" "$((taille/1000000000))" "$c_0"
   gpu_args+=(--split-mode layer --override-tensor 'exps=CPU')
+  export CUDA_VISIBLE_DEVICES=0,1
 elif [ "$MODE" = "--deux-gpu" ] || [ "$taille" -gt 30000000000 ]; then
   printf '%sGrand modèle : répartition RTX 5090 + RTX 3080 Ti%s\n' "$c_d" "$c_0"
   gpu_args+=(--split-mode layer)
+  # les DEUX cartes visibles : carte.sh reçoit ACVRAM_CARTE=${CUDA_VISIBLE_DEVICES} plus bas, et sans cet export il
+  # n'exposait que la 5090 (session : CUDA_VISIBLE_DEVICES vide → 0) ; la répartition mourait en OOM de chargement
+  # (poste5-menus 29/09 : nemotron-lightning-q6 33 Go, qwen3-coder-next 34 Go, qwen3-vl-30b q8 — « CUDA0 buffer »)
+  export CUDA_VISIBLE_DEVICES=0,1
 else
   # la 3080 Ti ralentirait un modèle qui tient sur la 5090
   export CUDA_VISIBLE_DEVICES=0
@@ -101,6 +106,9 @@ fi
 lu=$("$HOME/.local/bin/gguf-cache-compatible" "$MODELE" 2>/dev/null)
 CK=${lu% *}; CV=${lu#* }
 [ -n "$CK" ] || { CK=q4_0; CV=q4_0; }
+# K et V de types différents : llama.cpp refuse pour certaines architectures (« model does not support different
+# K (q4_0) and V (f16) cache types », Kimi-Linear, poste5-menus 29/09 : mort au démarrage) → les deux en f16.
+[ "$CK" = "$CV" ] || { CK=f16; CV=f16; }
 [ "$CV" = f16 ] && printf '%scache V en f16 : têtes non multiples de 32, le contexte tient moins%s\n' "$c_d" "$c_0"
 
 # Gabarit de chat de remplacement : GABARIT=/chemin/x.jinja llamacpp-serveur …

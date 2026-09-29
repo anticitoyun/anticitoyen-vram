@@ -23,6 +23,8 @@ REPONSES = {
     "acvram-paris-en-reasoning-content": ("", "Paris", "stop"),                                      # témoin FAUX
     "acvram-raisonnement-coupe": ("<think>Voyons, la France, sa capitale est", None, "length"),
     "acvram-direct": ("Paris.", None, "stop"),
+    # vLLM 0.29 : raisonnement coupé rendu dans « reasoning » (plus « reasoning_content ») — pas une réponse vide
+    "acvram-reasoning-champ-vllm": ("", None, "length", "Voyons, la France"),
 }
 SERVEUR = r'''import json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -37,9 +39,10 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         corps = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         open(trace, "a").write(f"{ident} {corps.get('max_tokens')}\n")
-        c, r, f = REP[ident]
+        c, r, f, *g = REP[ident]
         msg = {"role": "assistant", "content": c}
         if r is not None: msg["reasoning_content"] = r
+        if g: msg["reasoning"] = g[0]
         self._j({"choices": [{"message": msg, "finish_reason": f}]})
 HTTPServer(("127.0.0.1", port), H).serve_forever()
 '''
@@ -99,5 +102,7 @@ def test_juge_le_contenu_final_avec_un_plafond_suffisant(parc):
     assert l["acvram-paris-en-reasoning-content"][8] == "sans contenu final"
     coupe = l["acvram-raisonnement-coupe"]
     assert coupe[3] == "PANNE" and coupe[8] == "raisonnement non fini" and "2048 jetons (fin=length)" in coupe[5], coupe
+    vl = l["acvram-reasoning-champ-vllm"]
+    assert vl[3] == "PANNE" and vl[8] == "raisonnement non fini" and "réponse vide" not in vl[5], vl
     plafonds = {int(x.split()[1]) for x in (parc["tmp"] / "trace.txt").read_text().splitlines()}
     assert plafonds == {tmr.JETONS_COMPLETION} and tmr.JETONS_COMPLETION >= 2048, plafonds

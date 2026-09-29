@@ -30,3 +30,13 @@ def test_sans_ligne_d_erreur_la_derniere_ligne_reste_le_repli():
 def test_refus_du_lanceur_est_vu_dans_stdout():
     m = _module()
     assert m.cause_de("", "x\nREFUS : jeton absent\ny\n") == "REFUS : jeton absent"
+
+
+def test_prompt_too_long_prime_sur_l_avertissement_connectors():
+    """poste5-menus 29/09 : phi-4 16 384 sous claude — la cause était « Prompt is too long » (stdout), le TSV a noté
+    l'avertissement ⚠ connectors (dernière ligne de stderr, imprimée à chaque lancement)."""
+    m = _module()
+    err = ("Permission allow rule (settings.json): Bash(git -C * push:*) mixes *\n"
+           "⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set\n")
+    assert m.cause_de(err, "→ claude sur phi-4\nPrompt is too long\n") == "Prompt is too long"
+    assert "connectors" not in m.cause_de(err, "sortie sans motif\n")
