@@ -417,6 +417,9 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        # pièce ECONNREFUSED (5xw) : la victime signe son arrêt — un tueur du dépôt a écrit sa ligne juste avant
+        from .arrets import journal_arret
+        journal_arret(os.getpid(), f"arrêt du serveur acvram (servait {model_name}) — signal ou fin de vie", signal="reçu")
         service.stop()
         app.state.anneau_energie.stop()
         if hasattr(engine, "fermer"):
@@ -817,6 +820,9 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 status_code=409,
                 detail=(f"service permanent (ports {cible['ports']}) : "
                         "confirmez explicitement pour l'arreter"))
+        from .arrets import journal_arret
+        journal_arret(pid, f"console POST /moteurs/arreter depuis {getattr(req.client, 'host', '?')} "
+                           f"(moteur {cible['moteur']}, {cible['mio']} Mio, force={force}) par le serveur {model_name}")
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
