@@ -29,7 +29,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 from .config import (PARC, MAISON, KIMI_DIR, TSV_DIR, CONFIG, NOTES, GGUF_TSV,  # noqa: E402,F401
                      VLLM_TSV, ACVRAM_TSV, VISION_TSV, SECRETS, BIN,
                      DOSSIERS_LANCEMENT, DOSSIER_LANCEMENT_DEFAUT, ANSI, GUI_TEST,
-                     MOTEURS, ORDRE_MOTEUR, FICHE_ABSENTE, NOTE_MOTS, REFUS_RANG)
+                     MOTEURS, ORDRE_MOTEUR, FICHE_ABSENTE, NOTE_MOTS, REFUS_RANG, CTX_HORS_CHAMP)
 from .moteur import (Moteur, secrets, cle_moteur, modele_servi, vram, pid_du_port)  # noqa: E402,F401
 from .parc import (Modele, lire_tsv, charger_parc, rang_qualite, rang_refus, ecrire_note)  # noqa: E402,F401
 
@@ -334,6 +334,15 @@ class Fenetre(Adw.ApplicationWindow):
             lbl.set_text((m.usage or "").split(" · ")[0])
             lbl.set_tooltip_text(m.usage or None)
 
+        def rendu_ctx(lbl, m):
+            txt = f"{m.ctx:,}".replace(",", " ")
+            if m.hors_champ:
+                lbl.set_markup(f'<span foreground="#e5a50a">⚠ {txt}</span>')
+                lbl.set_tooltip_text(m.raison_hors_champ())
+            else:
+                lbl.set_text(txt)
+                lbl.set_tooltip_text(None)
+
         def rendu_caps(lbl, m):
             marques = []
             if "thinking" in m.capacites:
@@ -361,8 +370,7 @@ class Fenetre(Adw.ApplicationWindow):
             self._colonne("Refus", rendu_refus, lambda m: rang_refus(m.refus), 88,
                           inconnu=lambda m: m.refus == "inconnu"),
             self._colonne("Usage", rendu_usage, lambda m: (m.usage or "").lower(), 112),
-            self._colonne("Contexte", lambda l, m: l.set_text(f"{m.ctx:,}".replace(",", " ")),
-                          lambda m: m.ctx, 96),
+            self._colonne("Contexte", rendu_ctx, lambda m: m.ctx, 96),
             self._colonne("Capacités", rendu_caps, None, expand=True),
         ]
         for c in cols:
@@ -903,6 +911,9 @@ class Fenetre(Adw.ApplicationWindow):
         if self.profil["refuse_tabby_yals"] and m.provider in ("tabby", "yals"):
             self.toast(f"{MOTEURS[m.provider].nom} n'expose pas l'API Anthropic : "
                        "choisir un alias llamacpp-*, rapide-*, vllm-* ou acvram-*.")
+            return
+        if m.hors_champ:
+            self.toast(m.raison_hors_champ())
             return
         term = self._terminal()
         if term is None:

@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import GObject  # noqa: E402
 
 from .config import (  # noqa: E402
-    MOTEURS, ORDRE_MOTEUR, FICHE_ABSENTE, NOTE_MOTS, REFUS_RANG,
+    MOTEURS, ORDRE_MOTEUR, FICHE_ABSENTE, NOTE_MOTS, REFUS_RANG, CTX_HORS_CHAMP,
     CONFIG, NOTES, GGUF_TSV, VLLM_TSV, ACVRAM_TSV, VISION_TSV, MAISON,
 )
 
@@ -89,6 +89,16 @@ class Modele(GObject.Object):
         # la PLUS BASSE, donc triée avant tout débit réel en ascendant (l'inverse de « en
         # fin de liste »). +inf, comme rang_qualite/rang_refus : toujours en queue de tri.
         return float(m.group(1).replace(",", ".")) if m else float("inf")
+
+    @property
+    def hors_champ(self):
+        """Fenêtre déclarée sous CTX_HORS_CHAMP : claude-modele/kimi-modele refusent ou
+        dégradent avant de servir. GUI (3), chef 29/09."""
+        return 0 < self.ctx < CTX_HORS_CHAMP
+
+    def raison_hors_champ(self):
+        return (f"{self.alias} : fenêtre {self.ctx:,} jetons — sous les {CTX_HORS_CHAMP:,} exigés "
+                "pour le mode complet".replace(",", " "))
 
     @property
     def outils_etat(self):
