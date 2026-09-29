@@ -19,31 +19,59 @@ c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
 [ -t 1 ] || { c_d=''; c_v=''; c_r=''; c_0=''; }
 err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
 
-# Option --afficher : affiche le backend d'attention choisi et quitte
-if [ "$1" = "--afficher" ]; then
-  MODELE="${2:-/mnt/4TO_SATACMR_2022/Modeles/models_awq/Devstral-Small-2507-AWQ}"
-  [ -e "$MODELE" ] || { err "Modèle introuvable : $MODELE"; exit 1; }
-  # Calcul du backend (copie de la logique principale)
-  ATTENTION="${VLLM_ATTENTION_BACKEND:-}"
-  exotique=$("${VLLM%/bin/vllm}/bin/python" - "$MODELE" <<'PYEOF3' 2>/dev/null
+# ─── moteur d attention et cache KV : UNE logique, pour le service et pour --afficher ───
+# bim (29/09, revue/poste5-bim-verdict-29-09.md) — deux causes, 22 démarrages morts sur 22 depuis le 21/09 :
+# (a) laisser vLLM choisir prend FLASHINFER, dont le décodage sm_120 (flashinfer.decode.xqa_batch_decode_with_kv_cache)
+#     se compile par nvcc au premier appel ; nvcc n est pas dans le PATH du service et aucun paquet de cubins n est
+#     installé → has_flashinfer() faux → `_missing` au profilage (« FlashInfer backend is not available »).
+#     TRITON_ATTN par défaut (décision du 19/09, défaite le 21/09 « pour bénéficier de FlashInfer si disponible » :
+#     il ne l a jamais été depuis).
+# (b) MLA (GLM-4.7-Flash, kv_lora_rank) : seul TRITON_MLA existe sur sm_120 ; son noyau de décodage
+#     `_fwd_grouped_kernel_stage1` (BLOCK_N 32, num_stages 2, codés en dur) demande 102 400 o de mémoire partagée avec
+#     un KV fp8 — la 5090 en a 101 376 — et 63 488 avec un KV bf16 (compilation AOT sm_120 à sec, même noyau). KV bf16
+#     par défaut pour les MLA ; le KV MLA est déjà compressé (576 valeurs par jeton et par couche).
+sonder_config() {   # « tetes32=oui|non mla=oui|non » ; python3 du système si le venv vLLM manque (tests à sec)
+  local py="${VLLM%/bin/vllm}/bin/python"; [ -x "$py" ] || py=python3
+  "$py" - "$1" <<'PYEOF3' 2>/dev/null || echo "tetes32=oui mla=non"
 import json, pathlib, sys
-try:
-    c = json.loads((pathlib.Path(sys.argv[1]) / "config.json").read_text())
-except Exception:
-    raise SystemExit(1)
+c = json.loads((pathlib.Path(sys.argv[1]) / "config.json").read_text())
+exo, mla = "oui", "non"
 for cle in ("vision_config", "text_config", None):
     d = c.get(cle) if cle else c
     if not isinstance(d, dict): continue
+    if d.get("kv_lora_rank"): mla = "oui"
     h = d.get("head_dim")
     if not h:
         hs, nh = d.get("hidden_size"), d.get("num_heads") or d.get("num_attention_heads")
         h = hs // nh if hs and nh else None
-    if h and h % 32:
-        print("oui"); break
+    if h and h % 32: exo = "non"
+print(f"tetes32={exo} mla={mla}")
 PYEOF3
-)
-  [ "$exotique" = oui ] && ATTENTION=""
-  printf '%sattention_backend=%s (default laisser vLLM choisir)%s\n' "$c_d" "${ATTENTION:-auto}" "$c_0"
+}
+choisir_moteur() {   # pose ATTENTION, FORCE_ATTENTION, KVDT, KV_ARGS, NOTE_MOTEUR
+  local s; s=$(sonder_config "$1")
+  FORCE_ATTENTION="${VLLM_ATTENTION_BACKEND:-}"
+  ATTENTION="${VLLM_ATTENTION_BACKEND:-TRITON_ATTN}"
+  NOTE_MOTEUR=""
+  if [ "${s#*mla=}" = oui ] && [ -z "$FORCE_ATTENTION" ]; then
+    ATTENTION=""                                   # MLA : vLLM prend TRITON_MLA, seul moteur MLA sur sm_120
+    [ -z "${KVDT:-}" ] && { KVDT=auto; NOTE_MOTEUR="MLA : KV bf16 (TRITON_MLA fp8 = 102 400 o de mémoire partagée > 101 376)"; }
+  fi
+  KVDT="${KVDT:-fp8}"
+  # FlashAttention (FA2) refuse les têtes non multiples de 32 (encodeur de Qwen3-VL : 72) et ne lit pas un KV fp8 sur
+  # sm_120 : FA2 demandé sans être forcé → TRITON_ATTN (laisser choisir retombait sur FlashInfer, (a) ci-dessus).
+  if [ "$ATTENTION" = FLASH_ATTN ] && [ -z "$FORCE_ATTENTION" ] && { [ "${s%% *}" = tetes32=non ] || [ "$KVDT" != auto ]; }; then
+    ATTENTION=TRITON_ATTN
+  fi
+  KV_ARGS=(); [ "$KVDT" != auto ] && KV_ARGS=(--kv-cache-dtype "$KVDT")
+}
+
+# Option --afficher : affiche le moteur d attention et le cache KV choisis, et quitte (contrôle à sec, test bim)
+if [ "$1" = "--afficher" ]; then
+  MODELE="${2:-/mnt/4TO_SATACMR_2022/Modeles/models_awq/Devstral-Small-2507-AWQ}"
+  [ -e "$MODELE" ] || { err "Modèle introuvable : $MODELE"; exit 1; }
+  choisir_moteur "$MODELE"
+  printf 'attention_backend=%s kv_cache_dtype=%s%s\n' "${ATTENTION:-auto}" "$KVDT" "${NOTE_MOTEUR:+ ($NOTE_MOTEUR)}"
   exit 0
 fi
 
@@ -214,47 +242,8 @@ LONGUEUR=(--max-model-len "$LMAX")
 # a VRAM egale (le VL passe de 73728 a 131072). Le prefix caching (actif par
 # defaut en V1) garde son effet : le prompt de base kimi (~54k tokens) n est
 # reencode qu au premier tour. KVDT=auto pour revenir au KV pleine precision.
-KVDT="${KVDT:-fp8}"
-KV_ARGS=()
-[ "$KVDT" != auto ] && KV_ARGS=(--kv-cache-dtype "$KVDT")
-# ─── moteur d attention ───────────────────────────────────────────────────────
-# FlashAttention refuse les tetes dont la dimension n est pas un multiple de 32.
-# L encodeur visuel de Qwen3-VL a des tetes de 72 : forcer FLASH_ATTN le fait mourir
-# sur « does not support headdim not being a multiple of 32 ». On laisse alors vLLM
-# choisir son moteur module par module.
-# un VLLM_ATTENTION_BACKEND pose par l appelant est respecte tel quel.
-# TRITON_ATTN par defaut (19/09) : FLASH_ATTN choisi avant n a pas de paquet
-# vllm_flash_attn installe, et FlashInfer (choix automatique du serveur si la
-# variable est vide) plante au demarrage sur ce venv (RTX 5090 sm_120) —
-# flashinfer_xqa_batch_decode_with_kv_cache indisponible, voir serveur.log.
-# Triton s importe sans dependance externe (verifie a sec).
-# 21/09 : laisser vLLM choisir par defaut (vide) pour bénéficier de FlashInfer si disponible.
-ATTENTION="${VLLM_ATTENTION_BACKEND:-}"
-FORCE_ATTENTION="${VLLM_ATTENTION_BACKEND:-}"
-exotique=$("${VLLM%/bin/vllm}/bin/python" - "$MODELE" <<'PYEOF3' 2>/dev/null
-import json, pathlib, sys
-try:
-    c = json.loads((pathlib.Path(sys.argv[1]) / "config.json").read_text())
-except Exception:
-    raise SystemExit(1)
-for cle in ("vision_config", "text_config", None):
-    d = c.get(cle) if cle else c
-    if not isinstance(d, dict): continue
-    h = d.get("head_dim")
-    if not h:
-        hs, nh = d.get("hidden_size"), d.get("num_heads") or d.get("num_attention_heads")
-        h = hs // nh if hs and nh else None
-    if h and h % 32:
-        print("oui"); break
-PYEOF3
-)
-[ "$exotique" = oui ] && { ATTENTION=""; printf '%stetes non multiples de 32 : moteur d attention laisse au serveur%s\n' "$c_d" "$c_0"; }
-# FlashAttention (FA2) ne lit pas un cache KV fp8 sur cette carte (sm_120) :
-# avec le KV fp8, laisser vLLM choisir son moteur d attention — mais seulement
-# pour FA2 : le laisser choisir retombe sur FlashInfer, indisponible sur cette
-# carte (19/09, flashinfer_xqa_batch_decode_with_kv_cache) ; TRITON_ATTN n a
-# pas cette limite FA2, on le garde tel quel avec le KV fp8.
-[ "$KVDT" != auto ] && [ "$ATTENTION" = FLASH_ATTN ] && [ -z "$FORCE_ATTENTION" ] && { ATTENTION=""; printf '%sKV fp8 : moteur d attention laisse au serveur%s\n' "$c_d" "$c_0"; }
+choisir_moteur "$MODELE"
+[ -n "$NOTE_MOTEUR" ] && printf '%s%s%s\n' "$c_d" "$NOTE_MOTEUR" "$c_0"
 
 # VLLM_ATTENTION_BACKEND n existe plus en 0.29 (« Unknown vLLM environment
 # variable », vLLM retombe alors sur FlashInfer quoi qu on exporte) : le
