@@ -29,3 +29,12 @@ avec `--flatpak-doctor` : TENU). Un défaut d'instrument lu comme un défaut de 
 
 Non prouvé ici : une vraie sortie (étape 7 réelle sur une release publiée) — à voir à la 0.7.14 ; le doctor réel sous
 carte.sh l'a déjà été à la main sur la 0.7.13 (chef).
+
+## Addendum 29/09 (refus de fusion par chef) : tests hermétiques
+`CUDA_VISIBLE_DEVICES= pytest -q` faisait tomber `test_flatpak_version_285c::test_flatpak_jamais_a_jour_refuse_avec_code_distinct`
+(66 attendu, 67 reçu : la garde se déclenchait avant, l'épreuve héritait la variable du shell). Tous les tests qui lancent
+`verifier-release.sh` (259, 285, 285b, 285c, 3zo) passent désormais un environnement sans `CUDA_VISIBLE_DEVICES` (ou la valeur
+que l'épreuve pose elle-même). 285b : l'épreuve `--depuis 5` réelle atteint l'étape 7 — `verifier-release.sh` et `carte.sh`
+y sont remplacés par des témoins inertes (jamais le vrai carte.sh depuis un test). Contrôle : les 8 fichiers (49 tests) avec
+`CUDA_VISIBLE_DEVICES=""` ET sans la variable : 49/49 les deux fois ; suite complète sans GPU : 5 691 passés, 1 269 sautés,
+1 xfail, 0 échec (390 s).

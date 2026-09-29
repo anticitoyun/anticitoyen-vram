@@ -46,8 +46,16 @@ def _depot_jetable(tmp_path: pathlib.Path, *, version: str = VNUM, avec_notes: b
     return d
 
 
+def _env_hermetique(**sup: str) -> dict:
+    """3zo : verifier-release.sh refuse (67) si CUDA_VISIBLE_DEVICES est défini vide et que le doctor
+    doit tourner — l'épreuve ne dépend pas du shell qui la lance (« à sec » ou non) : la variable
+    est retirée, le faux `flatpak`/`gh` ne touche jamais la carte."""
+    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    env.update(sup)
+    return env
+
 def _lancer(depot: pathlib.Path, env: dict, *args: str) -> subprocess.CompletedProcess:
-    full_env = dict(os.environ, **env)
+    full_env = _env_hermetique(**env)
     return subprocess.run(["bash", str(depot / "outils" / "sortir-version.sh"), *args],
                           cwd=depot, capture_output=True, text=True, timeout=60, env=full_env)
 
@@ -98,9 +106,12 @@ fi
     (coffre / "jetons-acvram.sh").write_text("#!/usr/bin/env bash\necho faux-jeton\n", encoding="utf-8")
     (coffre / "jetons-acvram.sh").chmod(0o755)
     env["HOME"] = str(faux_home)
-    r = _lancer(d, env, f"v{V}", "--depuis", "5")
     # L'étape 7 (téléchargement réel de la release) n'est pas simulable sans réseau ; seul
-    # le choix du run (5-6, l'objet de cette pièce) est sous témoin ici.
+    # le choix du run (5-6, l'objet de cette pièce) est sous témoin ici. 3zo : l'étape 7 passe
+    # le doctor sous carte.sh — témoins inertes, jamais le vrai carte.sh depuis un test.
+    for f in ("verifier-release.sh", "carte.sh"):
+        (d / "outils" / f).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    r = _lancer(d, env, f"v{V}", "--depuis", "5")
     assert "run 222" in r.stdout, r.stdout + r.stderr
     assert "REFUS TEMOIN" not in r.stdout + r.stderr, r.stdout + r.stderr
 

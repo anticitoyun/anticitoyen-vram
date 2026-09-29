@@ -21,9 +21,16 @@ RACINE = pathlib.Path(__file__).resolve().parents[1]
 VERIFIE = RACINE / "outils" / "verifier-release.sh"
 
 
+def _env(env: dict) -> dict:
+    """Hermétique : CUDA_VISIBLE_DEVICES ne vient jamais du shell qui lance l'épreuve, seulement d'elle."""
+    base = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    base.update(env)
+    return base
+
+
 def _lancer(depot: pathlib.Path, env: dict, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["bash", str(depot / "outils" / "sortir-version.sh"), *args],
-                          cwd=depot, capture_output=True, text=True, timeout=60, env=dict(os.environ, **env))
+                          cwd=depot, capture_output=True, text=True, timeout=60, env=_env(env))
 
 
 def _temoins(depot: pathlib.Path) -> pathlib.Path:
@@ -95,7 +102,7 @@ def hors_tmp():
 
 def _verifier(hors_tmp: pathlib.Path, env: dict, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["bash", str(VERIFIE), f"v{V}", "--simule", str(hors_tmp), *args],
-                          capture_output=True, text=True, timeout=60, env=dict(os.environ, **env))
+                          capture_output=True, text=True, timeout=60, env=_env(env))
 
 
 @pytest.mark.parametrize("bras", [(), ("--flatpak-doctor",)])
@@ -114,8 +121,7 @@ def test_a_sec_sans_doctor_ne_refuse_pas(hors_tmp, bras):
     assert r.returncode == 1 and "REFUS" not in r.stderr, r.stdout + r.stderr
 
 
-def test_carte_visible_ne_refuse_pas(hors_tmp):
-    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
-    r = subprocess.run(["bash", str(VERIFIE), f"v{V}", "--simule", str(hors_tmp), "--flatpak-doctor"],
-                       capture_output=True, text=True, timeout=60, env=env)
+@pytest.mark.parametrize("env", [{}, {"CUDA_VISIBLE_DEVICES": "0"}], ids=["absente", "carte 0"])
+def test_carte_visible_ne_refuse_pas(hors_tmp, env):
+    r = _verifier(hors_tmp, env, "--flatpak-doctor")
     assert r.returncode == 1 and "REFUS" not in r.stderr, r.stdout + r.stderr

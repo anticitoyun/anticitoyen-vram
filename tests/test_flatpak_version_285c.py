@@ -43,8 +43,16 @@ exit 0
     return {"PATH": f"{dossier}:{os.environ['PATH']}"}
 
 
+def _env_hermetique(**sup: str) -> dict:
+    """3zo : verifier-release.sh refuse (67) si CUDA_VISIBLE_DEVICES est défini vide et que le doctor
+    doit tourner — l'épreuve ne dépend pas du shell qui la lance (« à sec » ou non) : la variable
+    est retirée, le faux `flatpak`/`gh` ne touche jamais la carte."""
+    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    env.update(sup)
+    return env
+
 def _lancer(dossier: pathlib.Path, env: dict) -> subprocess.CompletedProcess:
-    full_env = dict(os.environ, **env, ACVRAM_ATTENTE_FLATPAK_S="0")
+    full_env = _env_hermetique(**env, ACVRAM_ATTENTE_FLATPAK_S="0")
     return subprocess.run(["bash", str(SCRIPT), f"v{V}", "--simule", str(dossier)],
                           capture_output=True, text=True, timeout=60, env=full_env)
 

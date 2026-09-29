@@ -29,9 +29,17 @@ def hors_tmp():
     import shutil; shutil.rmtree(d, ignore_errors=True)
 
 
+def _env_hermetique(**sup: str) -> dict:
+    """3zo : verifier-release.sh refuse (67) si CUDA_VISIBLE_DEVICES est défini vide et que le doctor
+    doit tourner — l'épreuve ne dépend pas du shell qui la lance (« à sec » ou non) : la variable
+    est retirée, le faux `flatpak`/`gh` ne touche jamais la carte."""
+    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    env.update(sup)
+    return env
+
 def _lancer(dossier: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["bash", str(SCRIPT), f"v{V_259}", "--simule", str(dossier), *args],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=120, env=_env_hermetique())
 
 
 def test_cas_0_7_3_asset_cite_absent_rend_faux_code_distinct(hors_tmp):
