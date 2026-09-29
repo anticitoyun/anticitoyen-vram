@@ -1,6 +1,6 @@
 # Journal des changements
 
-## En préparation (0.7.15)
+## 0.7.15 (29/09/2026)
 
 ### Masque d'attention : découpé d'emblée au-delà de 256 Mio (cqy)
 
@@ -13,6 +13,23 @@
 * Le biais causal aligné en bas à droite de SDPA (`causal_lower_right`) n'est PAS au bit (10 cas sur 14, |Δ| ≤ 3,9e-3) :
   présent, inactif (`_BIAIS_BAS_DROITE`).
 * La chauffe prouve aussi un préfill à préfixe en cache au contexte tenu, et descend sinon.
+
+### Menus claude-modeles et kimi-modeles (paquet parc 0.1.9)
+
+* **GUI** (poste3, `acvram-memoire/revue/poste3-gui-verdict-29-09.md`) : un alias dont la fenêtre est sous le minimum du
+  client est marqué ⚠ dans la colonne Contexte, avec des seuils PAR CLIENT lus dans le profil de chaque lanceur
+  (claude-modele : mode essentiel sous 45 000, refus sous 15 096 ; kimi-modele : sans MCP sous 65 536). Le mode réduit
+  lance le client (avertissement) ; seul le refus réel empêche le lancement, en disant pourquoi.
+* **kimi-modeles** (poste1, cni) : un alias une fois en PANNE restait masqué même rejoué OK ; la dernière ligne décide.
+* **Moteurs hors acvram** (poste5, `poste5-menus-verdict-29-09.md`) : llamacpp-serveur expose les deux cartes au-delà
+  de 30 Go et ne mélange plus les types K/V ; ERNIE servi par vLLM avec son lecteur de raisonnement (`ernie45`) ; les
+  réponses vLLM 0.29 portent le raisonnement dans `reasoning` (lu par le test des menus et par `banc-4moteurs`, poste2).
+* **Moteur** : Gemma 4 26B (K = 704) prend le chemin MMA des experts au lieu d'un découpage ks=128 invalide (poste5).
+* **Journal des arrêts** (poste6, econn) : chaque arrêt d'un serveur est signé par qui l'arrête
+  (`ACVRAM_JOURNAL_ARRETS`) ; le pilote des menus arrête tout serveur apparu pendant un bras, jamais un permanent (j0q).
+* **carte.sh** (poste5, jd6) : un service d'un autre poste est refusé tant que le premier sert (`ACVRAM_POSTE`).
+* Test des menus : le contrôle juge le contenu final hors raisonnement, 2 048 jetons (poste1, syy).
+
 ## 0.7.14 (29/09/2026)
 
 ### Menus claude-modeles et kimi-modeles (paquet parc 0.1.8)
