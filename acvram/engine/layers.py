@@ -1037,6 +1037,10 @@ def masque_images(q_len: int, kv_len: int, q_offset: int,
     return ouvert
 
 
+# cqy (29/09) : préfill dont les requêtes sont les DERNIÈRES positions (préfixe en cache, tranches : kv = q_offset + q) →
+# biais causal aligné en bas à droite (SDPA), sans matérialiser [q × kv]. Décision d'arithmétique : actif par défaut
+# seulement si l'équivalence au bit contre le masque dense tient sur carte (tests/test_masque_bas_droite_cqy.py).
+_BIAIS_BAS_DROITE = False
 # Taille d'un bloc de masque dense (octets) quand `attention` doit découper après un OOM (8fx).
 _MASQUE_OCTETS_MAX = 256 << 20
 
@@ -1056,8 +1060,10 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     q_len, kv_len = q.shape[0], k.shape[0]
     # le chemin à masque dense d'en dessous, exactement (un bloc d'images qui ne touche pas les requêtes n'en ouvre pas)
     touche = bool(images and causal and any(int(d) < q_offset + q_len and int(f) > q_offset for d, f in images))
+    bas_droite = bool(_BIAIS_BAS_DROITE and causal and window <= 0 and not touche and q_len > 1
+                      and q_offset > 0 and kv_len == q_offset + q_len)
     masque = bool(window > 0 or touche
-                  or (causal and q_len > 1 and not (q_offset == 0 and q_len == kv_len)))
+                  or (causal and q_len > 1 and not (q_offset == 0 and q_len == kv_len) and not bas_droite))
     if masque and q_len > 1 and not _en_blocs:
         # 8fx (29/09) : le masque [q, kv] est dense ; une invite claude de ~30 k jetons dont le préfixe est en cache
         # (q_offset > 0) en faisait 2,10 Gio → OOM en service, alors que la chauffe (q_offset = 0, masque None)
@@ -1095,6 +1101,11 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
         allowed = (cols <= rows) | ouvert
         mask = torch.zeros(q_len, kv_len, device=q.device, dtype=q.dtype)
         mask = mask.masked_fill(~allowed, float("-inf"))
+    elif bas_droite:
+        from torch.nn.attention.bias import causal_lower_right
+        out = F.scaled_dot_product_attention(qh, kh, vh, attn_mask=causal_lower_right(q_len, kv_len),
+                                             scale=scale, **gqa)
+        return out.squeeze(0).transpose(0, 1).contiguous()
     else:
         mask = causal_mask(q_len, kv_len, q_offset, q.device, q.dtype) if causal else None
     if mask is not None:
