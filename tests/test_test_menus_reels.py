@@ -157,3 +157,14 @@ def test_liste_dans_son_ordre_meme_deja_testee_et_ctx_client(parc):
     assert lance == ["acvram-degenere ctx= graphes= min=34816", "acvram-bon ctx= graphes= min=34816"], lance
     brut = [l.split("\t") for l in parc["tsv"].read_text().splitlines() if l and not l.startswith("#")]
     assert [(c[0], c[9]) for c in brut] == [("acvram-bon", "rapide"), ("acvram-degenere", "0"), ("acvram-bon", "0")], brut
+
+
+def test_service_permanent_jamais_arrete():
+    """29/09 07:22 : la passe rapide a tué l'appoint 8081 (moteur « rapide ») en « arrêtant » le serveur de l'alias testé."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tmr", OUTIL)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    assert not m.a_arreter("rapide") and not m.a_arreter("yals")
+    assert m.a_arreter("acvram") and m.a_arreter("llamacpp") and m.a_arreter("vllm")
+    source = OUTIL.read_text()
+    assert "elif port is not None and a_arreter(moteur):" in source and 'ligne["arret"] = "service permanent laissé"' in source

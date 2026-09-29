@@ -53,6 +53,15 @@ ORDRE = ["acvram", "llamacpp", "vllm", "rapide", "yals", "tabby", "jan"]
 SANS_CLAUDE = {"tabby", "yals", "jan"}
 # moteurs qui se chargent eux-mêmes à la requête (pas de lanceur de préchargement scriptable) : kimi seul est joué.
 AUTO_CHARGES = {"tabby", "yals", "jan"}
+# Services permanents du poste (REGLES § 2 : un service permanent tué est une panne) : « rapide » EST l'appoint 8081
+# (llamacpp-appoint.service). Le 29/09 à 07:22, la passe rapide l'a arrêté après avoir testé rapide-qwen3-4b (chef l'a
+# relancé) : son lanceur ne fait que vérifier le service, et le test le laisse tel qu'il l'a trouvé.
+PERMANENTS = {"rapide"}
+
+
+def a_arreter(moteur: str) -> bool:
+    """Le test arrête-t-il le serveur de ce moteur à la fin ? Non pour les auto-chargés et les services permanents."""
+    return moteur not in AUTO_CHARGES and moteur not in PERMANENTS
 
 
 def secrets(p) -> dict[str, str]:
@@ -278,7 +287,9 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
         ligne["verdict"] = "OK"
         return ligne
     finally:
-        if port is not None and moteur not in AUTO_CHARGES:
+        if moteur in PERMANENTS:
+            ligne["arret"] = "service permanent laissé"
+        elif port is not None and a_arreter(moteur):
             ligne["arret"] = arreter(port, pid)
             if ligne["arret"] != "ok" and not ligne["arret"].startswith("ok"):
                 ligne["detail"] = "arrêt : " + ligne["arret"]
