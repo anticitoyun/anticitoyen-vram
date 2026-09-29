@@ -282,7 +282,7 @@ if ! flock $_flock_mode 9; then
   # (code 4), au lieu d'entrer dans l'attente. Deux prises de meme nature, ou un
   # reglage d'etat, attendent normalement : c'est ce que le verrou serialise.
   _dp=""; _dt=""
-  [ -r "$INFO" ] && read -r _dp _ _dn _dt < "$INFO" 2>/dev/null
+  [ -r "$INFO" ] && read -r _dp _ _dn _dt _ < "$INFO" 2>/dev/null   # jd6 : « _ » final, un 5e champ (poste=) ne colle plus au type
   if [ -n "${_dp:-}" ] && kill -0 "$_dp" 2>/dev/null \
      && { { [ "$TYPE" = service ] && [ "$_dt" = mesure ]; } \
        || { [ "$TYPE" = mesure ] && [ "$_dt" = service ]; }; }; then
@@ -336,7 +336,7 @@ fi
 # qui tourne encore.
 _ancien_p=; _ancien_pgid=
 read -r _ancien_p _ _ _ _ancien_pgid 2>/dev/null < "$INFO" || true
-if [ -n "${_ancien_pgid:-}" ] && kill -0 -- "-$_ancien_pgid" 2>/dev/null; then
+if [[ "${_ancien_pgid:-}" =~ ^[0-9]+$ ]] && kill -0 -- "-$_ancien_pgid" 2>/dev/null; then   # jd6 : 5e champ d un service = poste=, pas un pgid
   echo "carte.sh : REFUS — le groupe pgid $_ancien_pgid d'une prise precedente ($INFO) est" >&2
   echo "  encore vivant alors que le verrou est libre (KILL -9 du carte.sh parent, sans doute) :" >&2
   echo "  achevez-le (kill -- -$_ancien_pgid) avant de reprendre la carte." >&2
@@ -373,22 +373,48 @@ fi
 if [ "$TYPE" = service ]; then
   _log=${ACVRAM_SERVICE_LOG:-/tmp/acvram-service.log}
   _jour="$VERROU.journal"
+  # jd6 (29/09 14:44-14:46 : deux postes, poste6 et poste1, ont servi en même temps sur la 5090 — flock -s admet
+  # N services et le .qui ne disait pas qui avait la main). Un service porte son POSTE (ACVRAM_POSTE, sinon
+  # ACVRAM_SESSION posé par le lanceur de session ; vide ou « - » = partage déclaré, sans poste). Un service d'un
+  # AUTRE poste est refusé (code 4, nommé) tant qu'un service d'un poste vit. Partages voulus intacts : même poste
+  # (Open WebUI + ComfyUI d'une même session), services sans poste (permanents lancés hors session, ACVRAM_POSTE=-),
+  # appoint de la carte 1 (autre VERROU). Lecture-vérification-écriture du .qui sous un mutex court (fd 7, jamais
+  # hérité par le serveur) : deux postes arrivés ensemble ne passent pas tous les deux.
+  if [ -n "${ACVRAM_POSTE+x}" ]; then _poste=$ACVRAM_POSTE; else _poste=${ACVRAM_SESSION:-}; fi
+  [ "$_poste" = - ] && _poste=
+  _poste=${_poste//[[:space:]]/_}
+  exec 7>"$VERROU.postes" && flock -w 30 7 || { echo "carte.sh : mutex des postes ($VERROU.postes) indisponible" >&2; exit 65; }
+  if [ -n "$_poste" ] && [ -r "$INFO" ]; then
+    while read -r _qp _qt _qn _qy _qpo _; do
+      [ "${_qy:-}" = service ] && kill -0 "$_qp" 2>/dev/null || continue
+      _qpo=${_qpo#poste=}
+      if [ -n "$_qpo" ] && [ "$_qpo" != "$_poste" ]; then
+        echo "carte.sh : REFUS — service de '$_poste' : la carte sert deja $_qn (PID $_qp, poste $_qpo) depuis $(( $(date +%s) - _qt )) s." >&2
+        echo "  Un poste a la main a la fois : attendez qu'il rende la carte (arret de PID $_qp), ou declarez un" >&2
+        echo "  partage voulu (meme ACVRAM_POSTE, ou ACVRAM_POSTE=- pour un service sans poste)." >&2
+        printf '%s refus   %-8s %-32s service (poste %s, carte tenue par %s)\n' "$(date +%FT%T)" "$$" "$NOM" "$_poste" "$_qpo" >> "$_jour" 2>/dev/null || true
+        exit 4
+      fi
+    done < "$INFO"
+  fi
   if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
-    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" >> "$_log" 2>&1 < /dev/null &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" >> "$_log" 2>&1 < /dev/null 7>&- &
   else
-    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" >> "$_log" 2>&1 < /dev/null &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" >> "$_log" 2>&1 < /dev/null 7>&- &
   fi
   _srv=$!
   # Une ligne par service vivant : on garde celles des services encore en vie,
   # on jette les périmées (mesure morte, service mort sans gardien), on ajoute la sienne.
   _tmpq="$INFO.$_srv.tmp"; : > "$_tmpq"
   if [ -r "$INFO" ]; then
-    while read -r _qp _qt _qn _qy _; do
-      [ "${_qy:-}" = service ] && kill -0 "$_qp" 2>/dev/null && printf '%s %s %s %s\n' "$_qp" "$_qt" "$_qn" "$_qy" >> "$_tmpq"
+    while read -r _qp _qt _qn _qy _qpo _; do
+      [ "${_qy:-}" = service ] && kill -0 "$_qp" 2>/dev/null && printf '%s %s %s %s%s\n' "$_qp" "$_qt" "$_qn" "$_qy" "${_qpo:+ $_qpo}" >> "$_tmpq"
     done < "$INFO"
   fi
-  printf '%s %s %s %s\n' "$_srv" "$(date +%s)" "$NOM" "$TYPE" >> "$_tmpq"
+  # jd6 : 5e champ « poste=<nom> » (absent pour un service sans poste) — les lecteurs lisent les 4 premiers
+  printf '%s %s %s %s%s\n' "$_srv" "$(date +%s)" "$NOM" "$TYPE" "${_poste:+ poste=$_poste}" >> "$_tmpq"
   mv -f "$_tmpq" "$INFO"
+  exec 7>&-
   printf '%s prise   %-8s %-32s %s (detache, verrou herite)\n' "$(date +%FT%T)" "$_srv" "$NOM" "$TYPE" >> "$_jour" 2>/dev/null || true
   # anticitoyen-vram-jxm : entre la mort du service et ce reveil (jusqu'a 5 s
   # de sommeil), un NOUVEAU detenteur (mesure ou autre service) peut deja avoir

@@ -709,7 +709,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 pid = int(champs[0])
                 pris_a = int(champs[1])
                 nom = champs[2] if len(champs) > 2 else "?"
-                type_ = champs[3].strip() if len(champs) > 3 else "?"
+                # jd6 : premier mot seul — un service porte un 5e champ (poste=) et le .qui une ligne par service
+                type_ = champs[3].split()[0] if len(champs) > 3 and champs[3].split() else "?"
                 depuis = max(0, int(time.time() - pris_a))
                 vivant = _pid_vivant(pid)
             except Exception:                                # noqa: BLE001
