@@ -167,4 +167,73 @@ def test_service_permanent_jamais_arrete():
     assert not m.a_arreter("rapide") and not m.a_arreter("yals")
     assert m.a_arreter("acvram") and m.a_arreter("llamacpp") and m.a_arreter("vllm")
     source = OUTIL.read_text()
-    assert "elif port is not None and a_arreter(moteur):" in source and 'ligne["arret"] = "service permanent laissé"' in source
+    assert "elif port_moteur is not None and (a_arreter(moteur) or moteur in PORT_MOTEUR):" in source and 'ligne["arret"] = "service permanent laissé"' in source
+
+
+# --- edz définitif (bd cni, 29/09) : hors champ nommé par la liste, PID par client, YALS/Tabby, doublons reportés ---
+
+def _module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tmr_cni", OUTIL)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def test_hors_champ_claude_prechargement_du_repli_kimi_et_pid_par_client(parc):
+    """Claude hors champ (modèle limité sous 29 096) : acvram-serveur refuserait le préchargement de claude ; le bras
+    précharge comme kimi-modele:167 (34 816), ne joue pas claude, le nomme, et relève le PID autour de kimi."""
+    liste = parc["tmp"] / "campagne.tsv"
+    liste.write_text("acvram-bon\thors champ : modèle limité à 16384 < 29096\tdans le champ\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert (parc["tmp"] / "lanceur.log").read_text().splitlines() == ["acvram-bon ctx=34816 graphes= min=34816"]
+    c = _lignes(parc)["acvram-bon"]
+    assert c[3] == "OK" and c[10] == "hors champ" and c[9] == "0", c
+    pid = c[12].split(" ; ")[0].removeprefix("préch ")
+    assert pid.isdigit() and f"kimi {pid}→{pid}" in c[12] and "rechargé" not in c[12], c[12]
+    assert "claude hors champ : modèle limité à 16384" in c[12], c[12]
+
+
+def test_yals_tabby_refuses_hors_prise_carte(parc):
+    """YALS et TabbyAPI chargent la 5090 sans verrou : la passe refuse (rc 65) hors carte.sh, sans rien écrire."""
+    cfg = Path(parc["env"]["ACVRAM_PARC_CONFIG"])
+    kimi = cfg.read_text().split('kimi_dir = "')[1].split('"')[0]
+    with open(Path(kimi) / "config.toml", "a") as f:
+        f.write('[models.yals-x]\nprovider = "yals"\nmodel = "x"\nmax_context_size = 65536\n')
+    env = {k: v for k, v in parc["env"].items() if k != "ACVRAM_CARTE_TENUE"}
+    r = subprocess.run([sys.executable, str(OUTIL), "--pour-de-vrai", "--moteurs", "yals"], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 65 and "REFUS" in r.stderr and not parc["tsv"].exists(), r.stdout + r.stderr
+
+
+def test_yals_moteur_arrete_apres_le_bras(parc, monkeypatch):
+    """Le port du parc de YALS est son proxy : le bras arrête le MOTEUR apparu (PORT_MOTEUR), pas le proxy ; avant
+    cni, a_arreter(« yals ») faux laissait YALS sur la carte après la passe."""
+    m = _module()
+    moteur = _port_libre()
+    monkeypatch.setitem(m.PORT_MOTEUR, "yals", moteur)
+    b = parc["tmp"] / "bin"
+    (b / "kimi-modele").write_text(f'#!/bin/sh\nsetsid {sys.executable} {parc["tmp"]}/serveur.py {moteur} x '
+                                   f'>/dev/null 2>&1 < /dev/null &\nsleep 1\necho Paris\n')
+    cfg = Path(parc["env"]["ACVRAM_PARC_CONFIG"])
+    cfg.write_text(cfg.read_text() + f"\n[moteurs.yals]\npresent = true\nport = {_port_libre()}\n")
+    monkeypatch.setattr(m, "ETAT", parc["tmp"] / "etat")
+    p = m.charger(str(cfg))
+    import argparse
+    a = argparse.Namespace(rapide=False, delai_client=30, attente=30, ctx_client=29096, hors_champ={})
+    l = m.tester(p, {}, "yals-x", "yals", {"model": "x"}, a)
+    assert l["verdict"] == "OK" and l["claude_rc"] == "n/a" and l["arret"] == "ok", l
+    assert not _ecoute(moteur)
+
+
+def test_doublons_reportes_depuis_le_representant(parc):
+    """--reporter : la dernière ligne du représentant recopiée sous le nom du doublon, marquée ; représentant absent
+    nommé (rc 1), aucune ligne inventée."""
+    _lancer(parc, "--pour-de-vrai", "--rapide", "--alias", "acvram-bon", "--attente", "30")
+    d = parc["tmp"] / "doublons.tsv"
+    d.write_text("# alias\treprésentant\nacvram-bon-bis\tacvram-bon\nacvram-orphelin\tacvram-jamais-teste\n")
+    r = _lancer(parc, "--reporter", str(d))
+    assert r.returncode == 1 and "acvram-jamais-teste" in r.stdout, r.stdout + r.stderr
+    l = _lignes(parc)
+    assert l["acvram-bon-bis"][3] == l["acvram-bon"][3] == "OK" and "doublon de acvram-bon" in l["acvram-bon-bis"][12]
+    assert "acvram-orphelin" not in l

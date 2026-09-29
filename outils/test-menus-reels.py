@@ -72,6 +72,15 @@ AUTO_CHARGES = {"tabby", "yals", "jan"}
 # (llamacpp-appoint.service). Le 29/09 à 07:22, la passe rapide l'a arrêté après avoir testé rapide-qwen3-4b (chef l'a
 # relancé) : son lanceur ne fait que vérifier le service, et le test le laisse tel qu'il l'a trouvé.
 PERMANENTS = {"rapide"}
+# edz définitif (cni, 29/09) : YALS et TabbyAPI chargent la 5090 EUX-MÊMES, sans verrou carte.sh (kimi-yals:86-99,
+# kimi-tabby:74-90 ; REGLES § 6, incident YALS du 19/09), et le port du parc de YALS (5011) est son proxy mémoire, pas
+# le moteur. Le bras arrête donc le MOTEUR (ce port-ci) apparu pendant le bras, et la passe refuse de partir hors
+# d'une prise carte.sh (ACVRAM_CARTE_TENUE, exporté par carte.sh).
+PORT_MOTEUR = {"yals": 5010, "tabby": 5000}
+# kimi-modele:167 : repli de kimi sur acvram quand 65 536 ne se planifie pas — chemin réel de l'alias pour kimi quand
+# claude est hors champ (modèle limité sous le CTX_CLIENT_MIN de claude : acvram-serveur refuse ce préchargement).
+CTX_KIMI_REPLI = 34816
+HORS_CHAMP = "hors champ"
 
 
 def a_arreter(moteur: str) -> bool:
@@ -107,15 +116,18 @@ def alias_du_menu(p) -> list[tuple[str, str, dict]]:
 
 
 def lanceur(p, alias: str, moteur: str, rapide: bool = False,
-            ctx_client: int = 29096) -> tuple[list[str], dict[str, str], str | None] | str:
+            ctx_client: int = 29096, sans_claude: bool = False) -> tuple[list[str], dict[str, str], str | None] | str:
     """(argv, env, id attendu sur /v1/models) — ou la cause pour laquelle rien n'est lançable. Même résolution que
     claude-modele/kimi-modele (colonnes des TSV), mêmes lanceurs ; CTX_CLIENT_MIN : celui de claude (29 096,
     claude-modele:151) — kimi-modele pose le sien (34 816) et relance si besoin ; un alias trop court pour kimi garde
-    ainsi le résultat de claude au lieu de tomber au préchargement."""
+    ainsi le résultat de claude au lieu de tomber au préchargement. `sans_claude` (claude hors champ, liste de la
+    campagne) : préchargement du repli de kimi (kimi-modele:167), le seul chemin réel qui reste à l'alias."""
     b = p.bin
     if moteur == "acvram":
         if rapide:   # --rapide : contexte court, sans graphes CUDA (chauffe et capture courtes), pas de CTX_CLIENT_MIN
             return [str(b / "acvram-serveur"), alias, str(CTX_RAPIDE)], {"GRAPHES": "1"}, alias
+        if sans_claude:
+            return [str(b / "acvram-serveur"), alias, str(CTX_KIMI_REPLI)], {"CTX_CLIENT_MIN": str(CTX_KIMI_REPLI)}, alias
         return [str(b / "acvram-serveur"), alias], {"CTX_CLIENT_MIN": str(ctx_client)}, alias
     if moteur in ("llamacpp", "vllm"):
         t = lire_tsv(p.tsv("gguf" if moteur == "llamacpp" else "vllm")).get(alias)
@@ -343,12 +355,15 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
     cle = cles.get({"acvram": "CLE_ACVRAM", "vllm": "CLE_VLLM", "llamacpp": "CLE_LLAMACPP", "rapide": "CLE_RAPIDE",
                     "tabby": "CLE_TABBY", "yals": "CLE_YALS", "jan": "CLE_JAN"}.get(moteur, ""), "")
     pid = None
-    avant = serveurs_vivants(port) if port is not None else set()          # j0q/dlq : rien d'antérieur au bras n'est arrêté
+    port_moteur = PORT_MOTEUR.get(moteur, port)
+    avant = serveurs_vivants(port_moteur) if port_moteur is not None else set()   # j0q/dlq : rien d'antérieur n'est arrêté
+    # (claude, kimi) : cause « hors champ … » posée par la liste de la campagne (--liste, colonnes 2 et 3), sinon vide
+    hc_claude, hc_kimi = (getattr(a, "hors_champ", None) or {}).get(alias, ("", ""))
     try:
         if moteur not in AUTO_CHARGES:
             if port is None:
                 return panne("préchargement", f"moteur {moteur} absent de parc.toml (présent = false)")
-            lz = lanceur(p, alias, moteur, a.rapide, a.ctx_client)
+            lz = lanceur(p, alias, moteur, a.rapide, a.ctx_client, sans_claude=hc_claude.startswith(HORS_CHAMP))
             if isinstance(lz, str):
                 return panne("préchargement", lz)
             argv, env, attendu = lz
@@ -407,15 +422,26 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
             ("complétion", {"sans Paris": "complétion : contenu final sans « Paris »",
                             "raisonnement non fini": f"complétion : raisonnement non fini en {JETONS_COMPLETION} jetons (fin=length)",
                             "sans contenu final": "complétion : raisonnement seul, aucun contenu final"}[ligne["completion"]])]
-        if moteur in SANS_CLAUDE:
-            ligne["claude_rc"] = "n/a"
-        else:
-            ligne["claude_rc"], cause = client(p, "claude-modele", alias, journal, a.delai_client)
+        # PID du moteur relevé avant et après chaque client (cni) : un client qui recharge l'alias (kimi relance à
+        # 65 536 ou 34 816, claude à la fenêtre du TSV) change le PID — noté, c'est le chemin réel de l'utilisatrice.
+        pids = [f"préch {pid_ecoute(port_moteur) if port_moteur else '-'}"]
+        hors = []
+        for nom, etape, hc in (("claude-modele", "claude", hc_claude), ("kimi-modele", "kimi", hc_kimi)):
+            col = f"{etape}_rc"
+            if etape == "claude" and moteur in SANS_CLAUDE:
+                ligne[col] = "n/a"
+                continue
+            if hc.startswith(HORS_CHAMP):
+                ligne[col] = HORS_CHAMP
+                hors.append(f"{etape} {hc}")
+                continue
+            p0 = pid_ecoute(port_moteur) if port_moteur else None
+            ligne[col], cause = client(p, nom, alias, journal, a.delai_client)
+            p1 = pid_ecoute(port_moteur) if port_moteur else None
+            pids.append(f"{etape} {p0}→{p1}" + (" (rechargé)" if p0 != p1 else ""))
             if cause:
-                pannes.append(("claude", cause))
-        ligne["kimi_rc"], cause = client(p, "kimi-modele", alias, journal, a.delai_client)
-        if cause:
-            pannes.append(("kimi", cause))
+                pannes.append((etape, cause))
+        ligne["detail"] = " ; ".join(pids + hors)
         if pannes:
             return panne("+".join(e for e, _ in pannes), " | ".join(c for _, c in pannes))
         ligne["verdict"] = "OK"
@@ -423,10 +449,10 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
     finally:
         if moteur in PERMANENTS:
             ligne["arret"] = "service permanent laissé"
-        elif port is not None and a_arreter(moteur):
-            ligne["arret"] = arreter(port, avant, alias)
+        elif port_moteur is not None and (a_arreter(moteur) or moteur in PORT_MOTEUR):
+            ligne["arret"] = arreter(port_moteur, avant, alias)
             if ligne["arret"] != "ok" and not ligne["arret"].startswith("ok"):
-                ligne["detail"] = "arrêt : " + ligne["arret"]
+                ligne["detail"] = (ligne["detail"] + " ; " if ligne["detail"] else "") + "arrêt : " + ligne["arret"]
 
 
 def rejuger() -> int:
@@ -458,6 +484,28 @@ def rejuger() -> int:
     return 0
 
 
+def reporter(chemin: Path) -> int:
+    """Doublons (cni) : `alias<TAB>représentant` — même moteur, dossier, contexte et gabarit, donc même serveur servi
+    sous un autre nom ; la DERNIÈRE ligne du représentant est recopiée sous le nom du doublon, marquée « reporté ».
+    Un représentant sans ligne est nommé, rien n'est inventé (REGLES § 8)."""
+    derniere = lire_tsv(RESULTATS)
+    n, absents = 0, []
+    with RESULTATS.open("a", encoding="utf-8") as f:
+        for l in chemin.read_text(encoding="utf-8").splitlines():
+            c = l.split("\t")
+            if l.startswith("#") or len(c) < 2 or not c[1].strip():
+                continue
+            al, rep = c[0].strip(), c[1].strip()
+            if rep not in derniere:
+                absents.append(rep); continue
+            r = list(derniere[rep]) + [""] * (len(COLONNES) - 1 - len(derniere[rep]))
+            r[-1] = (r[-1] + " ; " if r[-1] else "") + f"doublon de {rep} : résultat reporté ({r[0]})"
+            f.write("\t".join([al] + r) + "\n")
+            n += 1
+    print(f"{n} doublon(s) reporté(s)" + (f" ; représentant sans ligne : {sorted(set(absents))}" if absents else ""))
+    return 1 if absents else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pour-de-vrai", action="store_true")
@@ -478,9 +526,13 @@ def main() -> int:
                          f"graphes, {JETONS_RAPIDE} jetons, plafond {PLAFOND_RAPIDE} s ; pannes rejouées une fois en fin")
     ap.add_argument("--rejuger", action="store_true",
                     help="rejuge les lignes OK du TSV sur leurs journaux (contrôle « Paris »), sans rien lancer")
+    ap.add_argument("--reporter", type=Path, metavar="FICHIER",
+                    help="doublons « alias<TAB>représentant » : recopie la dernière ligne du représentant, sans rien lancer")
     a = ap.parse_args()
     if a.rejuger:
         return rejuger()
+    if a.reporter:
+        return reporter(a.reporter)
     p = charger(os.environ.get("ACVRAM_PARC_CONFIG"))
     cles = secrets(p)
     tous = alias_du_menu(p)
@@ -488,9 +540,14 @@ def main() -> int:
     mot = set(a.moteurs.split(",")) if a.moteurs else None
     choix = [(al, m, e) for al, m, e in tous if (not a.alias or re.search(a.alias, al))
              and (mot is None or m in mot) and (a.refaire or al not in faits)]
+    a.hors_champ = {}
     if a.liste:
-        rang = {l.split("\t")[0].strip(): i for i, l in enumerate(a.liste.read_text(encoding="utf-8").splitlines())
-                if l.strip() and not l.startswith("#")}
+        lignes_liste = [l.split("\t") for l in a.liste.read_text(encoding="utf-8").splitlines()
+                        if l.strip() and not l.startswith("#")]
+        rang = {c[0].strip(): i for i, c in enumerate(lignes_liste)}
+        # colonnes 2 et 3 facultatives : champ de claude et de kimi (« hors champ : <cause> » : client non joué, nommé)
+        a.hors_champ = {c[0].strip(): (c[1].strip() if len(c) > 1 else "", c[2].strip() if len(c) > 2 else "")
+                        for c in lignes_liste}
         choix = sorted([(al, m, e) for al, m, e in tous if al in rang and (mot is None or m in mot)],
                        key=lambda x: rang[x[0]])
     if a.max:
@@ -501,10 +558,17 @@ def main() -> int:
     print(f"{len(tous)} alias au menu ; {len(faits)} déjà testés ; ce passage : {len(choix)} {par}")
     if not a.pour_de_vrai:
         for al, m, _ in choix:
-            lz = lanceur(p, al, m) if m not in AUTO_CHARGES else "auto-chargé : kimi seul"
+            hc = a.hors_champ.get(al, ("", ""))
+            lz = (lanceur(p, al, m, sans_claude=hc[0].startswith(HORS_CHAMP)) if m not in AUTO_CHARGES
+                  else "auto-chargé : kimi seul")
             print(f"  {m:9s} {al:60s} {' '.join(lz[0]) if isinstance(lz, tuple) else lz}")
         print("--pour-de-vrai absent : rien lancé.")
         return 0
+    hors_verrou = sorted({m for _, m, _ in choix if m in PORT_MOTEUR})
+    if hors_verrou and not os.environ.get("ACVRAM_CARTE_TENUE"):
+        print(f"REFUS : {','.join(hors_verrou)} chargent la carte sans verrou — lancer cette passe sous outils/carte.sh "
+              f"(une prise ≤ 30 min par segment, REGLES § 2).", file=sys.stderr)
+        return 65
     RESULTATS.parent.mkdir(parents=True, exist_ok=True)
     if not RESULTATS.exists():
         RESULTATS.write_text("# " + "\t".join(COLONNES[1:2] + COLONNES[:1] + COLONNES[2:]) + "\n", encoding="utf-8")
