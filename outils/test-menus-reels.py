@@ -82,7 +82,8 @@ def alias_du_menu(p) -> list[tuple[str, str, dict]]:
                   key=lambda t: (rang.get(t[1], 99), list(m).index(t[0])))
 
 
-def lanceur(p, alias: str, moteur: str, rapide: bool = False) -> tuple[list[str], dict[str, str], str | None] | str:
+def lanceur(p, alias: str, moteur: str, rapide: bool = False,
+            ctx_client: int = 29096) -> tuple[list[str], dict[str, str], str | None] | str:
     """(argv, env, id attendu sur /v1/models) — ou la cause pour laquelle rien n'est lançable. Même résolution que
     claude-modele/kimi-modele (colonnes des TSV), mêmes lanceurs ; CTX_CLIENT_MIN : celui de claude (29 096,
     claude-modele:151) — kimi-modele pose le sien (34 816) et relance si besoin ; un alias trop court pour kimi garde
@@ -91,7 +92,7 @@ def lanceur(p, alias: str, moteur: str, rapide: bool = False) -> tuple[list[str]
     if moteur == "acvram":
         if rapide:   # --rapide : contexte court, sans graphes CUDA (chauffe et capture courtes), pas de CTX_CLIENT_MIN
             return [str(b / "acvram-serveur"), alias, str(CTX_RAPIDE)], {"GRAPHES": "1"}, alias
-        return [str(b / "acvram-serveur"), alias], {"CTX_CLIENT_MIN": "29096"}, alias
+        return [str(b / "acvram-serveur"), alias], {"CTX_CLIENT_MIN": str(ctx_client)}, alias
     if moteur in ("llamacpp", "vllm"):
         t = lire_tsv(p.tsv("gguf" if moteur == "llamacpp" else "vllm")).get(alias)
         if not t:
@@ -214,7 +215,7 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
         if moteur not in AUTO_CHARGES:
             if port is None:
                 return panne("préchargement", f"moteur {moteur} absent de parc.toml (présent = false)")
-            lz = lanceur(p, alias, moteur, a.rapide)
+            lz = lanceur(p, alias, moteur, a.rapide, a.ctx_client)
             if isinstance(lz, str):
                 return panne("préchargement", lz)
             argv, env, attendu = lz
@@ -323,6 +324,10 @@ def main() -> int:
     ap.add_argument("--max", type=int, default=0, help="au plus N alias dans ce passage (0 : tous)")
     ap.add_argument("--attente", type=int, default=1800, help="ACVRAM_ATTENTE des lanceurs (verrou de carte)")
     ap.add_argument("--delai-client", type=int, default=600, help="délai de chaque client (s)")
+    ap.add_argument("--liste", type=Path,
+                    help="fichier d'alias (1re colonne, un par ligne) : joués dans CET ordre, même déjà dans le TSV")
+    ap.add_argument("--ctx-client", type=int, default=29096,
+                    help="CTX_CLIENT_MIN du préchargement acvram (34 816 : celui de kimi, évite son rechargement)")
     ap.add_argument("--rapide", action="store_true",
                     help=f"preuve réduite au modèle servi (/v1/models + réponse non vide), contexte {CTX_RAPIDE}, sans "
                          f"graphes, {JETONS_RAPIDE} jetons, plafond {PLAFOND_RAPIDE} s ; pannes rejouées une fois en fin")
@@ -338,6 +343,11 @@ def main() -> int:
     mot = set(a.moteurs.split(",")) if a.moteurs else None
     choix = [(al, m, e) for al, m, e in tous if (not a.alias or re.search(a.alias, al))
              and (mot is None or m in mot) and (a.refaire or al not in faits)]
+    if a.liste:
+        rang = {l.split("\t")[0].strip(): i for i, l in enumerate(a.liste.read_text(encoding="utf-8").splitlines())
+                if l.strip() and not l.startswith("#")}
+        choix = sorted([(al, m, e) for al, m, e in tous if al in rang and (mot is None or m in mot)],
+                       key=lambda x: rang[x[0]])
     if a.max:
         choix = choix[:a.max]
     par = {}

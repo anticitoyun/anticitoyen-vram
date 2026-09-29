@@ -142,3 +142,18 @@ def test_rapide_modele_servi_seul_contexte_court_pannes_rejouees_une_fois(parc):
     assert len(lance) == 7                                                              # 5 alias + 2 rejeux
     time.sleep(0.3)
     assert not _ecoute(parc["port"])
+
+
+def test_liste_dans_son_ordre_meme_deja_testee_et_ctx_client(parc):
+    """--liste : alias joués dans l'ordre du fichier, même déjà au TSV ; --ctx-client atteint le lanceur acvram."""
+    _lancer(parc, "--pour-de-vrai", "--rapide", "--alias", "acvram-bon", "--attente", "30")
+    liste = parc["tmp"] / "liste.txt"
+    liste.write_text("# échantillon\nacvram-degenere\tfamille\nacvram-bon\n")
+    (parc["tmp"] / "lanceur.log").unlink()
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--ctx-client", "34816", "--delai-client", "30",
+                "--attente", "30")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    lance = (parc["tmp"] / "lanceur.log").read_text().splitlines()
+    assert lance == ["acvram-degenere ctx= graphes= min=34816", "acvram-bon ctx= graphes= min=34816"], lance
+    brut = [l.split("\t") for l in parc["tsv"].read_text().splitlines() if l and not l.startswith("#")]
+    assert [(c[0], c[9]) for c in brut] == [("acvram-bon", "rapide"), ("acvram-degenere", "0"), ("acvram-bon", "0")], brut
