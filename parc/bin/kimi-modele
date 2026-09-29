@@ -119,10 +119,21 @@ kimi_local() {  # $1 alias  [$2 contexte servi]
     rm -f "$d/mcp.json"; printf '{"mcpServers": {}}\n' > "$d/mcp.json"
   fi
   [ -e "$src/AGENTS.md" ] && ln -sfn "$src/AGENTS.md" "$d/AGENTS.md"
+  # les CLE_* de ia-secrets.env sont des variables du shell, non exportées : passées explicitement
+  CLE_VLLM="${CLE_VLLM:-}" CLE_LLAMACPP="${CLE_LLAMACPP:-}" CLE_RAPIDE="${CLE_RAPIDE:-}" \
   python3 - "$CONFIG" "$d/config.toml" "$1" "${2:-}" <<'PY' || return 1
-import re, sys
+import os, re, sys
 src, dst, alias, ctx = sys.argv[1:5]
 t = open(src, encoding="utf-8").read()
+# 29/09 (edz liste-1, kimi rc 1 « 401 clé d'API invalide » sur TOUS les moteurs hors acvram) : kimi-routeur (8790)
+# n'accepte qu'une clé égale à une clé moteur de ia-secrets.env (CLE_*), que parc-installer a CRÉÉ le 28/09 avec des
+# clés aléatoires ; config.toml gardait les défauts d'avant (vllm-local…). Les fournisseurs routés prennent ici,
+# dans la copie locale seulement, la clé CLE_<MOTEUR> courante — une rotation des secrets ne casse plus kimi.
+for moteur in ("vllm", "llamacpp", "rapide"):
+    cle = os.environ.get(f"CLE_{moteur.upper()}")
+    if cle:
+        bloc = re.compile(r"(^\[providers\." + moteur + r"\]\n(?:(?!^\[).*\n)*?)api_key = \"[^\"]*\"", re.M)
+        t = bloc.sub(lambda m: m.group(1) + 'api_key = "' + cle + '"', t, count=1)
 if ctx.isdigit():
     # seul le bloc [models.<alias>] change ; le reste est recopié octet pour octet
     motif = re.compile(r"(^\[models\." + re.escape(alias) + r"\]\n(?:(?!^\[).*\n)*?)max_context_size = \d+", re.M)
