@@ -173,6 +173,19 @@ def queue(texte: str, n: int = 160) -> str:
     return (l[-1] if l else "")[:n].replace("\t", " ")
 
 
+# Pièce claude (29/09) : claude termine TOUJOURS par « [claude-code:unrecognized_model] {…} » (116 réussites de la
+# liste-1 le portent) — la dernière ligne n'est pas la cause. La cause est la première ligne d'erreur nommée.
+MOTIFS_CAUSE = ("API Error", "Error:", "REFUS", "refus", "erreur", "mort au démarrage")
+
+
+def cause_de(stderr: str, stdout: str) -> str:
+    for texte in (stderr, stdout):
+        for l in (texte or "").splitlines():
+            if any(m in l for m in MOTIFS_CAUSE) and "unrecognized_model" not in l:
+                return l.strip()[:160].replace("\t", " ")
+    return queue(stderr) or queue(stdout)
+
+
 def client(p, nom: str, alias: str, journal: Path, delai: int) -> tuple[str, str]:
     """(rc, cause) de `<nom> <alias> -p QUESTION` ; cause vide si rc 0 et réponse non vide."""
     try:
@@ -183,7 +196,7 @@ def client(p, nom: str, alias: str, journal: Path, delai: int) -> tuple[str, str
     with journal.open("a", encoding="utf-8") as f:
         f.write(f"--- {nom} rc={r.returncode}\n{r.stdout[-4000:]}\n{r.stderr[-4000:]}\n")
     if r.returncode != 0:
-        return str(r.returncode), f"{nom} rc {r.returncode} : {queue(r.stderr) or queue(r.stdout)}"
+        return str(r.returncode), f"{nom} rc {r.returncode} : {cause_de(r.stderr, r.stdout)}"
     if not r.stdout.strip():
         return "0", f"{nom} : réponse vide"
     if ATTENDU not in r.stdout.casefold():

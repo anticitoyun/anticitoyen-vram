@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""gabarit-souple <fichier.gguf|dossier|gabarit.jinja> — lit le gabarit de chat embarqué dans le GGUF (ou un .jinja) ; s'il
+refuse un message système hors première position, écrit une copie assouplie `<dossier>/gabarit-souple.jinja` qui rend ce
+message comme un bloc système, et affiche son chemin. Sans assertion connue : n'affiche rien (code 0).
+
+Pourquoi (pièce claude, 29/09) : Claude Code envoie son invite système en tête de requête ET un message de rôle `system`
+APRÈS le premier message utilisateur (capturé à sec : rôles ['user', 'system']). llama.cpp les convertit en
+[system, user, system] : Qwen3.5/3.6/3.8 refusent (« System message must be at the beginning »), Mistral Small 4 refuse
+(« Only user, assistant and tool roles are supported, got system. », 500 à chaque requête — llamacpp-mistral-small-4-119b,
+edz liste-1). Le générateur de parseur d'outils de llama.cpp déclenche aussi la première assertion.
+
+Bibliothèque `gguf` si présente, sinon lecteur de métadonnées intégré (en-tête et paires clé/valeur seulement).
+"""
+import glob
+import os
+import sys
+
+# Qwen3.x, Ornith… : assertion de position → rendu ChatML du bloc système
+QWEN_ASSERT = "raise_exception('System message must be at the beginning.')"
+QWEN_REMPL = "'<|im_start|>system\\n' + content + '<|im_end|>\\n'"
+# Mistral Small 4 (2603) : branche `else` qui refuse tout rôle hors user/assistant/tool → branche `elif` système avant elle
+MISTRAL_ASSERT = "raise_exception('Only user, assistant and tool roles are supported, got ' + message['role'] + '.')"
+MISTRAL_ELIF = (
+    "{%- elif message['role'] == 'system' %}\n"
+    "        {{- '[SYSTEM_PROMPT]' }}\n"
+    "        {%- if message['content'] is string %}\n"
+    "            {{- message['content'] }}\n"
+    "        {%- else %}\n"
+    "            {%- for block in message['content'] %}\n"
+    "                {%- if block['type'] == 'text' %}\n"
+    "                    {{- block['text'] }}\n"
+    "                {%- endif %}\n"
+    "            {%- endfor %}\n"
+    "        {%- endif %}\n"
+    "        {{- '[/SYSTEM_PROMPT]' }}\n"
+    "    "
+)
+
+
+def assouplir(texte: str):
+    """Gabarit assoupli, ou None si aucune assertion connue n'y figure."""
+    if QWEN_ASSERT in texte:
+        return texte.replace(QWEN_ASSERT, QWEN_REMPL)
+    i = texte.find(MISTRAL_ASSERT)
+    if i >= 0:
+        j = texte.rfind("{%- else %}", 0, i)
+        if j >= 0:
+            return texte[:j] + MISTRAL_ELIF + texte[j:]
+    return None
+
+
+_TAILLES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}   # types GGUF scalaires
+
+
+def _gabarit_sans_bibliotheque(chemin: str):
+    """Lecture séquentielle des métadonnées GGUF v2/v3 (en-tête + paires clé/valeur, jamais les tenseurs) : la
+    bibliothèque `gguf` n'est pas dans le python3 du système, et le parc ne dépend d'aucun venv."""
+    import struct
+    with open(chemin, "rb") as fh:
+        if fh.read(4) != b"GGUF":
+            return None
+        version, = struct.unpack("<I", fh.read(4))
+        if version < 2:
+            return None
+        _, n_kv = struct.unpack("<QQ", fh.read(16))
+
+        def chaine():
+            n, = struct.unpack("<Q", fh.read(8))
+            return fh.read(n)
+
+        def sauter(t):
+            if t == 8:
+                chaine()
+            elif t == 9:
+                et, n = struct.unpack("<IQ", fh.read(12))
+                if et == 8:
+                    for _ in range(n):
+                        chaine()
+                elif et in _TAILLES:
+                    fh.seek(n * _TAILLES[et], 1)
+                else:
+                    raise ValueError(f"type de tableau GGUF inconnu : {et}")
+            elif t in _TAILLES:
+                fh.seek(_TAILLES[t], 1)
+            else:
+                raise ValueError(f"type GGUF inconnu : {t}")
+
+        for _ in range(n_kv):
+            cle = chaine()
+            t, = struct.unpack("<I", fh.read(4))
+            if cle == b"tokenizer.chat_template" and t == 8:
+                return chaine().decode("utf-8", "replace")
+            sauter(t)
+    return None
+
+
+def gabarit_du_gguf(chemin: str):
+    try:
+        from gguf import GGUFReader
+    except ImportError:
+        return _gabarit_sans_bibliotheque(chemin)
+    r = GGUFReader(chemin)
+    f = r.fields.get("tokenizer.chat_template")
+    if f is None:
+        return None
+    return bytes(f.parts[f.data[0]]).decode("utf-8", "replace")
+
+
+def main(argv) -> int:
+    if len(argv) != 2:
+        print(__doc__.strip().splitlines()[0], file=sys.stderr)
+        return 64
+    cible = argv[1]
+    if os.path.isdir(cible):
+        c = sorted(f for f in glob.glob(os.path.join(cible, "*.gguf"))
+                   if "mmproj" not in os.path.basename(f) and os.path.getsize(f) > 1_000_000)
+        if not c:
+            return 0
+        cible = c[0]
+    dossier = os.path.dirname(os.path.abspath(cible))
+    sortie = os.path.join(dossier, "gabarit-souple.jinja")
+    if os.path.exists(sortie):
+        print(sortie)
+        return 0
+    try:
+        if cible.endswith(".jinja"):
+            with open(cible, encoding="utf-8") as fh:
+                t = fh.read()
+        else:
+            t = gabarit_du_gguf(cible)
+    except Exception as e:  # noqa: BLE001
+        print(f"gabarit-souple : lecture impossible ({e})", file=sys.stderr)
+        return 0
+    if t is None:
+        return 0
+    s = assouplir(t)
+    if s is None:
+        return 0
+    with open(sortie, "w", encoding="utf-8") as fh:
+        fh.write(s)
+    print(sortie)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

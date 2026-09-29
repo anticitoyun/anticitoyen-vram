@@ -111,8 +111,12 @@ TMPL=()
 # Sans gabarit imposé : assouplir automatiquement les gabarits Qwen3.x qui refusent un message
 # système hors première position (sinon l'API Anthropic de Claude Code échoue : « Unable to
 # generate parser for this template »). Voir ~/.local/bin/gabarit-souple.
-if [ ${#TMPL[@]} -eq 0 ] && [ -x "$HOME/.local/bin/gabarit-souple" ]; then
-  souple=$("$HOME/.local/bin/gabarit-souple" "$MODELE" 2>/dev/null)
+# Pièce claude (29/09) : le script vit dans le parc (Mistral Small 4 refusait aussi, 500 à chaque requête de
+# Claude Code — un message système APRÈS le premier message utilisateur) ; ~/.local/bin reste un repli.
+GABARIT_SOUPLE="$(dirname "$(readlink -f "$0")")/gabarit-souple"
+[ -x "$GABARIT_SOUPLE" ] || GABARIT_SOUPLE="$HOME/.local/bin/gabarit-souple"
+if [ ${#TMPL[@]} -eq 0 ] && [ -x "$GABARIT_SOUPLE" ]; then
+  souple=$("$GABARIT_SOUPLE" "$MODELE" 2>/dev/null)
   [ -n "$souple" ] && [ -f "$souple" ] && { TMPL=(--chat-template-file "$souple"); printf '%sGabarit assoupli : %s%s\n' "$c_d" "$(basename "$souple")" "$c_0"; }
 fi
 
