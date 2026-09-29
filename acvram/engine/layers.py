@@ -1038,7 +1038,7 @@ def masque_images(q_len: int, kv_len: int, q_offset: int,
 
 
 # Taille d'un bloc de masque dense (octets) quand `attention` doit découper après un OOM (8fx).
-_MASQUE_OCTETS_MAX = int(os.environ.get("ACVRAM_MASQUE_OCTETS_MAX", str(256 << 20)))
+_MASQUE_OCTETS_MAX = 256 << 20
 
 
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
