@@ -45,6 +45,15 @@ def _ctx_texte(engine) -> str:
     return txt + (f" tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
 
 
+def _sur_carte(couche) -> bool:
+    """La COUCHE vit sur la carte (``couche.device``, comme graphs.py:474). Pas les paramètres du bloc MoE : les poids
+    quantifiés sont des attributs ordinaires de QuantLinear (layers.py:438) — un bloc MoE n a souvent AUCUN paramètre,
+    et la 1re version de cette garde (premier paramètre du bloc) rendait faux partout : prise ya1 du 29/09, bras B
+    identique au témoin à l octet près."""
+    dev = getattr(couche, "device", None)
+    return dev is not None and torch.device(dev).type == "cuda"
+
+
 class ChauffeContexte:
     """Mixin d `Engine` : les méthodes de chauffe du contexte et de démarrage du service (voir l en-tête du module)."""
 
@@ -229,6 +238,7 @@ class ChauffeContexte:
         (la requête réelle tourne avec leurs réserves : c est le contrôle qui peut rendre faux). Confirmation
         échouée → tenu − ``pas_confirmation``, recapture, deux fois au plus, puis refus nommé. Rend (ctx_tenu,
         captures). Test cassant : faux graphes qui coûtent 2 pas ⇒ tenu final = tenu − 2·pas, chargement réussi."""
+        self._construire_piles_avant_chauffe()
         tenu = self.chauffer_contexte(pas=pas, strict=strict)
         captures = self.warm_graphs(warm_max_len) if self.graphs is not None else 0
         if tenu is None or self.graphs is None:
@@ -247,6 +257,27 @@ class ChauffeContexte:
             self.max_model_len = self.ctx_tenu = nouveau
             captures = self._recapturer(warm_max_len)
         return self.ctx_tenu, captures                                   # jamais atteint
+
+    def _construire_piles_avant_chauffe(self) -> int:
+        """ya1 (29/09) : sans graphes (``--no-cuda-graphs``, passes rapides d edz), les piles d experts et leur repack
+        Marlin se construisaient PARESSEUSEMENT dans le premier forward (moe.py, ``_stack_state == "?"``) — celui de la
+        première passe de chauffe : leur transitoire (pile empilée puis repackée, 2 × 324 Mio par couche sur Coder-30B)
+        s ajoutait aux activations du préfill plein, et la chauffe concluait 3 072 sur 4 096. Avec graphes,
+        `GraphRunner._eligible` (graphs.py:473) les construit AVANT la chauffe ; même construction ici, pour que la
+        chauffe mesure le régime servi. Mêmes piles, même sortie : seul le moment change. Rend le nombre de couches
+        décidées."""
+        from .moe import MoEBlock
+        n = 0
+        for couche in getattr(self.model, "layers", ()):
+            if not _sur_carte(couche):
+                continue
+            for mod in couche.modules():
+                if isinstance(mod, MoEBlock) and mod._stack_state == "?":
+                    mod._stack_state = "oui" if mod._try_build_stacks() else "non"
+                    n += 1
+        if n:
+            print(f"[acvram] piles d experts construites avant la chauffe : {n} couches", flush=True)
+        return n
 
     def _apres_oom_de_chauffe(self) -> None:
         """Après un OOM de chauffe : séquences en cours abandonnées, blocs rendus, allocateur neuf, cache CUDA vidé."""
