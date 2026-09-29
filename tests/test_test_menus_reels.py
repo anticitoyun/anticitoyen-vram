@@ -47,6 +47,7 @@ def parc(tmp_path):
     (tmp_path / "serveur.py").write_text(SERVEUR)
     # acvram-serveur factice : « acvram-panne » échoue ; « acvram-autre » sert un autre id ; sinon sert l'alias
     (b / "acvram-serveur").write_text(f'''#!/bin/sh
+echo "$1 ctx=$2 graphes=$GRAPHES min=$CTX_CLIENT_MIN" >> {tmp_path}/lanceur.log
 [ "$1" = acvram-panne ] && {{ echo "RuntimeError: cause au journal serveur" >> "$ACVRAM_SERVEUR_LOG"; echo "OOM simulé au chargement" >&2; exit 1; }}
 id="$1"; [ "$1" = acvram-autre ] && id=un-autre-modele
 setsid {sys.executable} {tmp_path}/serveur.py {port} "$id" >/dev/null 2>&1 < /dev/null &
@@ -120,3 +121,50 @@ def test_rejuger_passe_en_panne_un_ok_sans_paris(parc):
     l = _lignes(parc)
     assert l["acvram-bon"][3] == "OK" and l["acvram-degenere"][3:5] == ["PANNE", "kimi"], l
     assert parc["tsv"].with_name("menus-reels.tsv.avant-rejuger").exists() and not _ecoute(parc["port"])
+
+
+def test_rapide_modele_servi_seul_contexte_court_pannes_rejouees_une_fois(parc):
+    """--rapide (chef 29/09) : lanceur à 4096 sans graphes ni CTX_CLIENT_MIN ; preuve = id servi conforme + réponse
+    non vide, clients non joués (muet et dégénéré passent, notés « rapide ») ; chaque panne rejouée UNE fois en fin."""
+    r = _lancer(parc, "--pour-de-vrai", "--rapide", "--attente", "30")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    brut = [l.split("\t") for l in parc["tsv"].read_text().splitlines() if l and not l.startswith("#")]
+    par = {}
+    for c in brut:
+        par.setdefault(c[0], []).append(c)
+    for a in ("acvram-bon", "acvram-muet", "acvram-degenere"):
+        assert len(par[a]) == 1 and par[a][0][3] == "OK" and par[a][0][9:11] == ["rapide", "rapide"], par[a]
+    for a, etape in (("acvram-panne", "préchargement"), ("acvram-autre", "/v1/models")):
+        assert [c[3:5] for c in par[a]] == [["PANNE", etape]] * 2, par[a]              # une fois, puis un rejeu
+        assert "rejeu" in par[a][1][12] and "rejeu" not in par[a][0][12]
+    lance = (parc["tmp"] / "lanceur.log").read_text().splitlines()
+    assert "acvram-bon ctx=4096 graphes=1 min=" in lance, lance
+    assert len(lance) == 7                                                              # 5 alias + 2 rejeux
+    time.sleep(0.3)
+    assert not _ecoute(parc["port"])
+
+
+def test_liste_dans_son_ordre_meme_deja_testee_et_ctx_client(parc):
+    """--liste : alias joués dans l'ordre du fichier, même déjà au TSV ; --ctx-client atteint le lanceur acvram."""
+    _lancer(parc, "--pour-de-vrai", "--rapide", "--alias", "acvram-bon", "--attente", "30")
+    liste = parc["tmp"] / "liste.txt"
+    liste.write_text("# échantillon\nacvram-degenere\tfamille\nacvram-bon\n")
+    (parc["tmp"] / "lanceur.log").unlink()
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--ctx-client", "34816", "--delai-client", "30",
+                "--attente", "30")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    lance = (parc["tmp"] / "lanceur.log").read_text().splitlines()
+    assert lance == ["acvram-degenere ctx= graphes= min=34816", "acvram-bon ctx= graphes= min=34816"], lance
+    brut = [l.split("\t") for l in parc["tsv"].read_text().splitlines() if l and not l.startswith("#")]
+    assert [(c[0], c[9]) for c in brut] == [("acvram-bon", "rapide"), ("acvram-degenere", "0"), ("acvram-bon", "0")], brut
+
+
+def test_service_permanent_jamais_arrete():
+    """29/09 07:22 : la passe rapide a tué l'appoint 8081 (moteur « rapide ») en « arrêtant » le serveur de l'alias testé."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tmr", OUTIL)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    assert not m.a_arreter("rapide") and not m.a_arreter("yals")
+    assert m.a_arreter("acvram") and m.a_arreter("llamacpp") and m.a_arreter("vllm")
+    source = OUTIL.read_text()
+    assert "elif port is not None and a_arreter(moteur):" in source and 'ligne["arret"] = "service permanent laissé"' in source
