@@ -175,11 +175,18 @@ if [ "$DEPUIS" -le 6 ]; then
 fi
 
 if [ "$DEPUIS" -le 7 ]; then
-  echo "== 7. vérification de la release publiée"
+  echo "== 7. vérification de la release publiée (installation Flatpak hors carte, doctor sous carte.sh)"
+  # 3zo (0.7.13) : le doctor Flatpak lancé hors carte.sh hérite du CUDA_VISIBLE_DEVICES="" du shell du chef → aucun
+  # GPU dans le bac à sable → « FAUX Marlin non chargé » (rc 71) alors que la release était bonne. Le bras qui touche
+  # la carte passe sous carte.sh (qui rétablit CUDA_VISIBLE_DEVICES=$ACVRAM_CARTE) ; l'installation (≈ 3 Go) reste hors carte.
   if [ "$SIMULE" = 1 ]; then
-    echo "[simulé] outils/verifier-release.sh $V"
+    echo "[simulé] outils/verifier-release.sh $V --flatpak-installer"
+    echo "[simulé] outils/carte.sh outils/verifier-release.sh $V --flatpak-doctor"
   else
-    outils/verifier-release.sh "$V" || { echo "REFUS : verifier-release.sh a signalé un défaut" >&2; exit 71; }
+    outils/verifier-release.sh "$V" --flatpak-installer \
+      || { echo "REFUS : verifier-release.sh a signalé un défaut (bras installation)" >&2; exit 71; }
+    ACVRAM_NOM="sortir-version-$V" outils/carte.sh outils/verifier-release.sh "$V" --flatpak-doctor \
+      || { echo "REFUS : verifier-release.sh a signalé un défaut (bras doctor sous carte.sh)" >&2; exit 71; }
   fi
 fi
 

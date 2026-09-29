@@ -9,7 +9,7 @@
 #     outils/verifier-release.sh v0.7.0 --simule /dossier      # release simulée : pas de gh, les fichiers sont déjà là
 #     ... --sans-flatpak                                       # saute le bras Flatpak (installation ET doctor)
 #     ... --flatpak-installer                                   # bras Flatpak : installation seule (≈ 3 Go tirés par extra-data), SANS carte
-#     ... --flatpak-doctor                                      # bras Flatpak : doctor seul, installation déjà faite — sous carte.sh
+#     ... --flatpak-doctor                                      # bras Flatpak : doctor seul, installation déjà faite — sous carte.sh (refus 67 à sec)
 #
 # Sortie : une ligne par contrôle, `OK` / `MANQUE` / `FAUX` / `SAUTÉ`, puis `VERDICT: TENU` (code 0) ou `FAUX` (1) —
 # sauf un asset cité dans le corps de la release mais absent des assets joints (pièce 285), qui refuse à part,
@@ -17,6 +17,9 @@
 # ne doit jamais se confondre avec un MANQUE générique dans un script qui surveille CE script. Code 66 : le
 # Flatpak installé n'est pas la version $V après attente bornée (v0.7.4, Pages n'avait pas encore servi le
 # nouveau dépôt OSTree — l'ancienne 0.7.2 s'installait sans erreur et le contrôle disait OK).
+# Code 67 : CUDA_VISIBLE_DEVICES est défini VIDE alors que le bras doctor doit tourner (3zo, 0.7.13 : lancé hors
+# carte.sh depuis un shell « à sec », le bac à sable ne voyait aucun GPU et le script concluait « Marlin non chargé »
+# — un défaut d'instrument lu comme un défaut de release). Le doctor se lance sous outils/carte.sh, jamais à sec.
 # Ce que ce script NE prouve PAS : que le .deb s'installe (dpkg-deb --info/--contents seulement, pas d'installation),
 # ni que les RPM se construisent (rpm absent sur ce poste : nom et taille seulement).
 set -uo pipefail
@@ -31,7 +34,7 @@ while [ $# -gt 0 ]; do
     --sans-flatpak) FLATPAK=0; shift ;;
     --flatpak-installer) FLATPAK=installer; shift ;;
     --flatpak-doctor) FLATPAK=doctor; shift ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     v*) TAG=$1; shift ;;
     *) echo "argument inconnu : $1" >&2; exit 64 ;;
   esac
@@ -40,6 +43,12 @@ done
 V=${TAG#v}
 if [ -n "$SIMULE" ]; then DOSSIER=$SIMULE; else DOSSIER=${DOSSIER:-$HOME/.cache/acvram/releases/$TAG}; fi
 case "$DOSSIER" in /tmp/*) echo "refus : $DOSSIER est sous /tmp (un rejeu doit retrouver les fichiers)" >&2; exit 64 ;; esac
+if [ "$FLATPAK" = 1 ] || [ "$FLATPAK" = doctor ]; then
+  if [ "${CUDA_VISIBLE_DEVICES+x}" = x ] && [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+    echo "REFUS : CUDA_VISIBLE_DEVICES est défini vide (shell à sec) — le doctor Flatpak ne verrait aucun GPU et rendrait un FAUX d'instrument ; lancer sous outils/carte.sh (--flatpak-doctor) ou passer --flatpak-installer / --sans-flatpak" >&2
+    exit 67
+  fi
+fi
 mkdir -p "$DOSSIER"
 
 FAUX=0
