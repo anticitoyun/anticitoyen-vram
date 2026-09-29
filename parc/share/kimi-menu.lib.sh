@@ -28,13 +28,20 @@ choisir_alias() {
   local -a garde=() tous=()
   client="${client%-modele}"
   if [ "${ACVRAM_MENU_TOUT:-0}" != 1 ] && [ -r "$res" ]; then
-    local ra rd rm rv re rest
-    while IFS=$'\t' read -r ra rd rm rv re rest; do
-      [ "$rv" = PANNE ] || continue
-      case "+$re+" in
-        *"+$client+"*|*+préchargement+*|*+/v1/models+*|*+complétion+*) masque["$ra"]="$rd" ;;
-      esac
-    done < "$res"
+    # La DERNIÈRE ligne d'un alias décide (cni 29/09 : une PANNE ancienne masquait l'alias pour toujours, même rejoué
+    # OK). Une ligne --rapide (kimi_rc « rapide ») ne juge pas les clients : elle ne lève qu'un masque de chargement.
+    # Champs relus par awk : IFS=tabulation FUSIONNE les champs vides (blanc au sens de read), kimi_rc glissait de rang.
+    local ra rd rv re rk
+    local -A par_chargement=()
+    while IFS=$'\x1f' read -r ra rd rv re rk; do
+      if [ "$rv" = PANNE ]; then
+        case "+$re+" in
+          *+préchargement+*|*+/v1/models+*|*+complétion+*) masque["$ra"]="$rd"; par_chargement["$ra"]=1; continue ;;
+          *"+$client+"*) masque["$ra"]="$rd"; unset 'par_chargement[$ra]'; continue ;;
+        esac
+      fi
+      if [ "$rk" != rapide ] || [ -n "${par_chargement[$ra]+x}" ]; then unset 'masque[$ra]' 'par_chargement[$ra]'; fi
+    done < <(awk -F'\t' '$1 != "" && substr($1, 1, 1) != "#" { printf "%s\037%s\037%s\037%s\037%s\n", $1, $2, $4, $5, $10 }' "$res")
     for i in "${!alias[@]}"; do [ -n "${masque[${alias[$i]}]+x}" ] || garde+=("$i"); done
     if [ "${#garde[@]}" -gt 0 ] && [ "${#garde[@]}" -lt "${#alias[@]}" ]; then
       local -a a2=() m2=() c2=() r2=() t2=() q2=() u2=()
