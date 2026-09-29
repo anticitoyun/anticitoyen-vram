@@ -145,6 +145,23 @@ def test_trim_at_stop():
     assert coupe and texte == "a"
 
 
+def test_anthropic_count_tokens(client):
+    """/v1/messages/count_tokens : le compte de /v1/messages (usage.input_tokens), sans rien soumettre ; les outils
+    comptent ; une invite au-delà de max_model_len se compte quand même (pas de 400 : compter n'est pas servir)."""
+    corps = {"model": "m", "system": "Réponds brièvement.",
+             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello world"}]}]}
+    n = client.post("/v1/messages/count_tokens", json=corps).json()["input_tokens"]
+    servi = client.post("/v1/messages", json={**corps, "max_tokens": 1, "temperature": 0}).json()["usage"]["input_tokens"]
+    assert n == servi > 0
+    # le gabarit de la fixture n'écrit pas les outils : même compte ; un gabarit qui les rend compte plus
+    avec_outil = client.post("/v1/messages/count_tokens", json={**corps, "tools": [_OUTIL_LIRE]}).json()["input_tokens"]
+    assert avec_outil >= n
+    longue = {**corps, "messages": [{"role": "user", "content": "hello " * 5000}]}
+    r = client.post("/v1/messages/count_tokens", json=longue)
+    assert r.status_code == 200 and r.json()["input_tokens"] > 5000
+    assert client.post("/v1/messages", json={**longue, "max_tokens": 1}).status_code == 400
+
+
 def test_anthropic_messages_route(client):
     """/v1/messages : format Anthropic, non-stream et stream."""
     r = client.post("/v1/messages", json={

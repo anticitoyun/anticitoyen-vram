@@ -107,9 +107,9 @@ def alias_du_menu(p) -> list[tuple[str, str, dict]]:
 
 
 def lanceur(p, alias: str, moteur: str, rapide: bool = False,
-            ctx_client: int = 29096) -> tuple[list[str], dict[str, str], str | None] | str:
+            ctx_client: int = 29120) -> tuple[list[str], dict[str, str], str | None] | str:
     """(argv, env, id attendu sur /v1/models) — ou la cause pour laquelle rien n'est lançable. Même résolution que
-    claude-modele/kimi-modele (colonnes des TSV), mêmes lanceurs ; CTX_CLIENT_MIN : celui de claude (29 096,
+    claude-modele/kimi-modele (colonnes des TSV), mêmes lanceurs ; CTX_CLIENT_MIN : celui de claude (29 120,
     claude-modele:151) — kimi-modele pose le sien (34 816) et relance si besoin ; un alias trop court pour kimi garde
     ainsi le résultat de claude au lieu de tomber au préchargement."""
     b = p.bin
@@ -471,7 +471,7 @@ def main() -> int:
     ap.add_argument("--delai-client", type=int, default=600, help="délai de chaque client (s)")
     ap.add_argument("--liste", type=Path,
                     help="fichier d'alias (1re colonne, un par ligne) : joués dans CET ordre, même déjà dans le TSV")
-    ap.add_argument("--ctx-client", type=int, default=29096,
+    ap.add_argument("--ctx-client", type=int, default=29120,
                     help="CTX_CLIENT_MIN du préchargement acvram (34 816 : celui de kimi, évite son rechargement)")
     ap.add_argument("--rapide", action="store_true",
                     help=f"preuve réduite au modèle servi (/v1/models + réponse non vide), contexte {CTX_RAPIDE}, sans "
