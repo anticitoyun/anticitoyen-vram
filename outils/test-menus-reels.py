@@ -45,6 +45,21 @@ QUESTION = "Réponds en un seul mot : quelle est la capitale de la France ?"
 # claude enchaînait les suites jusqu'au « Prompt is too long ». La réponse doit contenir ATTENDU (casse ignorée) ;
 # le programme juge, personne ne relit la sortie (REGLES § 6).
 ATTENDU = "paris"
+# syy (29/09, après poste5-edz2) : les modèles à raisonnement épuisaient les 64 jetons (fin=length) et le contrôle lisait
+# le raisonnement faute de contenu. On juge le CONTENU FINAL (balises <think> retirées, reasoning_content exclu), avec un
+# plafond qui laisse finir le raisonnement ; s'il ne finit pas (fin=length, contenu vide), c'est une panne nommée.
+JETONS_COMPLETION = 2048
+
+
+def contenu_final(texte: str) -> str:
+    """Le texte hors raisonnement : blocs <think>…</think> retirés ; un « </think> » orphelin (gabarit qui ouvre <think>
+    dans l'invite, sortie d'acvram ou d'un client) coupe tout ce qui le précède."""
+    t = re.sub(r"<think>.*?</think>", "", texte or "", flags=re.S)
+    if "</think>" in t:
+        t = t.rsplit("</think>", 1)[1]
+    if "<think>" in t:                               # raisonnement ouvert et jamais fermé (coupé par le plafond)
+        t = t.split("<think>", 1)[0]
+    return t.strip()
 COLONNES = ["date", "alias", "moteur", "verdict", "etape", "cause", "prechargement_s", "models", "completion",
             "kimi_rc", "claude_rc", "arret", "detail"]
 ORDRE = ["acvram", "llamacpp", "vllm", "rapide", "yals", "tabby", "jan"]
@@ -309,7 +324,7 @@ def client(p, nom: str, alias: str, journal: Path, delai: int) -> tuple[str, str
         return str(r.returncode), f"{nom} rc {r.returncode} : {cause_de(r.stderr, r.stdout)}"
     if not r.stdout.strip():
         return "0", f"{nom} : réponse vide"
-    if ATTENDU not in r.stdout.casefold():
+    if ATTENDU not in contenu_final(r.stdout).casefold():
         return "0", f"{nom} : réponse sans « Paris » ({len(r.stdout)} o : fausse ou dégénérée)"
     return "0", ""
 
@@ -365,23 +380,33 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
             ligne["models"] = "ok"
             try:
                 rep = get_json(f"http://127.0.0.1:{port}/v1/chat/completions", cle,
-                               {"model": servi, "messages": [{"role": "user", "content": QUESTION}], "max_tokens": JETONS_RAPIDE if a.rapide else 64,
+                               {"model": servi, "messages": [{"role": "user", "content": QUESTION}], "max_tokens": JETONS_RAPIDE if a.rapide else JETONS_COMPLETION,
                                 "temperature": 0}, delai=min(a.delai_client, PLAFOND_RAPIDE) if a.rapide else a.delai_client)
                 msg = rep["choices"][0]["message"]
-                texte = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+                fin = rep["choices"][0].get("finish_reason")
+                brut = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+                final = contenu_final(msg.get("content") or "")
             except Exception as e:  # noqa: BLE001
                 return panne("complétion", f"{type(e).__name__} : {e}"[:200])
-            if not texte:
+            if not brut:
                 return panne("complétion", "réponse vide (contenu et raisonnement)")
-            # sans « Paris » : noté, mais les clients sont joués quand même (64 jetons de raisonnement peuvent finir avant)
-            ligne["completion"] = "ok" if ATTENDU in texte.casefold() else "sans Paris"
+            if a.rapide:
+                ligne["completion"] = "ok"                   # rapide : non vide suffit (16 jetons), voir plus bas
+            elif not final:
+                ligne["completion"] = ("raisonnement non fini" if fin == "length" else "sans contenu final")
+            else:
+                # juge le contenu final seul : « Paris » dans le raisonnement ne compte pas
+                ligne["completion"] = "ok" if ATTENDU in final.casefold() else "sans Paris"
         if a.rapide:
             # 16 jetons ne suffisent pas toujours à écrire « Paris » (raisonnement d'abord) : noté, pas jugé
             ligne.update(claude_rc="rapide", kimi_rc="rapide", verdict="OK", detail="rapide : modèle servi seul")
             return ligne
         # les deux clients sont joués indépendamment : claude d abord (serveur préchargé à son contexte), puis kimi
         # (kimi-modele relance à 34 816 si besoin) ; une panne de l un ne masque pas l autre.
-        pannes = [("complétion", "complétion sans « Paris »")] if ligne["completion"] == "sans Paris" else []
+        pannes = [] if ligne["completion"] in ("ok", "") else [
+            ("complétion", {"sans Paris": "complétion : contenu final sans « Paris »",
+                            "raisonnement non fini": f"complétion : raisonnement non fini en {JETONS_COMPLETION} jetons (fin=length)",
+                            "sans contenu final": "complétion : raisonnement seul, aucun contenu final"}[ligne["completion"]])]
         if moteur in SANS_CLAUDE:
             ligne["claude_rc"] = "n/a"
         else:
@@ -419,7 +444,7 @@ def rejuger() -> int:
         pannes = []
         for nom, etape in (("claude-modele", "claude"), ("kimi-modele", "kimi")):
             m = re.search(rf"--- {nom} rc=0\n(.*?)(?=\n--- |\Z)", t, re.S)
-            if m and ATTENDU not in m.group(1).casefold():
+            if m and ATTENDU not in contenu_final(m.group(1)).casefold():
                 pannes.append((etape, f"{nom} : réponse sans « Paris » (rejugé sur le journal)"))
         if pannes:
             c[3:6] = ["PANNE", "+".join(e for e, _ in pannes), " | ".join(x for _, x in pannes)]
