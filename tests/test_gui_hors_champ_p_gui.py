@@ -1,8 +1,18 @@
-"""GUI, pièce P1 (chef, 29/09) : un alias dont la fenêtre déclarée (config.toml,
-max_context_size) est sous CTX_HORS_CHAMP (34 816 — poste1-edz-verdict-29-09.md § Classement,
-décision chef) est marqué dans la colonne Contexte (tooltip + marqueur ⚠), et son
-« Ouvrir dans … » dit pourquoi au lieu de tenter un lancement qui échouerait côté client
-(claude-modele/kimi-modele). Aucun spawn ne doit partir pour un alias hors champ."""
+"""GUI, pièce P1 (chef, 29/09, corrigée après revue) : le seuil « mode réduit »/« refus » est
+PAR CLIENT, tiré du code réel des lanceurs CLI, jamais une constante partagée entre claude-modeles
+et kimi-modeles :
+  - claude-modele : SEUIL_COMPLET=45000 (parc/bin/claude-modele:94, mode_outils()) — sous ce
+    seuil, mode « essentiel » (Read/Edit/Bash/Grep, sans MCP), l'alias se lance quand même ;
+    PROMPT_BASE(11000)+MIN_REPONSE(4096)=15096 (:94,99,106-107) — sous CE seuil, claude-modele
+    refuse (err + exit 1), rien ne se lance.
+  - kimi-modele : KIMI_MCP_CTX_MIN=65536 (parc/bin/kimi-modele:110,115) — sous ce seuil, MCP
+    coupés, l'alias se lance quand même ; aucun plancher dur générique (kimi-modele ne refuse
+    jamais lui-même pour une fenêtre trop petite, hors le repli propre à l'engin acvram, géré
+    par acvram-serveur).
+
+La colonne Contexte marque ⛔ (refus) ou ◐ (réduit) avec la raison en infobulle ; « Ouvrir »
+avertit avant de lancer en mode réduit (le client se lance normalement) et refuse SANS spawn en
+mode refus (seul cas réel, propre à claude)."""
 import json
 import os
 import shutil
@@ -24,15 +34,11 @@ pytestmark = pytest.mark.skipif(not shutil.which("xvfb-run") or not _gi_ok(),
                                 reason="xvfb-run ou GTK4/libadwaita absent")
 
 
-def _parc(tmp_path, ctx_hors_champ, ctx_dans_le_champ):
+def _parc(tmp_path, ctx):
     kimi = tmp_path / "kimi"; kimi.mkdir()
     tsv = tmp_path / "tsv"; tsv.mkdir()
     (kimi / "config.toml").write_text(
-        f'[models.acvram-etroit]\nprovider="acvram"\nmodel="Etroit"\nmax_context_size={ctx_hors_champ}\n'
-        f'[models.acvram-large]\nprovider="acvram"\nmodel="Large"\nmax_context_size={ctx_dans_le_champ}\n')
-    (tsv / "acvram-chemins.tsv").write_text(
-        f"acvram-etroit\t{tmp_path}/etroit\t{ctx_hors_champ}\n"
-        f"acvram-large\t{tmp_path}/large\t{ctx_dans_le_champ}\n")
+        f'[models.acvram-m]\nprovider="acvram"\nmodel="M"\nmax_context_size={ctx}\n')
     parc = tmp_path / "parc.toml"
     parc.write_text(f'[chemins]\nkimi_dir="{kimi}"\ntsv_dir="{tsv}"\n[moteurs.acvram]\npresent=true\n')
     return parc
@@ -49,18 +55,39 @@ def _jouer(parc, gui, clic):
     return r.returncode, json.loads(lignes[0][len("GUI_TEST "):])
 
 
-@pytest.mark.parametrize("gui", ["claude-modeles", "kimi-modeles"])
-def test_ouvrir_hors_champ_refuse_sans_spawn_et_dit_pourquoi(tmp_path, gui):
-    parc = _parc(tmp_path, ctx_hors_champ=16384, ctx_dans_le_champ=65536)
-    rc, r = _jouer(parc, gui, "clic:b_ouvrir@acvram-etroit")
-    assert rc == 0
-    assert r["spawns"] == []
-    assert any("16 384" in t and "34 816" in t for t in r["toasts"]), r["toasts"]
+def test_claude_sous_seuil_minimum_refuse_sans_spawn(tmp_path):
+    parc = _parc(tmp_path, 10000)
+    rc, r = _jouer(parc, "claude-modeles", "clic:b_ouvrir@acvram-m")
+    assert rc == 0 and r["spawns"] == []
+    assert any("10 000" in t and "15 096" in t for t in r["toasts"]), r["toasts"]
 
 
-@pytest.mark.parametrize("gui", ["claude-modeles", "kimi-modeles"])
-def test_ouvrir_dans_le_champ_ne_porte_pas_le_refus_hors_champ(tmp_path, gui):
-    parc = _parc(tmp_path, ctx_hors_champ=16384, ctx_dans_le_champ=65536)
-    rc, r = _jouer(parc, gui, "clic:b_ouvrir@acvram-large")
+def test_claude_mode_reduit_entre_15096_et_45000_ne_bloque_pas(tmp_path):
+    parc = _parc(tmp_path, 30000)
+    rc, r = _jouer(parc, "claude-modeles", "clic:b_ouvrir@acvram-m")
     assert rc == 0
-    assert not any("34 816" in t for t in r["toasts"]), r["toasts"]
+    assert any("30 000" in t and "45 000" in t and "réduit" in t for t in r["toasts"]), r["toasts"]
+
+
+def test_claude_complet_au_dela_de_45000_pas_de_mention(tmp_path):
+    parc = _parc(tmp_path, 50000)
+    rc, r = _jouer(parc, "claude-modeles", "clic:b_ouvrir@acvram-m")
+    assert rc == 0
+    assert not any("45 000" in t or "15 096" in t for t in r["toasts"]), r["toasts"]
+
+
+def test_kimi_ne_refuse_jamais_meme_tres_bas(tmp_path):
+    """kimi-modele n'a pas de plancher dur générique (seuil_minimum=None côté profil) :
+    même une fenêtre minuscule reste « mode réduit », jamais « refus »."""
+    parc = _parc(tmp_path, 1000)
+    rc, r = _jouer(parc, "kimi-modeles", "clic:b_ouvrir@acvram-m")
+    assert rc == 0
+    assert any("1 000" in t and "65 536" in t and "réduit" in t for t in r["toasts"]), r["toasts"]
+    assert not any("refuse" in t for t in r["toasts"]), r["toasts"]
+
+
+def test_kimi_complet_au_dela_de_65536_pas_de_mention(tmp_path):
+    parc = _parc(tmp_path, 70000)
+    rc, r = _jouer(parc, "kimi-modeles", "clic:b_ouvrir@acvram-m")
+    assert rc == 0
+    assert not any("65 536" in t for t in r["toasts"]), r["toasts"]

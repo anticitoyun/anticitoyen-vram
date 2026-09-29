@@ -51,12 +51,6 @@ MOTEURS = {
 ORDRE_MOTEUR = {cle: _ORDRE_PARC.get(cle, 9) for cle in MOTEURS}
 # alias sans fiche dans notes-modeles.tsv : jamais « ? » (poste7-menus-cloture-19-09 § 1)
 FICHE_ABSENTE = ["inconnu", "non mesuré", "non mesuré", "inconnu"]
-# hors champ (chef, 29/09, poste1-edz-verdict-29-09.md § Classement) : sous ce nombre de
-# jetons, claude-modele et kimi-modele refusent ou dégradent l'alias avant même de le
-# servir (mode_outils de claude-modele bascule en « essentiel » à 45 000, kimi-modele
-# retombe sur ce plancher pour ses alias acvram) — la fenêtre déclarée (config.toml) est
-# comparée à cette valeur commune, décidée pour classer edz, pas mesurée par moteur.
-CTX_HORS_CHAMP = 34816
 
 # ─── données ──────────────────────────────────────────────────────────────────
 NOTE_MOTS = {"★★★★★": 5, "★★★★": 4, "★★★": 3, "★★": 2, "★": 1,

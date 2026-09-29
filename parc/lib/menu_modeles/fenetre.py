@@ -29,7 +29,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 from .config import (PARC, MAISON, KIMI_DIR, TSV_DIR, CONFIG, NOTES, GGUF_TSV,  # noqa: E402,F401
                      VLLM_TSV, ACVRAM_TSV, VISION_TSV, SECRETS, BIN,
                      DOSSIERS_LANCEMENT, DOSSIER_LANCEMENT_DEFAUT, ANSI, GUI_TEST,
-                     MOTEURS, ORDRE_MOTEUR, FICHE_ABSENTE, NOTE_MOTS, REFUS_RANG, CTX_HORS_CHAMP)
+                     MOTEURS, ORDRE_MOTEUR, FICHE_ABSENTE, NOTE_MOTS, REFUS_RANG)
 from .moteur import (Moteur, secrets, cle_moteur, modele_servi, vram, pid_du_port)  # noqa: E402,F401
 from .parc import (Modele, lire_tsv, charger_parc, rang_qualite, rang_refus, ecrire_note)  # noqa: E402,F401
 
@@ -336,9 +336,13 @@ class Fenetre(Adw.ApplicationWindow):
 
         def rendu_ctx(lbl, m):
             txt = f"{m.ctx:,}".replace(",", " ")
-            if m.hors_champ:
-                lbl.set_markup(f'<span foreground="#e5a50a">⚠ {txt}</span>')
-                lbl.set_tooltip_text(m.raison_hors_champ())
+            mode = self._mode_client(m)
+            if mode == "refuse":
+                lbl.set_markup(f'<span foreground="#e01b24">⛔ {txt}</span>')
+                lbl.set_tooltip_text(self._raison_mode_client(m, mode))
+            elif mode == "reduit":
+                lbl.set_markup(f'<span foreground="#e5a50a">◐ {txt}</span>')
+                lbl.set_tooltip_text(self._raison_mode_client(m, mode))
             else:
                 lbl.set_text(txt)
                 lbl.set_tooltip_text(None)
@@ -794,6 +798,27 @@ class Fenetre(Adw.ApplicationWindow):
     def toast(self, texte):
         self.toasts.add_toast(Adw.Toast(title=texte, timeout=4))
 
+    def _mode_client(self, m):
+        """« complet », « reduit » ou « refuse » pour l'alias `m`, sous CE profil (claude
+        ou kimi ont chacun leur seuil — jamais une constante partagée, cf. seuil_complet/
+        seuil_minimum du PROFIL, sourcés dans les lanceurs CLI). ctx=0 (inconnu) : complet,
+        rien à affirmer sur une fenêtre qu'on ne connaît pas."""
+        if not m.ctx:
+            return "complet"
+        seuil_min = self.profil.get("seuil_minimum")
+        if seuil_min and m.ctx < seuil_min:
+            return "refuse"
+        if m.ctx < self.profil["seuil_complet"]:
+            return "reduit"
+        return "complet"
+
+    def _raison_mode_client(self, m, mode):
+        if mode == "refuse":
+            return (f"{m.alias} : fenêtre {m.ctx:,} jetons — {self.profil['nom']} refuse en dessous de "
+                    f"{self.profil['seuil_minimum']:,} (ne se lance pas)").replace(",", " ")
+        return (f"{m.alias} : fenêtre {m.ctx:,} jetons < {self.profil['seuil_complet']:,} — "
+                f"{self.profil['mention_reduit']}").replace(",", " ")
+
     def _occupe(self, oui):
         self.b_stop.set_sensitive(oui)
         self.b_precharger.set_sensitive(not oui and bool(self.selection_courante()
@@ -912,9 +937,12 @@ class Fenetre(Adw.ApplicationWindow):
             self.toast(f"{MOTEURS[m.provider].nom} n'expose pas l'API Anthropic : "
                        "choisir un alias llamacpp-*, rapide-*, vllm-* ou acvram-*.")
             return
-        if m.hors_champ:
-            self.toast(m.raison_hors_champ())
+        mode = self._mode_client(m)
+        if mode == "refuse":
+            self.toast(self._raison_mode_client(m, mode))
             return
+        if mode == "reduit":
+            self.toast(self._raison_mode_client(m, mode))
         term = self._terminal()
         if term is None:
             self.toast("Aucun terminal graphique trouvé")
