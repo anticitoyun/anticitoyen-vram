@@ -5,6 +5,7 @@ un mixin d `Engine`, les corps sont ceux de runner.py au commit précédent, oct
 
 from __future__ import annotations
 
+import itertools
 import os
 import time
 from typing import Optional
@@ -43,6 +44,12 @@ def _ctx_texte(engine) -> str:
     txt = f" ctx_tenu={v}" if demande == v else f" ctx_tenu={v}(demandé {demande})"
     seuil = getattr(engine, "moe_seuil", None)
     return txt + (f" tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
+
+
+def _sur_carte(mod) -> bool:
+    """Le bloc vit sur la carte (son premier tenseur, routeur d abord) : les piles n ont de sens que là (moe.py : x.is_cuda)."""
+    t = next(itertools.chain(mod.parameters(), mod.buffers()), None)
+    return t is not None and t.is_cuda
 
 
 class ChauffeContexte:
@@ -229,6 +236,7 @@ class ChauffeContexte:
         (la requête réelle tourne avec leurs réserves : c est le contrôle qui peut rendre faux). Confirmation
         échouée → tenu − ``pas_confirmation``, recapture, deux fois au plus, puis refus nommé. Rend (ctx_tenu,
         captures). Test cassant : faux graphes qui coûtent 2 pas ⇒ tenu final = tenu − 2·pas, chargement réussi."""
+        self._construire_piles_avant_chauffe()
         tenu = self.chauffer_contexte(pas=pas, strict=strict)
         captures = self.warm_graphs(warm_max_len) if self.graphs is not None else 0
         if tenu is None or self.graphs is None:
@@ -247,6 +255,22 @@ class ChauffeContexte:
             self.max_model_len = self.ctx_tenu = nouveau
             captures = self._recapturer(warm_max_len)
         return self.ctx_tenu, captures                                   # jamais atteint
+
+    def _construire_piles_avant_chauffe(self) -> int:
+        """ya1 (29/09) : sans graphes (``--no-cuda-graphs``, passes rapides d edz), les piles d experts et leur repack
+        Marlin se construisaient PARESSEUSEMENT dans le premier forward (moe.py, ``_stack_state == "?"``) — celui de la
+        première passe de chauffe : leur transitoire (pile empilée puis repackée, 2 × 324 Mio par couche sur Coder-30B)
+        s ajoutait aux activations du préfill plein, et la chauffe concluait 3 072 sur 4 096. Avec graphes,
+        `GraphRunner._eligible` (graphs.py:473) les construit AVANT la chauffe ; même construction ici, pour que la
+        chauffe mesure le régime servi. Mêmes piles, même sortie : seul le moment change. Rend le nombre de couches
+        décidées."""
+        from .moe import MoEBlock
+        n = 0
+        for mod in self.model.modules():
+            if isinstance(mod, MoEBlock) and mod._stack_state == "?" and _sur_carte(mod):
+                mod._stack_state = "oui" if mod._try_build_stacks() else "non"
+                n += 1
+        return n
 
     def _apres_oom_de_chauffe(self) -> None:
         """Après un OOM de chauffe : séquences en cours abandonnées, blocs rendus, allocateur neuf, cache CUDA vidé."""
