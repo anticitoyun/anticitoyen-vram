@@ -1037,10 +1037,14 @@ def masque_images(q_len: int, kv_len: int, q_offset: int,
     return ouvert
 
 
+# Taille d'un bloc de masque dense (octets) quand `attention` doit découper après un OOM (8fx).
+_MASQUE_OCTETS_MAX = int(os.environ.get("ACVRAM_MASQUE_OCTETS_MAX", str(256 << 20)))
+
+
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               causal: bool = True, scale: Optional[float] = None,
               q_offset: int = 0, window: int = 0, n_rep: int = 1,
-              images: Optional[Sequence[tuple[int, int]]] = None) -> torch.Tensor:
+              images: Optional[Sequence[tuple[int, int]]] = None, _en_blocs: bool = False) -> torch.Tensor:
     """Attention par produit scalaire normalisé sur des tenseurs ``[jetons, têtes, dim]``.
 
     Délègue au SDPA de PyTorch, qui choisit FlashAttention sur tout GPU qui le
@@ -1049,11 +1053,32 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     les diffuse (``enable_gqa``) — la tête h lit la tête KV h // n_rep, la même
     que `repeat_kv` matérialisait (deux copies de [t, têtes, d] par couche).
     """
+    q_len, kv_len = q.shape[0], k.shape[0]
+    # le chemin à masque dense d'en dessous, exactement (un bloc d'images qui ne touche pas les requêtes n'en ouvre pas)
+    touche = bool(images and causal and any(int(d) < q_offset + q_len and int(f) > q_offset for d, f in images))
+    masque = bool(window > 0 or touche
+                  or (causal and q_len > 1 and not (q_offset == 0 and q_len == kv_len)))
+    if masque and q_len > 1 and not _en_blocs:
+        # 8fx (29/09) : le masque [q, kv] est dense ; une invite claude de ~30 k jetons dont le préfixe est en cache
+        # (q_offset > 0) en faisait 2,10 Gio → OOM en service, alors que la chauffe (q_offset = 0, masque None)
+        # tenait 34 816. On garde le calcul d'un seul tenant (sortie inchangée partout où il passait) et, s'il
+        # manque de mémoire, on le refait par blocs de lignes — seul cas où le découpage produit une sortie
+        # (bf16 identique au bit sur CPU, fp32 à ≤ 1e-6 : tests/test_masque_par_blocs_8fx.py).
+        try:
+            return attention(q, k, v, causal, scale, q_offset, window, n_rep, images, _en_blocs=True)
+        except torch.OutOfMemoryError:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            lignes = max(1, _MASQUE_OCTETS_MAX // max(1, kv_len * q.element_size()))
+            print(f"[acvram] masque d'attention {q_len}×{kv_len} hors mémoire : par blocs de {lignes} lignes",
+                  flush=True)
+            return torch.cat([attention(q[i:i + lignes], k, v, causal, scale, q_offset + i, window, n_rep, images,
+                                        _en_blocs=True)
+                              for i in range(0, q_len, lignes)], dim=0)
     qh = q.transpose(0, 1).unsqueeze(0)          # [1, heads, tq, dim]
     kh = k.transpose(0, 1).unsqueeze(0)
     vh = v.transpose(0, 1).unsqueeze(0)
     gqa = {"enable_gqa": True} if n_rep > 1 else {}
-    q_len, kv_len = q.shape[0], k.shape[0]
     ouvert = (masque_images(q_len, kv_len, q_offset, images, q.device)
               if images and causal else None)
     if window > 0:
