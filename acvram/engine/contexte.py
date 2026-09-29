@@ -5,7 +5,6 @@ un mixin d `Engine`, les corps sont ceux de runner.py au commit précédent, oct
 
 from __future__ import annotations
 
-import itertools
 import os
 import time
 from typing import Optional
@@ -46,10 +45,13 @@ def _ctx_texte(engine) -> str:
     return txt + (f" tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
 
 
-def _sur_carte(mod) -> bool:
-    """Le bloc vit sur la carte (son premier tenseur, routeur d abord) : les piles n ont de sens que là (moe.py : x.is_cuda)."""
-    t = next(itertools.chain(mod.parameters(), mod.buffers()), None)
-    return t is not None and t.is_cuda
+def _sur_carte(couche) -> bool:
+    """La COUCHE vit sur la carte (``couche.device``, comme graphs.py:474). Pas les paramètres du bloc MoE : les poids
+    quantifiés sont des attributs ordinaires de QuantLinear (layers.py:438) — un bloc MoE n a souvent AUCUN paramètre,
+    et la 1re version de cette garde (premier paramètre du bloc) rendait faux partout : prise ya1 du 29/09, bras B
+    identique au témoin à l octet près."""
+    dev = getattr(couche, "device", None)
+    return dev is not None and torch.device(dev).type == "cuda"
 
 
 class ChauffeContexte:
@@ -266,10 +268,15 @@ class ChauffeContexte:
         décidées."""
         from .moe import MoEBlock
         n = 0
-        for mod in self.model.modules():
-            if isinstance(mod, MoEBlock) and mod._stack_state == "?" and _sur_carte(mod):
-                mod._stack_state = "oui" if mod._try_build_stacks() else "non"
-                n += 1
+        for couche in getattr(self.model, "layers", ()):
+            if not _sur_carte(couche):
+                continue
+            for mod in couche.modules():
+                if isinstance(mod, MoEBlock) and mod._stack_state == "?":
+                    mod._stack_state = "oui" if mod._try_build_stacks() else "non"
+                    n += 1
+        if n:
+            print(f"[acvram] piles d experts construites avant la chauffe : {n} couches", flush=True)
         return n
 
     def _apres_oom_de_chauffe(self) -> None:
