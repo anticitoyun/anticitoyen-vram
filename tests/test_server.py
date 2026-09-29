@@ -535,7 +535,7 @@ def test_messages_system_hors_tete_joint_au_user():
                         {"role": "system", "content": [{"type": "text", "text": "Contexte du crochet."}]}]}
     m = messages_anthropic(req)
     assert m == [{"role": "system", "content": "Agent."},
-                 {"role": "user", "content": "Lis a\n\nContexte du crochet."}]
+                 {"role": "user", "content": "Contexte du crochet.\n\nLis a"}]     # claude-2 : la question en dernier
     tmpl = ("{% for x in messages %}{% if x.role == 'system' and not loop.first %}"
             "{{ raise_exception('System message must be at the beginning.') }}{% endif %}"
             "<{{ x.role }}>{{ x.content }}{% endfor %}"
@@ -549,8 +549,22 @@ def test_messages_system_hors_tete_joint_au_user():
         {"role": "system", "content": "s1"}, {"role": "user", "content": "c"}, {"role": "system", "content": "s2"},
         {"role": "assistant", "content": "d"}, {"role": "system", "content": "s3"}]})
     assert m == [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
-                 {"role": "user", "content": "s1\n\nc\n\ns2"}, {"role": "assistant", "content": "d"},
+                 {"role": "user", "content": "s1\n\ns2\n\nc"}, {"role": "assistant", "content": "d"},
                  {"role": "user", "content": "s3"}]
+
+
+def test_messages_system_hors_tete_la_question_reste_en_dernier():
+    """claude-2 (poste6, 29/09) : edz liste-2, Devstral/Nemo-12B-Claude/Qwen3-0.6B « sans Paris » depuis iqm — le
+    crochet SessionStart (17 Ko) était joint APRÈS la question, le modèle répondait au crochet. Le texte de
+    l'utilisateur termine le message ; le crochet le précède, entier."""
+    from acvram.server.chat import messages_anthropic
+    crochet = "SessionStart:startup hook success: état du projet, .deb, tests…\n" * 40
+    req = {"system": [{"type": "text", "text": "Agent."}],
+           "messages": [{"role": "user", "content": [{"type": "text", "text": "Capitale de la France ?"}]},
+                        {"role": "system", "content": [{"type": "text", "text": crochet}]}]}
+    m = messages_anthropic(req)
+    assert [x["role"] for x in m] == ["system", "user"]
+    assert m[1]["content"].endswith("Capitale de la France ?") and m[1]["content"].startswith(crochet)
 
 
 def test_gabarit_tojson_comme_transformers():
