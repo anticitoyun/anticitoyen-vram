@@ -157,30 +157,125 @@ def vram_de(pid: int) -> bool:
     return str(pid) in r.stdout.split()
 
 
-def arreter(port: int, pid: int | None) -> str:
-    """SIGTERM puis SIGKILL au PID qui écoute le port ; « ok » si le PID est mort ET n'a plus de VRAM."""
-    pid = pid or pid_ecoute(port)
-    if pid is None:
-        return "ok (rien n'écoutait)"
+# Pièce j0q + dlq (poste6, 29/09) : `arreter(port, pid)` visait le PID mémorisé au préchargement — mort quand
+# claude-modele relance le serveur à la fenêtre du TSV (dlq, 8fx : le nouveau serveur restait, « sert déjà » au bras
+# suivant) — et rien quand le lanceur rend 1 sans port (j0q : un serveur de l'arbre « pas démarré » vivait à 26,6 Gio,
+# OOM de l'alias suivant). Désormais : tout serveur APPARU depuis le début du bras, sur le port OU sous le verrou
+# carte.sh (`.qui`, 4 champs `<pid> <epoch> <nom> service`), PID vérifié par sa ligne de commande, est arrêté ;
+# jamais un serveur présent avant le bras, jamais un service permanent (8faa01465 : l'appoint 8081).
+VERROUS_GLOB = os.environ.get("TMR_VERROUS", "/tmp/acvram-carte-*.lock")
+PORTS_PERMANENTS = {8081}
+
+
+def cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").replace("\0", " ").strip()
+    except OSError:
+        return ""
+
+
+def est_permanent(pid: int) -> bool:
+    """Service permanent du poste (llamacpp-appoint, --port 8081) : jamais arrêté, quoi qu'il ait fait pendant le bras."""
+    cl = cmdline(pid)
+    return "llamacpp-appoint" in cl or any(re.search(rf"--port[= ]+{pp}\b", cl) for pp in PORTS_PERMANENTS)
+
+
+def est_serveur_du_parc(pid: int, alias: str = "") -> bool:
+    """Un PID du verrou à arrêter : sa ligne de commande est celle d'un serveur d'inférence (acvram serve, llama-server,
+    vllm) ou porte l'alias testé ; jamais un service permanent."""
+    cl = cmdline(pid)
+    if not cl or est_permanent(pid):
+        return False
+    return bool(re.search(r"\bserve\b|llama-server|vllm", cl)) or (bool(alias) and alias in cl)
+
+
+def _vivant(pid: int) -> bool:
+    """Vivant ET pas zombie (un enfant tué mais non moissonné répond encore à kill -0)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def services_du_verrou() -> list[tuple[int, int, str]]:
+    """(pid, epoch, nom) des services VIVANTS inscrits dans les `.qui` de carte.sh (contrat 4 champs)."""
+    out = []
+    import glob
+    for q in glob.glob(VERROUS_GLOB + ".qui"):
+        try:
+            lignes = Path(q).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for l in lignes:
+            ch = l.split()
+            if len(ch) < 4 or ch[3] != "service" or not ch[0].isdigit() or not ch[1].isdigit():
+                continue
+            try:
+                os.kill(int(ch[0]), 0)
+            except (ProcessLookupError, PermissionError):
+                continue
+            out.append((int(ch[0]), int(ch[1]), ch[2]))
+    return out
+
+
+def serveurs_vivants(port: int) -> set[int]:
+    """PIDs des serveurs à cet instant : celui qui écoute le port et ceux du verrou — relevé AVANT le bras."""
+    pids = {pid for pid, _, _ in services_du_verrou()}
+    p = pid_ecoute(port)
+    if p is not None:
+        pids.add(p)
+    return pids
+
+
+def _tuer(pid: int) -> bool:
+    """SIGTERM puis SIGKILL ; vrai si le PID est mort ET n'a plus de VRAM."""
     for sig, attente in ((signal.SIGTERM, 30), (signal.SIGKILL, 10)):
+        if not _vivant(pid):
+            break
         try:
             os.kill(pid, sig)
         except ProcessLookupError:
             break
         for _ in range(attente * 2):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _vivant(pid):
                 break
             time.sleep(0.5)
-        else:
-            continue
-        break
     for _ in range(20):
-        if not vram_de(pid) and pid_ecoute(port) != pid:
-            return "ok"
+        if not _vivant(pid) and not vram_de(pid):
+            return True
         time.sleep(0.5)
-    return f"PID {pid} toujours là ou VRAM non rendue"
+    return False
+
+
+def arreter(port: int, avant: set[int], alias: str = "") -> str:
+    """Arrête tout serveur apparu depuis le relevé `avant` : celui qui écoute le port du bras (c'est le nôtre, quelle
+    que soit sa ligne de commande — sauf permanent) et ceux inscrits au verrou dont la ligne de commande est celle
+    d'un serveur. « ok » si chacun est mort sans VRAM ; « ok (rien d'apparu) » sinon ; un laissé-pour-compte est nommé."""
+    p = pid_ecoute(port)
+    a_tuer: set[int] = set()
+    laisses: list[int] = []
+    if p is not None and p not in avant:
+        if est_permanent(p):
+            laisses.append(p)
+        else:
+            a_tuer.add(p)
+    for pid, _, _ in services_du_verrou():
+        if pid in avant or pid in a_tuer:
+            continue
+        (a_tuer.add(pid) if est_serveur_du_parc(pid, alias) else laisses.append(pid))
+    if not a_tuer:
+        return "ok (rien d'apparu)" + (f" ; laissé : {sorted(laisses)} (permanent ou pas un serveur)" if laisses else "")
+    restes = [c for c in sorted(a_tuer) if not _tuer(c)]
+    if restes:
+        return f"PID {restes} toujours là ou VRAM non rendue"
+    q = pid_ecoute(port)
+    if q is not None and q not in avant and _vivant(q):
+        return f"PID {q} écoute encore {port} (apparu pendant l'arrêt)"
+    return "ok" + (f" ; laissé : {sorted(laisses)}" if laisses else "")
 
 
 def queue(texte: str, n: int = 160) -> str:
@@ -233,6 +328,7 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
     cle = cles.get({"acvram": "CLE_ACVRAM", "vllm": "CLE_VLLM", "llamacpp": "CLE_LLAMACPP", "rapide": "CLE_RAPIDE",
                     "tabby": "CLE_TABBY", "yals": "CLE_YALS", "jan": "CLE_JAN"}.get(moteur, ""), "")
     pid = None
+    avant = serveurs_vivants(port) if port is not None else set()          # j0q/dlq : rien d'antérieur au bras n'est arrêté
     try:
         if moteur not in AUTO_CHARGES:
             if port is None:
@@ -303,7 +399,7 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
         if moteur in PERMANENTS:
             ligne["arret"] = "service permanent laissé"
         elif port is not None and a_arreter(moteur):
-            ligne["arret"] = arreter(port, pid)
+            ligne["arret"] = arreter(port, avant, alias)
             if ligne["arret"] != "ok" and not ligne["arret"].startswith("ok"):
                 ligne["detail"] = "arrêt : " + ligne["arret"]
 
