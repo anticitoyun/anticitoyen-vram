@@ -47,6 +47,10 @@ class H(BaseHTTPRequestHandler):
                 return self.rendre(200, {})
             return self.rendre(200, {"choices": [{"message": {"role": "assistant", "content": "o"}}]})
         ctx = d.get("max_seq_len", 0)
+        if mode in ("tenseur", "vram"):
+            print({"tenseur": "llama_model_load: error loading model: missing tensor 'blk.64.ssm_conv1d.weight'",
+                   "vram": "llama_model_load: error loading model: unable to allocate CUDA0 buffer"}[mode], flush=True)
+            return self.rendre(200, {})
         if mode == "arch":
             print("llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'gemma4'", flush=True)
             return self.rendre(200, {})
@@ -76,7 +80,7 @@ def poste(tmp_path):
     kimi_dir = tmp_path / "kimi"; (kimi_dir / "bin").mkdir(parents=True)
     faux_kimi = kimi_dir / "bin" / "kimi"
     faux_kimi.write_text('#!/bin/sh\necho "KIMI $*"\n'); faux_kimi.chmod(0o755)
-    modeles = tmp_path / "modeles"; (modeles / "Essai").mkdir(parents=True)
+    modeles = tmp_path / "modeles"; (modeles / "Essai").mkdir(parents=True); (modeles / "Essai" / "essai.gguf").write_bytes(b"GGUF")
     tsv = tmp_path / "TSV"; tsv.mkdir()
     serveurs = {}
     for moteur in ("yals", "tabby"):
@@ -212,3 +216,21 @@ def test_bascule_chemin_yals_introuvable_refus_nomme(poste_parc, tmp_path):
     assert r.returncode == 4, r.stdout + r.stderr
     assert "REFUS : [moteurs.yals] présent sans chemin" in r.stdout + r.stderr
     assert not lire().get("chemin")
+
+
+@pytest.mark.parametrize("mode,attendu", [
+    ("tenseur", "Alias non servable par ce YALS : missing tensor 'blk.64.ssm_conv1d.weight' (HTTP 200)"),
+    ("vram", "Alias non servable par ce YALS : unable to allocate CUDA0 buffer (poids plus gros que la carte : num_gpu_layers 999) (HTTP 200)")])
+def test_refus_du_chargeur_echec_immediat_nomme(poste, mode, attendu):
+    """yals 30/09, 10 délais après correctif : Ornith/Qwen3.8 (tenseur manquant), nemotron-lightning/coder-next (poids >
+    carte). YALS rend 200 sans modèle ; cassant : l'ancien lanceur attendait le chargement « en arrière-plan »."""
+    r, dt = poste["lancer"]("kimi-yals", "yals-essai", mode=mode, ctx=131072)
+    assert r.returncode == 1 and attendu in r.stderr, r.stderr
+    assert dt < 20, f"{dt:.0f} s"
+
+
+def test_gguf_absent_echec_immediat_nomme(poste, tmp_path):
+    (tmp_path / "modeles" / "Essai" / "essai.gguf").unlink()
+    r, dt = poste["lancer"]("kimi-yals", "yals-essai")
+    assert r.returncode == 1 and "GGUF absent : " in r.stderr and "essai.gguf (alias fantôme ?)" in r.stderr, r.stderr
+    assert dt < 20
