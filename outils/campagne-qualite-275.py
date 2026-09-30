@@ -83,7 +83,15 @@ def preparer():
         alias, ref_dossier = c["alias"], c["ref_dossier"]
         present = alias in menu
         ctx = menu.get(alias, 0)
-        ref_ok = (CACHE_275 / ref_dossier / "ppl.json").exists() and (CACHE_275 / ref_dossier / "panel.json").exists()
+        # Délègue à verifier-reference-275.sh (source unique avec qualite.sh) — trouvé le
+        # 30/09 : ppl.json + panel.json présents ne suffit pas, une référence peut être au
+        # format ANCIEN (échantillons sous les noms de tâche d'avant la pièce 275d) et
+        # planter qualite.sh en cours de route. Angle mort d'une première version de
+        # --simule, corrigé.
+        ref_ok = subprocess.run(
+            ["outils/verifier-reference-275.sh", ref_dossier], cwd=RACINE,
+            capture_output=True,
+        ).returncode == 0
         dossier = dossiers.get(alias, "?")
         doublon = vus_dossiers.get(dossier)
         vus_dossiers[dossier] = alias
