@@ -270,6 +270,7 @@ class EngineStats:
             "steps": self.steps,
             "pas_avec_prefill": self.pas_avec_prefill,
             "prefill_tranches": self.prefill_tranches,
+            "prefill_morceaux": self.prefill_morceaux,   # levier 2 étape 1 : preuve de prise (S1, /metrics)
             "prefill_tokens": self.prefill_tokens,
             "decode_tokens": self.decode_tokens,
             "decode_tok_s": round(self.decode_tok_s, 2),
