@@ -11,6 +11,9 @@ import signal
 import stat
 import subprocess
 import time
+import pytest
+
+pytestmark = pytest.mark.usefixtures("recolte_carte")   # ked/7gb : aucun processus ne survit au test
 
 DEPOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(DEPOT, "outils", "carte-libre.sh")

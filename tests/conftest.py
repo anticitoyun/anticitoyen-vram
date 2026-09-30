@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 
 # Sans carte visible, les noyaux Triton (kernels/gemm_groupe, gemm_etroit,
 # attn_paginee) tournent dans l'interpréteur numpy : la variable doit être
@@ -596,3 +597,50 @@ def attendre_chemin(bloc, nom: str, avant: int = 0) -> int:
         f"chemin pris : {getattr(bloc, 'dernier_chemin', None)!r}, attendu {nom!r} (compteurs {chemins})"
     assert chemins.get(nom, 0) > avant, f"le chemin {nom!r} n'a pas avancé : {chemins}"
     return chemins[nom]
+
+
+# ked / 7gb (27/09, corrigé 30/09) : des tests qui lancent de VRAIS carte.sh laissaient des « carte.sh sleep N »
+# orphelins (PPID systemd) attendre la carte après la suite, sous la prise réelle d'une suite complète. Tout test
+# qui déclare `recolte_carte` voit, à sa fin, les processus encore vivants dont ACVRAM_VERROU est sous SON tmp_path :
+# délai de grâce (le guetteur d'un service dort 5 s), puis leur groupe est tué et le test ÉCHOUE en les nommant.
+def _restes_carte(racine) -> "list[tuple[int, str]]":
+    prefixe = f"ACVRAM_VERROU={racine}".encode()
+    out = []
+    for e in pathlib.Path("/proc").glob("[0-9]*/environ"):
+        try:
+            if any(v.startswith(prefixe) for v in e.read_bytes().split(b"\0")):
+                p = int(e.parent.name)
+                cmd = (e.parent / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+                out.append((p, cmd[:100]))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+@pytest.fixture
+def recolte_carte(tmp_path):
+    import signal as _signal
+    import time as _time
+    yield
+    # le guetteur d'un service (`sh -c 'while kill -0 <srv> …; sleep 5'`, carte.sh) sort seul dans les 5 s qui
+    # suivent la mort du serveur et ne tient rien : récolté sans attente ni échec
+    guetteur = lambda c: c.startswith("sh -c while kill -0")
+    for p, c in _restes_carte(tmp_path):
+        if guetteur(c):
+            try:
+                os.killpg(p, _signal.SIGKILL)       # setsid : chef de son groupe, avec son `sleep 5`
+            except (ProcessLookupError, PermissionError):
+                pass
+    fin = _time.monotonic() + 3
+    restes = _restes_carte(tmp_path)
+    while restes and _time.monotonic() < fin:
+        _time.sleep(0.25)
+        restes = _restes_carte(tmp_path)
+    for p, _ in restes:
+        for tuer in (lambda: os.killpg(os.getpgid(p), _signal.SIGKILL), lambda: os.kill(p, _signal.SIGKILL)):
+            try:
+                tuer()
+                break
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+    assert not restes, f"processus laissés vivants par le test (ked) : {restes}"
