@@ -46,3 +46,15 @@ Issues nommées :
 
 ## Recoupement (duck.ai, `revue/poste4-duckai-30-09.md` Q4, 3 modèles d'accord)
 vLLM reconditionne Marlin AVANT le profilage mémoire et l'allocation du KV : l'ordre que ce correctif installe.
+
+## Fenêtre du 30/09 (16:09-16:26, carte.sh `poste1-aym-fenetre` 246 s, `poste1-aym-diag` 41 s ; début et fin : seul 8081, 15 Mio)
+Arbre poste1-aym 9af3ae15c puis 2 commits (ligne de journal VRAM), paquet 0.7.15 pour pps ; journal `scratchpad/poste1-fenetre-30-09/journal.txt`.
+* **Équivalence** : `tests/test_piles_au_chargement_aym.py -k carte` → **2 passed** (sorties des blocs au bit, génération T=0 identique, piles au chargement contre témoin paresseux).
+* **Coder-30B qkvo-i8c à 29 096 : issue (c)**, plus d'OOM mais un REFUS NOMMÉ au chargement : « 6,04 Gio libres pour 6,90 Gio de KV
+  planifié ». Chiffré : les piles coûtent **4,58 Gio NETS** (10,62 → 6,04 Gio libres, 48 couches) quand le plan leur compte 0
+  (Σ × 1, la Marlin « remplace » la naturelle). La prémisse du plan est fausse sur ce modèle : cause au code = pièce suivante (à sec).
+  Témoin (piles paresseuses) : meurt en OOM comme dans l'edz.
+* **qwen3-vl-30b-a3b vision à 32 768 : autre cause** — les piles tiennent (48 couches), puis OOM dans la tour de vision
+  (`vision.py:415`, `depuis_dossier`, appelée par `runner.py:673` APRÈS le KV) : la vision n'est pas au budget, ou les piles l'ont mangé.
+* Lecture : aym est au bit et remplace deux morts muettes par un refus nommé, sans faire servir ces modèles. Recommandé : l'entrer
+  (0.7.17) ; les faire servir passe par le coût réel des piles au plan (et la vision au budget).
