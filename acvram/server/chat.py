@@ -308,8 +308,29 @@ def messages_pour_gabarit(messages: list, avec_images: bool = False) -> list[dic
         for k in ("name", "tool_calls", "tool_call_id"):
             v = getattr(m, k, None)
             if v is not None:
-                d[k] = v
+                d[k] = arguments_en_objet(v) if k == "tool_calls" else v
         out.append(d)
+    return out
+
+
+def arguments_en_objet(tool_calls: list) -> list:
+    """1w1 (poste6 30/09, hypothèse poste1 sf2) : ``function.arguments`` d'un ``tool_call`` OpenAI est une CHAÎNE JSON
+    (contrat de l'API) ; les gabarits HF attendent un objet — Qwen3-Coder fait ``tool_call.arguments|items`` (TypeError sur
+    une chaîne → repli ChatML sans outils), d'autres ``tojson`` (la chaîne encodée deux fois). vLLM décode de même avant le
+    rendu ; ``messages_anthropic`` garde déjà l'objet côté /v1/messages. Copie (la requête n'est pas modifiée) ; JSON
+    invalide ou non-objet → ``{"arguments": <valeur d'origine>}``, le repli nommé d'``_entree_outil`` : rien n'est perdu,
+    rien ne casse. Déjà un objet, ou forme inconnue : inchangé. Forme HF à plat (``arguments`` au premier niveau) : idem."""
+    out = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            out.append(tc); continue
+        tc = dict(tc)
+        fn = tc.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            fn = dict(fn); fn["arguments"] = _entree_outil(fn["arguments"]); tc["function"] = fn
+        elif isinstance(tc.get("arguments"), str):
+            tc["arguments"] = _entree_outil(tc["arguments"])
+        out.append(tc)
     return out
 
 
