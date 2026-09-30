@@ -952,9 +952,18 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # seul le moment change. ACVRAM_PILES_AU_CHARGEMENT=0 : témoin (construction d avant, paresseuse).
     if a_allouer and os.environ.get("ACVRAM_PILES_AU_CHARGEMENT", "1") != "0":
         from .contexte import construire_piles_sur_carte
+        libre_avant = {d: torch.cuda.mem_get_info(d)[0] for d in {c.device for c in layers}
+                       if torch.device(d).type == "cuda"} if torch.cuda.is_available() else {}
         n_piles = construire_piles_sur_carte(layers)
         if n_piles:
-            print(f"[acvram] piles d experts construites au chargement, avant le KV : {n_piles} couches", flush=True)
+            # le coût NET des piles en régime établi (la Marlin remplace la naturelle : attendu ≈ 0), dit au journal —
+            # fenêtre du 30/09 : Coder-30B refusé ensuite à 6,04 Gio libres pour 6,90 Gio de KV planifié
+            if libre_avant:
+                torch.cuda.empty_cache()
+            net = " ; ".join(f"{d} : {v / 2**30:.2f} → {torch.cuda.mem_get_info(d)[0] / 2**30:.2f} Gio libres"
+                             for d, v in libre_avant.items())
+            print(f"[acvram] piles d experts construites au chargement, avant le KV : {n_piles} couches"
+                  + (f" ({net})" if net else ""), flush=True)
 
     # Chaque empilement alloue son tenseur concatene avant de liberer les deux
     # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent
