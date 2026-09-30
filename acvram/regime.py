@@ -402,6 +402,10 @@ VARIABLES: tuple[Variable, ...] = (
              "kv31b levier 2 étape 1 (30/09, OPT-IN, défaut 0 = un seul tenant) : préfill de l'attention par morceaux de N jetons "
              "d'invite, lots passés couche par couche (forward_tranches) ; au bit d'un seul tenant sous les mêmes chemins (morceau ≥ 128 "
              "lignes et > seuil de fusion gate/up pour une invite qui le dépasse, sinon ignoré et dit) ; hors récurrence linéaire"),
+    Variable("CHAUFFE_CACHE", "~/.cache/acvram/chauffe", None, None,
+             "kv31b (30/09) : dossier des mesures de pic de chauffe (un fichier par modèle : version, empreinte du converti, excès par "
+             "jeton) relues au chargement — la réserve de préfill en dépend, la ligne de régime nomme l'excès appliqué et sa source "
+             "(reserve_chauffe=) ; fichier absent ou périmé : formule seule, dit"),
     Variable("PREFILL_FILE", "0", ("acvram.engine.runner", "_PREFILL_FILE"), None,
              "pièce 276 k (OPT-IN) : 1 = dans le pas groupé, un forward par séquence dans l'ordre d'admission, jeton rapatrié "
              "après le lancement du forward suivant (copie épinglée + événement) et émis aussitôt (Engine.emettre) : le premier "
@@ -444,7 +448,6 @@ HORS_REGIME = frozenset({
     # tests/test_regime_noyaux.py::test_hors_regime_ne_cache_aucun_regime le garde.
     "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
     "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
-    "ACVRAM_CHAUFFE_CACHE",                                                     # dossier des mesures de chauffe (loader) : un chemin de fichier
     "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
     "ACVRAM_JOURNAL_ARRETS",                                                      # journal des arrêts de moteurs (5xw) : observation
     "ACVRAM_KERNELS_PRECOMPILES",                                                # 240 : dossier d'un .so précompilé — un chemin ; le .so servi est nommé par son empreinte

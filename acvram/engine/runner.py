@@ -984,6 +984,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "noyaux": regime_noyaux()["hors_defaut"],
             "eco": _etat_eco(),
             "kv_plan_override": self._kv_plan_override,
+            # kv31b : la réserve de préfill relit une mesure de chauffe (état hors du manifeste) — nommée ici, jamais tacite
+            "reserve_chauffe": __import__("acvram.engine.loader", fromlist=["reserve_chauffe_texte"]).reserve_chauffe_texte(
+                getattr(self.spec, "name", "") or ""),
             # poste7-devstral-llama4-scaling-18-09 : visible meme sous le
             # plafond (non refuse ici), pour ne jamais laisser croire que le
             # scaling est applique alors qu'il ne l'est nulle part.
@@ -1086,6 +1089,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + f"etroites={etroites_texte()} "
                + f"rapatriement={'epingle' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) and self.rapatriement_epingle else 'flux'} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
+               + f"reserve_chauffe={r['reserve_chauffe']} "
                + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"
                   f"({'servi' if self._llama4_servi else 'non_servi'}) "
                   if r["llama4_scaling_beta"] else "")

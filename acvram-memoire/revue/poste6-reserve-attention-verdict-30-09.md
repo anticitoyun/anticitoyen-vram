@@ -4,7 +4,7 @@ instrument : chiffres de la preuve carte du jour (journal de la prise 16:31 : 6,
 commit : 3de55de7e (sur 301b60449) ; `config.py` (`activations_prefill_bytes`), `loader.py` (`enregistrer_chauffe`, `lire_chauffe`, `_exces_mesure`), `contexte.py` (mesure du pic), `regime.py`/`cli.py` (ACVRAM_CHAUFFE_CACHE hors régime), `tests/test_reserve_attention_kv31b.py`
 régime : à sec ; les 3 tests seront joués demain avant tout push définitif (règle de la nuit : aucun pytest tant que la campagne p275 tourne, fin prévue 22 h 50-04 h 50)
 scellé : prédictions ci-dessous, écrites avant les tests et avant la carte
-verdict : (en attente des tests, puis de la carte)
+verdict : (en attente des tests, puis de la carte) — revue chef 30/09 intégrée : fichier de mesure porteur de la version et de l'empreinte du converti, ignoré ET dit s'il est absent/périmé/d'un autre converti, excès et source nommés au régime (`reserve_chauffe=`), ACVRAM_CHAUFFE_CACHE dans regime.VARIABLES (un chemin qui change le plan)
 durée : 0 min de carte
 
 ## Ce qui a été retenu (chef, duck.ai 30/09 nuit : profile_run de vLLM saute l'attention, 150 Mio fixes → pas une référence ; notre chauffe passe la vraie attention)

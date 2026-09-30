@@ -258,7 +258,8 @@ class ChauffeContexte:
         from .loader import enregistrer_chauffe
         spec = self.model.spec
         formule = int(spec.activations_prefill_bytes(tenu))
-        d = enregistrer_chauffe(getattr(spec, "name", "") or "modele", tenu, pic[1], formule,
+        manifest = getattr(self.loaded, "manifest", None) if hasattr(self, "loaded") else None
+        d = enregistrer_chauffe(getattr(spec, "name", "") or "modele", tenu, pic[1], formule, manifest=manifest,
                                 kv_format=self.kv_format_servi() if hasattr(self, "kv_format_servi") else "?",
                                 plafond=getattr(spec, "mlp_prefill_plafond", None), max_model_len=int(self.max_model_len))
         print(f"[acvram] chauffe : pic transitoire du préfill {pic[1] / 2**30:.2f} Gio à {tenu} jetons "
