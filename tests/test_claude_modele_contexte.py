@@ -16,7 +16,8 @@ def _fonctions() -> str:
     texte = SCRIPT.read_text()
     err = re.search(r"^err\(\) \{.*\}$", texte, re.M).group(0)
     mode = re.search(r"^mode_outils\(\) \{.*?^\}$", texte, re.M | re.S).group(0)
-    constantes = re.search(r"^TAMPON_COMPACTION=.*$", texte, re.M).group(0)
+    # ph1 (30/09) : bloc « Seuils » en tête du script (SEUIL_COMPLET … FENETRE_MIN), une seule source lue aussi par la GUI
+    constantes = re.search(r"^SEUIL_COMPLET=.*?^FENETRE_MIN=[^\n]*$", texte, re.M | re.S).group(0)
     sortie = re.search(r"^sortie_pour\(\) \{.*?^\}$", texte, re.M | re.S).group(0)
     return f"c_r=; c_0=\n{err}\n{mode}\n{constantes}\n{sortie}\n"
 

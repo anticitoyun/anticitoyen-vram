@@ -6,6 +6,19 @@
 # TabbyAPI n'expose pas cette API : non utilisable ici.
 # Usage : claude-modele [alias] [args de claude]
 set -uo pipefail
+# Seuils de fenêtre — UNE SEULE SOURCE, lue aussi par la GUI claude-modeles via `claude-modele --seuils` (ph1, poste6 30/09 :
+# une copie « seuil_minimum 15 096 » dans la GUI avait survécu au passage du lanceur à 29 120 ; entre les deux, la GUI
+# lançait puis le lanceur refusait). SEUIL_COMPLET : sous cette fenêtre, jeu d'outils « essentiel » (mode_outils) ;
+# PROMPT_BASE_ESSENTIEL : invite estimée de ce jeu ; MIN_REPONSE : réponse minimale exigée avant l'essai à blanc.
+# Compaction de claude 2.1.284 (menus, poste6 29/09, revue/poste6-menus-verdict-29-09.md) : TAMPON_COMPACTION (résumé),
+# SORTIE_MIN/SORTIE_MAX, MARGE_CONVERSATION — à relire à chaque version de claude (strings, « Auto-compact window »).
+# FENETRE_MIN : ce que sortie_pour exige de l'invite essentielle estimée (29 120) — le CTX_CLIENT_MIN demandé à acvram-serveur
+# et le seuil de refus affiché par la GUI.
+SEUIL_COMPLET=45000; PROMPT_BASE_ESSENTIEL=11000; MIN_REPONSE=4096
+TAMPON_COMPACTION=13000; SORTIE_MIN=1024; SORTIE_MAX=8192; MARGE_CONVERSATION=4096
+FENETRE_MIN=$(( PROMPT_BASE_ESSENTIEL + TAMPON_COMPACTION + MARGE_CONVERSATION + SORTIE_MIN ))
+# --seuils : imprime les seuils et sort AVANT de charger le parc (aucun python, aucun parc.toml : la GUI le joue au démarrage)
+if [ "${1:-}" = "--seuils" ]; then printf 'seuil_complet=%s\nseuil_minimum=%s\n' "$SEUIL_COMPLET" "$FENETRE_MIN"; exit 0; fi
 # parc.toml (acvram-parc) : chemins, ports, clés et moteurs du poste ; rien n'est codé ici
 PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
 _ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
@@ -91,12 +104,11 @@ modele_charge() {
 # rend 1 (message nommé) si la fenêtre ne tient pas l'invite du mode plus une réponse minimale.
 mode_outils() {  # $1 fenêtre servie (vide = inconnue)  $2 modèle  $3… args claude
   local ctx="$1" modele="$2" a; shift 2
-  local SEUIL_COMPLET=45000 MIN_REPONSE=4096
   OUTILS_ARGS=()
   MODE_OUTILS=complet; PROMPT_BASE=27000
   for a in "$@"; do case "$a" in --tools|--tools=*) MODE_OUTILS=utilisateur ;; esac; done
   if [ "$MODE_OUTILS" = complet ] && [ -n "$ctx" ] && [ "$ctx" -lt "$SEUIL_COMPLET" ] 2>/dev/null; then
-    MODE_OUTILS=essentiel; PROMPT_BASE=11000; OUTILS_ARGS=(--tools "Read,Edit,Bash,Grep" --disallowedTools "mcp__*")
+    MODE_OUTILS=essentiel; PROMPT_BASE=$PROMPT_BASE_ESSENTIEL; OUTILS_ARGS=(--tools "Read,Edit,Bash,Grep" --disallowedTools "mcp__*")
   fi
   case "$MODE_OUTILS" in
     complet)     LIGNE_OUTILS="complet (fenêtre ${ctx:-inconnue} ≥ $SEUIL_COMPLET)" ;;
@@ -116,8 +128,7 @@ mode_outils() {  # $1 fenêtre servie (vide = inconnue)  $2 modèle  $3… args 
 # compaction impossible : la conversation grossit jusqu'au 400 du moteur (« invite de 32 8xx jetons au-delà de
 # max_model_len 32 768 »). D'où : la sortie est ce qui laisse à la conversation MARGE_CONVERSATION jetons avant le
 # seuil ; en dessous de SORTIE_MIN, refus nommé avec la fenêtre nécessaire. Constantes du binaire 2.1.284 : à relire
-# à chaque version de claude (strings, « Auto-compact window »).
-TAMPON_COMPACTION=13000; SORTIE_MIN=1024; SORTIE_MAX=8192; MARGE_CONVERSATION=4096
+# à chaque version de claude (strings, « Auto-compact window »). Constantes définies en tête du fichier (bloc « Seuils »).
 sortie_pour() {  # $1 fenêtre  $2 invite (jetons)  $3 modèle → imprime la sortie ; rc 1 (message nommé) si rien ne tient
   local ctx="$1" invite="$2" modele="$3"
   local sortie=$(( ctx - TAMPON_COMPACTION - invite - MARGE_CONVERSATION ))
@@ -267,9 +278,9 @@ case "$choix" in
   acvram-*)
     # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte),
     # /v1/messages (API Anthropic) expose nativement par le serveur.
-    # fenêtre minimale = ce que sortie_pour exige de l'invite essentielle estimée : PROMPT_BASE 11 000 + tampon de
-    # compaction 13 000 + 4 096 de conversation + 1 024 de sortie = 29 120 (menus, poste6 29/09 ; 29 096 avant).
-    CTX_CLIENT_MIN=29120 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    # fenêtre minimale = FENETRE_MIN (tête du fichier) : ce que sortie_pour exige de l'invite essentielle estimée,
+    # 29 120 (menus, poste6 29/09 ; 29 096 avant) — le même chiffre que la GUI affiche en refus (ph1).
+    CTX_CLIENT_MIN=$FENETRE_MIN "$PARC_BIN/acvram-serveur" "$choix" || exit 1
     ctx=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f3)
     ctx_client=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f4)
     [ -n "$ctx_client" ] && [ "$ctx_client" -gt "${ctx:-0}" ] 2>/dev/null && ctx="$ctx_client"
