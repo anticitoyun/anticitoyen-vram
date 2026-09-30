@@ -166,10 +166,14 @@ def executer():
             return r.returncode
 
     for c in CANDIDATS:
-        print(f"=== {c['alias']} (bras={BRAS})")
-        r = subprocess.run(["outils/qualite.sh", c["alias"], BRAS], cwd=RACINE, env=_env())
+        # qualite.sh attend le nom du DOSSIER de référence (et le chemin sous
+        # racine_modeles()), pas l'alias GUI config.toml — les deux diffèrent
+        # (ex. "acvram-qwen3-coder-30b-a3b-qkvo-i8c-nvfp4" vs le dossier
+        # "Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c") ; confondus une première fois, corrigé.
+        print(f"=== {c['ref_dossier']} (bras={BRAS})")
+        r = subprocess.run(["outils/qualite.sh", c["ref_dossier"], BRAS], cwd=RACINE, env=_env())
         if r.returncode != 0:
-            print(f"FAUX sur {c['alias']} (rc={r.returncode}) — arrêt, pas de suite en aveugle", file=sys.stderr)
+            print(f"FAUX sur {c['ref_dossier']} (rc={r.returncode}) — arrêt, pas de suite en aveugle", file=sys.stderr)
             return r.returncode
     print("TENU sur les 3 modèles")
     return 0
