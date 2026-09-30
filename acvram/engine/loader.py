@@ -960,7 +960,11 @@ def load_model(path: str, plan: Optional[Plan] = None,
             # fenêtre du 30/09 : Coder-30B refusé ensuite à 6,04 Gio libres pour 6,90 Gio de KV planifié
             if libre_avant:
                 torch.cuda.empty_cache()
-            net = " ; ".join(f"{d} : {v / 2**30:.2f} → {torch.cuda.mem_get_info(d)[0] / 2**30:.2f} Gio libres"
+            # alloué ET réservé : un coût « net » qui serait du réservé non alloué = segments du bassin des petits blocs
+            # (2 Mio) épinglés par un petit tenseur survivant, pas des piles plus grosses (hypothèse de la pièce qui suit)
+            net = " ; ".join(f"{d} : {v / 2**30:.2f} → {torch.cuda.mem_get_info(d)[0] / 2**30:.2f} Gio libres, "
+                             f"alloué {torch.cuda.memory_allocated(d) / 2**30:.2f}, réservé {torch.cuda.memory_reserved(d) / 2**30:.2f}, "
+                             f"petits blocs {_petits_blocs(d)}"
                              for d, v in libre_avant.items())
             print(f"[acvram] piles d experts construites au chargement, avant le KV : {n_piles} couches"
                   + (f" ({net})" if net else ""), flush=True)
@@ -2054,6 +2058,14 @@ _DENSE_SLOTS = int(os.environ.get("ACVRAM_DENSE_SLOTS", "4"))
 
 _SUFFIXES_DOUBLES = {"mlp.gate_up": (".mlp.gate_proj.weight", ".mlp.up_proj.weight"),
                      "mlp.down": (".mlp.down_proj.weight",), "gdn.out": (".linear_attn.out.weight",)}
+
+
+def _petits_blocs(d) -> str:
+    """« réservé/alloué Gio » du bassin des petits blocs (< 1 Mio, segments de 2 Mio) de l allocateur : un expert de
+    Coder-30B (768 × 2 048 nvfp4 = 0,75 Mio) y vit ; un segment n est rendu que vide."""
+    st = torch.cuda.memory_stats(d)
+    return (f"{st.get('reserved_bytes.small_pool.current', 0) / 2**30:.2f}/"
+            f"{st.get('allocated_bytes.small_pool.current', 0) / 2**30:.2f}")
 
 
 def _octets_marlin(manifest: dict) -> int:
