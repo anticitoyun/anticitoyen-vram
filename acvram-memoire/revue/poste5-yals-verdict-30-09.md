@@ -49,3 +49,4 @@ sont à rejouer après le correctif de la cause 1, sinon ils redonneront 300 s.
   écriture atomique). Comptes avant → après : notes-modeles 463 → 459, usage-sources 719 → 712, ~/.kimi-code et
   ~/.kimi-code-local/config.toml 349 → 345 modèles chacun (yals 35, TOML relu, aucun des 4). Les fichiers GGUF restent sur le disque.
 * Cause 3 : anticitoyen-vram-zjf (P3), non corrigée.
+* Preuve réelle (poste1, rejeu edz 30/09 12 h 1x) : yals-agents-4b-kimi OK avec les lanceurs corrigés (300 s → réponse) ; orphelin kimi-yals de 10:21 tué par poste1 à 12:05.
