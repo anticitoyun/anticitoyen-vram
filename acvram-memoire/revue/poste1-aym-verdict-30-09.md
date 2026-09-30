@@ -43,3 +43,6 @@ Issues nommées :
 * (d) « repack Marlin » refusé → sert, mais sur le chemin d'avant : débit à mesurer.
 
 Équivalence : `pytest tests/test_piles_au_chargement_aym.py -k carte`, au bit.
+
+## Recoupement (duck.ai, `revue/poste4-duckai-30-09.md` Q4, 3 modèles d'accord)
+vLLM reconditionne Marlin AVANT le profilage mémoire et l'allocation du KV : l'ordre que ce correctif installe.
