@@ -83,10 +83,14 @@ _PREFILL_FILE = os.environ.get("ACVRAM_PREFILL_FILE", "0") == "1"
 # le morceau k+1 les relit par sa table de blocs). C'est la précondition de l'anneau (KV borné à la fenêtre glissante).
 # Numérique : au bit d'un seul tenant quand le cache KV rend ses K/V exactement (16 bits) ; en int8 les morceaux relisent
 # des K/V quantifiés, comme une reprise après le cache de préfixe. Déclaré au régime (« prefill=…(morceaux@N) »).
-try:
-    _PREFILL_MORCEAU = max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU", "0") or 0))
-except ValueError:
-    _PREFILL_MORCEAU = 0
+def _lire_morceau() -> int:
+    try:
+        return max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU", "0") or 0))
+    except ValueError:
+        return 0
+
+
+_PREFILL_MORCEAU = _lire_morceau()          # défini ici au premier niveau : cible `lu_a` de regime.VARIABLES (regime.masquer)
 # Au bit exige que chaque morceau — le dernier compris — prenne les MÊMES chemins qu'un seul tenant : au-dessus du seuil
 # de fusion gate/up (`attention.SEUIL_FUSION`, 256 : en dessous le MLP passe par la projection empilée, 1,8e-4 sur le
 # jouet) et au-dessus des chemins à petit M (jouet CPU : 32-96 lignes ≠ 128-160, mesuré). D'où un plancher de lignes.

@@ -104,4 +104,6 @@ def test_replique_la_fenetre_qui_tient_descend(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError) as e, contextlib.redirect_stderr(io.StringIO()):
         LD._borner_kv_avec_exil(p, man, lambda n: n, spec, max_model_len=31744, reserve=LD._reserve_prefill(spec, 31744, man, p))
     n = int(str(e.value).split("fenêtre qui tient : ")[1].split()[0])
-    assert 24576 <= n <= 28672, n            # sans le terme : 31 744, que la chauffe (20 480 tenus) démentait
+    # PRÉDIT 24 576-28 672 ; RENDU 29 696 (prédiction réfutée par le haut, dite) — sans le terme : 31 744, que la chauffe
+    # (20 480 tenus, KV dimensionné pour 31 744) démentait ; à 29 696 le KV serait dimensionné pour 29 696
+    assert 28672 <= n <= 30720, n
