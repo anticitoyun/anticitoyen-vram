@@ -1360,11 +1360,23 @@ def _fenetre_qui_tient(plan: Plan, spec: ModelSpec, manifest: dict, dev: str, bo
     gemma-4-31B à 32 768 (edz 30/09) : KV 15,1 Gio + préfill 10,4 Gio pour 28,1 − 5,8 − 1,6 : ≈ 25 000 tiennent."""
     base = int(borne_brute) + int(reserve_pleine)
     n = (int(max_model_len or 2048) // pas) * pas
-    while n >= pas:
-        if _kv_plancher(plan, spec, n, dev) + _reserve_prefill(spec, n, manifest, plan) <= base:
-            return n
-        n -= pas
-    return 0
+    # levier 1 (kv31b) : un modèle dense relancé à N verra son MLP passer par tranches (`_plafonner_mlp_prefill`) —
+    # la fenêtre annoncée se calcule donc avec la réserve plafonnée (à `_MLP_MORCEAU`), celle que la relance aura.
+    from . import attention as _att
+    plafond_avant = spec.mlp_prefill_plafond
+    m = _att._MLP_MORCEAU
+    tranches = (plafond_avant is None and m > 0 and not spec.num_experts
+                and not any("linear" in t for t in spec.layer_types))
+    if tranches:
+        spec.mlp_prefill_plafond = m
+    try:
+        while n >= pas:
+            if _kv_plancher(plan, spec, n, dev) + _reserve_prefill(spec, n, manifest, plan) <= base:
+                return n
+            n -= pas
+        return 0
+    finally:
+        spec.mlp_prefill_plafond = plafond_avant
 
 
 def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None,
@@ -1601,10 +1613,11 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
         # ainsi rendu 15,8 puis 152,2 jetons par seconde. On borne donc par ce
         # qui est réellement libre, mesuré ici.
         capacite = t.capacity
+        base_marge = t.capacity
         try:
             # `dev` est ici la chaîne du device, pas la fonction du module :
             # elle est masquée par la variable locale au-dessus.
-            libre = torch.cuda.mem_get_info(torch.device(t.name))[0]
+            libre, total = torch.cuda.mem_get_info(torch.device(t.name))
             # ATTENTION : ce `min` compare deux nombres de nature différente,
             # pas deux mesures interchangeables. `t.capacity` sort de
             # `build_tiers()` (tiering.py) DÉJÀ NET d'une réserve (800 Mio de
@@ -1621,12 +1634,17 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
             # comparerait des bases homogènes : `min(t.capacity, libre - la
             # même réserve)`, pas l'un brut contre l'autre net.
             capacite = min(capacite, libre)
+            # kv31b (poste6 30/09) : la marge se prend sur la CARTE ENTIÈRE, la même base que `_borner_kv_par_la_vram`
+            # (5 % de 34 Gio = 1,7 Gio). Prise sur `capacite` (5 % de 29,5 = 1,5), la remontée en VRAM ci-dessous rendait
+            # un MLP que la borne refusait 230 Mio plus loin : exil / remontée en boucle, « 1 Mio manquants » après 4
+            # tours, refus — réplique gemma-4-31B à 29,5 Gio libres alors que 29,0 et 30,0 servaient (balayage à sec).
+            base_marge = max(base_marge, int(total))
         except Exception:                           # noqa: BLE001
             pass
         # la même marge que la borne du KV (`_marge_carte`, pièce 156). La base
         # diffère encore : `capacite` est ici déjà nette de la réserve de
         # build_tiers (voir plus haut), la borne lit `libre` brut.
-        marge = _marge_carte(capacite, reserve, manifest)
+        marge = _marge_carte(base_marge, reserve, manifest)
         deplacees = 0
         # Pièce 146 : le KV AU-DESSUS du plancher (``kv_min``, une séquence de max_model_len) cède avant tout poids —
         # jamais d'exil pour loger du cache. Sans lui, le départage par la demande (tiering._rang) portait le KV de
@@ -2060,7 +2078,8 @@ def _mlp_exiles(plan: Plan) -> int:
     return sum(1 for l in plan.layers if l.mlp_storage == "cpu")
 
 
-def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, planifier) -> bool:
+def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, planifier,
+                           manifest: Optional[dict] = None) -> bool:
     """a5v (28/09, pièce 294 de poste5) : un modèle DENSE dont la réserve de préfill d un seul tenant exile des MLP
     (Devstral 24B à 32 768 : 13,41 Gio réservés, 10/40 MLP en RAM hôte, graphes coupés, 7,9 tok/s contre 94,5) garde ses
     poids si son MLP passe par tranches au-delà d un plafond : on cherche le PLUS GRAND plafond (multiple de 1 024,
@@ -2071,6 +2090,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     import io
     from . import attention as _att
     m = _att._MLP_MORCEAU
+    manifest_de = lambda p: manifest if manifest is not None else {"tensors": {}, "vision": "non"}
     ctx = int(max_model_len or 0)
     if (m <= 0 or ctx <= m or spec.num_experts or any("linear" in t for t in spec.layer_types)
             or spec.mlp_prefill_plafond is not None):
@@ -2079,21 +2099,43 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     if plein == 0:
         return False
 
-    def exiles(c: int) -> int:
+    def essai(c: Optional[int]) -> tuple[int, bool]:
+        """(MLP exilés, le plancher KV d'une séquence tient-il ?) avec le plafond ``c`` — le second est le critère même
+        de `_borner_kv_avec_exil` (VRAM libre − poids − marge(réserve) ≥ plancher), vrai quand CUDA est absent."""
         spec.mlp_prefill_plafond = c
         with contextlib.redirect_stdout(io.StringIO()):
             p = planifier()
-        return plein if p is None else _mlp_exiles(p)
-    plancher = exiles(m)
-    if plancher >= plein:
+        if p is None or not torch.cuda.is_available():
+            return plein if p is None else _mlp_exiles(p), True
+        bornes = _borner_kv_par_la_vram(p, manifest_de(p), lambda nom: torch.device(nom),
+                                        reserve=_reserve_prefill(spec, ctx, manifest_de(p), p))
+        tient = all(int(bornes[n]) >= _kv_plancher(p, spec, ctx, n) for n in bornes)
+        return _mlp_exiles(p), tient
+
+    def exiles(c: int) -> int:
+        return essai(c)[0]
+    plancher, tient_m = essai(m)
+    _, tient_plein = essai(None)
+    if plancher >= plein and (tient_plein or not tient_m):
+        # kv31b (poste6 30/09, gemma-4-31B à 32 768) : quand le KV d'une séquence exile déjà TOUS les MLP, la réserve
+        # d'un seul tenant (10,4 Gio) n'exile « pas plus » — a5v la gardait et le plancher KV ne tenait plus (15 refus).
+        # Ici : si la réserve plafonnée fait tenir le plancher là où la pleine échoue, elle est prise (branche ci-dessous).
         spec.mlp_prefill_plafond = None
         return False
-    bas, haut = m, ctx                                              # exiles(bas) == plancher ; exiles(ctx) == plein
+    if plancher >= plein:
+        # kv31b : le plus grand plafond qui TIENT sans exiler plus que le plafond minimal (à 33,6 Gio libres, gemma-4-31B :
+        # 4 096 → 33 MLP exilés et le plancher tenu ; 16 384 tiendrait aussi mais avec 47 exilés)
+        critere = lambda c: (lambda r: r[1] and r[0] <= plancher)(essai(c))
+        motif = "plancher KV tenu, réserve d'un seul tenant refusée"
+    else:
+        critere = lambda c: exiles(c) <= plancher                       # a5v : le plus grand plafond sans exil de plus
+        motif = f"seul tenant à {ctx} : {plein} MLP exilés ; plafonnée : {plancher}"
+    bas, haut = m, ctx                                              # critere(bas) vrai ; critere(ctx) faux
     while haut - bas > 1024:
         milieu = (bas + haut) // 2 // 1024 * 1024
         if milieu <= bas:
             break
-        if exiles(milieu) <= plancher:
+        if critere(milieu):
             bas = milieu
         else:
             haut = milieu
@@ -2101,8 +2143,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     seul = spec.activations_prefill_bytes(ctx)
     spec.mlp_prefill_plafond = bas
     print(f"[acvram] MLP dense par tranches au-delà de {bas} jetons : activations de préfill réservées "
-          f"{spec.activations_prefill_bytes(ctx) / 2**30:.2f} Gio au lieu de {seul / 2**30:.2f} (seul tenant à {ctx} : "
-          f"{plein} MLP exilés ; plafonnée : {plancher})", flush=True)
+          f"{spec.activations_prefill_bytes(ctx) / 2**30:.2f} Gio au lieu de {seul / 2**30:.2f} ({motif})", flush=True)
     return True
 
 
@@ -2149,7 +2190,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                                 kv_min={d: _kv_plancher(p, spec, max_model_len, d) for d in (p.kv_budget or {})})
             return p
         neuf = planifier()
-        if neuf is not None and _plafonner_mlp_prefill(spec, max_model_len, neuf, planifier):
+        if neuf is not None and _plafonner_mlp_prefill(spec, max_model_len, neuf, planifier, manifest):
             neuf = planifier()
         # a5v : sans chauffe (Engine direct, eval), une invite au-delà du plafond passerait d un seul tenant dans une
         # réserve qui ne la couvre plus — le seuil est posé ici ; la chauffe le remplace par le tenu prouvé. None sinon.
