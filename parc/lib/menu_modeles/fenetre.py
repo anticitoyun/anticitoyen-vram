@@ -260,6 +260,17 @@ class Fenetre(Adw.ApplicationWindow):
         except Exception:
             return False
 
+    def _sur_tri_natif_change(self, *_a):
+        """Pièce tri (30/09, repro écran réel de chef) : un clic d'en-tête laisse la ligne
+        SÉLECTIONNÉE ancrée à sa position-écran d'avant le tri ; les lignes au-dessus, dont le
+        contenu a changé de position, ne se redessinent ni ne se réallouent tant qu'on ne force
+        pas un passage — `queue_draw()` seul ne suffisait pas (testé). `scroll_to(0, …)` répare
+        la vue ; il lève sur une liste encore vide (au premier tri posé à la construction,
+        avant `_recharger`), d'où la garde."""
+        if self.selection.get_n_items():
+            self.vue_liste.scroll_to(0, None, Gtk.ListScrollFlags.NONE)
+        self.vue_liste.queue_draw()
+
     def _comparer_inconnu_en_fin(self, f, inconnu):
         """Comparateur pour une colonne où `inconnu(m)` (fiche absente : « non mesuré »,
         « inconnu ») doit rester en DERNIÈRE position, dans les DEUX sens — sinon le clic
@@ -308,6 +319,12 @@ class Fenetre(Adw.ApplicationWindow):
         filtree = Gtk.FilterListModel(model=self.store, filter=self.filtre)
         self.vue_liste = Gtk.ColumnView(show_row_separators=True, single_click_activate=False)
         self.sorter_natif = self.vue_liste.get_sorter()   # un seul critère, clic sur l'en-tête
+        # pièce tri (30/09, repro écran réel de chef) : un clic d'en-tête change l'ordre
+        # sans repeindre les lignes déjà à l'écran — le TEXTE des cellules change (vérifié,
+        # `_textes_visibles` le voit juste), seuls les PIXELS restent l'ancien rendu tant
+        # qu'on ne force pas un passage de peinture. `queue_draw` sur la vue entière après
+        # tout changement de tri, qu'il vienne du clic natif ou du tri multi-colonnes.
+        self.sorter_natif.connect("changed", self._sur_tri_natif_change)
         self.modele_trie = Gtk.SortListModel(model=filtree, sorter=self.sorter_natif)
         triee = self.modele_trie
         self.selection = Gtk.SingleSelection(model=triee, autoselect=True)
