@@ -1,5 +1,17 @@
 # Journal des changements
 
+## En préparation (0.7.17)
+
+### Piles d'experts MoE construites au chargement, avant le KV (aym)
+
+* Les piles d'experts et leur repack Marlin se construisaient après l'allocation du KV, qui remplit la carte jusqu'à la
+  marge : 18 MoE 30B (qwen3-coder-30b-a3b, qwen3-vl-30b-a3b) mouraient au démarrage à 29 096-32 768 jetons (OOM dans le
+  repack, ou chauffe à 0 jeton). Elles se construisent désormais au chargement, avant le KV — **au bit** du chemin
+  paresseux sur carte (sorties des blocs, génération T=0). `ACVRAM_PILES_AU_CHARGEMENT=0` = témoin.
+* Un OOM pendant le repack Marlin garde la pile naturelle (chemin d'avant), avec sa raison, au lieu de tuer le serveur.
+* Le chargeur dit la VRAM libre avant et après les piles. Sur Coder-30B, elles coûtent 4,58 Gio nets que le plan ne
+  compte pas encore : le serveur refuse désormais au chargement, nommément, au lieu de mourir en OOM.
+
 ## 0.7.16 (30/09/2026)
 
 ### Menus claude-modeles et kimi-modeles (paquet parc 0.1.10)

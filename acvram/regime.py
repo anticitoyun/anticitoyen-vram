@@ -245,6 +245,8 @@ VARIABLES: tuple[Variable, ...] = (
              "cqy (29/09, 0.7.15) : un masque d attention dense [q × kv] (préfixe en cache, fenêtre, images) au-delà de N octets est découpé d emblée par blocs de lignes, au bit du seul tenant sur carte (≥ 1 024 lignes) ; 0 = témoin (seul tenant, découpage après OOM seulement)"),
     Variable("MASQUE_LIGNES_MIN", "1024", ("acvram.engine.layers", "_MASQUE_LIGNES_MIN"), None,
              "cqy (29/09) : lignes par bloc au moins, pour un masque découpé ; refus sous 1 024 (blocs de 7 lignes : pas au bit sur carte)"),
+    Variable("PILES_AU_CHARGEMENT", "1", None, None,
+             "aym (30/09, 0.7.17) : piles d experts MoE et repack Marlin construits au chargement, AVANT le KV (au bit du témoin paresseux sur carte) ; un OOM du repack garde la pile naturelle, nommé ; 0 = témoin (construction paresseuse, après le KV)"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",

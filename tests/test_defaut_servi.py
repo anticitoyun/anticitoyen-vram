@@ -285,3 +285,7 @@ DEFAUTS_PAR_VERSION["0.7.15"] = ({**DEFAUTS_PAR_VERSION["0.7.14"][0], "MASQUE_OC
                                   "MASQUE_LIGNES_MIN": "1024"}, DEFAUTS_PAR_VERSION["0.7.14"][1])
 # 0.7.16 (30/09, menus et parc 0.1.10) : aucun défaut du moteur ne bouge.
 DEFAUTS_PAR_VERSION["0.7.16"] = DEFAUTS_PAR_VERSION["0.7.15"]
+# 0.7.17 (aym, 30/09) : piles d experts MoE et repack Marlin construits au chargement, avant le KV (PILES_AU_CHARGEMENT) —
+# au bit du témoin paresseux sur carte ; un OOM du repack garde la pile naturelle, nommé.
+DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_CHARGEMENT": "1"},
+                                 DEFAUTS_PAR_VERSION["0.7.16"][1])
