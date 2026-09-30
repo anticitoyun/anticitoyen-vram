@@ -226,8 +226,15 @@ def _pad_k(w: torch.Tensor, block: int) -> tuple[torch.Tensor, int]:
 #           seule la VALEUR de l'échelle de bloc change, elle reste arrondie en E4M3 avant le choix.
 # Le défaut du module est posé par `regler_echelle` (CLI `--echelle`) : la recherche AWQ et la
 # quantification finale passent toutes deux par `quantize_nvfp4`, donc par la même règle.
-ECHELLES = ("max6", "4sur6")
+ECHELLES = ("max6", "4sur6", "balayage", "balayage-w")
 _CANDIDATS_4SUR6 = (E2M1_MAX, 4.0)
+# ScaleSweep (arXiv 2606.07618, Lin & Wan, § 4.2.2 ; pièce poste6 30/09, HORS défaut) : pour chaque bloc de 16, les
+# échelles E4M3 dont le motif binaire est à −BAS…+HAUT de celui de s_base = amax/6 ; le moindre (W)MSE gagne. Bornes de
+# l'article : +7 motifs (12/7 s_base, lemme 4.1 : au-delà, s/2 fait toujours mieux), −3 motifs (4/5 s_base, lemme 4.3, MSE) ;
+# −8 (s_base/2, empirique) pour la WMSE, dont l'optimum peut descendre si le poids du max pèse peu. Le motif binaire d'un
+# E4M3 positif fini croît avec sa valeur (0x01 = 2⁻⁹ … 0x7E = 448), d'où l'arithmétique sur l'octet.
+_BALAYAGE_BAS, _BALAYAGE_HAUT, _BALAYAGE_BAS_W = 3, 7, 8
+_E4M3_CODE_MAX = 0x7E
 _echelle_defaut = "max6"
 
 
@@ -256,19 +263,73 @@ def _mse_bloc(wb: torch.Tensor, codes: torch.Tensor, bs: torch.Tensor) -> torch.
     return ((wb.abs() - vals) ** 2).sum(dim=-1)
 
 
+def _perte_bloc(wb: torch.Tensor, codes: torch.Tensor, bs: torch.Tensor,
+                imp: Optional[torch.Tensor]) -> torch.Tensor:
+    """(W)MSE par bloc : Σ imp_j (|w_j| − niveau[code_j] × bs)² ; ``imp`` [1, blocs, bloc] ou None (MSE)."""
+    vals = _levels_tensor(wb.device)[codes.long()] * bs.unsqueeze(-1)
+    err = (wb.abs() - vals) ** 2
+    if imp is not None:
+        err = err * imp
+    return err.sum(dim=-1)
+
+
+def sous_normales_e4m3(bs_e4m3: torch.Tensor) -> int:
+    """Nombre d'échelles E4M3 sous-normales (exposant nul, mantisse non nulle : 2⁻⁹ … 7·2⁻⁹) — celles que la conversion
+    Marlin (`marlin_port.echelles_ecrasees`) risque d'écraser à zéro (pièce 157, refus ya1)."""
+    c = bs_e4m3.view(torch.uint8)
+    return int(((c & 0x78) == 0).logical_and(c & 0x07 != 0).sum())
+
+
+def _balayer(wb: torch.Tensor, base_e4m3: torch.Tensor, gs: torch.Tensor, bas: int, haut: int,
+             imp: Optional[torch.Tensor], lignes: int = 512) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """ScaleSweep sur ``wb`` [sortie, blocs, bloc] : candidats = motifs E4M3 de base−bas à base+haut (bornés à 0x01…0x7E ;
+    un bloc de zéros, base 0x00, reste à zéro). Strictement mieux que s_base pour bouger (égalité → s_base) ; entre deux
+    candidats non-base à égalité, le premier balayé (le plus petit) reste. Par tranches de ``lignes`` (mémoire).
+    Rend (e4m3, effective, codes 3 bits, nombre de blocs ayant quitté s_base)."""
+    out_e4, out_eff, out_codes, n_mieux = [], [], [], 0
+    for i in range(0, wb.shape[0], lignes):
+        w = wb[i:i + lignes]
+        base = base_e4m3[i:i + lignes]
+        code_base = base.view(torch.uint8).to(torch.int16)
+        meilleur_e4 = base.clone()
+        meilleur_eff = base.to(torch.float32) * gs
+        meilleur_codes = _coder(w, meilleur_eff)
+        meilleur_perte = _perte_bloc(w, meilleur_codes, meilleur_eff, imp)
+        bouge = torch.zeros_like(meilleur_perte, dtype=torch.bool)
+        for d in range(-bas, haut + 1):
+            if d == 0:
+                continue
+            cand = (code_base + d).clamp(1, _E4M3_CODE_MAX).to(torch.uint8)
+            cand = torch.where(code_base == 0, torch.zeros_like(cand), cand)
+            e4 = cand.view(torch.float8_e4m3fn)
+            eff = e4.to(torch.float32) * gs
+            codes = _coder(w, eff)
+            perte = _perte_bloc(w, codes, eff, imp)
+            mieux = perte < meilleur_perte
+            meilleur_e4 = torch.where(mieux, e4, meilleur_e4)
+            meilleur_eff = torch.where(mieux, eff, meilleur_eff)
+            meilleur_codes = torch.where(mieux.unsqueeze(-1), codes, meilleur_codes)
+            meilleur_perte = torch.where(mieux, perte, meilleur_perte)
+            bouge |= mieux
+        n_mieux += int(bouge.sum())
+        out_e4.append(meilleur_e4); out_eff.append(meilleur_eff); out_codes.append(meilleur_codes)
+    return torch.cat(out_e4), torch.cat(out_eff), torch.cat(out_codes), n_mieux
+
+
 def quantize_nvfp4(
     weight: torch.Tensor,
     block: int = BLOCK,
     global_scale: Optional[torch.Tensor] = None,
     echelle: Optional[str] = None,
+    importance: Optional[torch.Tensor] = None,
 ) -> NVFP4Tensor:
     """Quantifie en NVFP4 un poids 2-D ``[sorties, entrées]``.
 
     Les blocs courent le long des entrées, c'est-à-dire de la dimension de
     réduction, ce qu'attend un produit matriciel orienté K : chaque tranche de
     16 porte sa propre échelle, si bien qu'un unique canal aberrant ne peut pas
-    aplatir toute une ligne. ``echelle`` : max6 | 4sur6 (voir ``ECHELLES``),
-    défaut = celui du module.
+    aplatir toute une ligne. ``echelle`` : max6 | 4sur6 | balayage | balayage-w (voir ``ECHELLES``),
+    défaut = celui du module. ``importance`` [entrées] : poids de la WMSE (≈ diag(XᵀX)), exigé par balayage-w.
     """
     echelle = echelle or _echelle_defaut
     if echelle not in ECHELLES:
@@ -312,8 +373,20 @@ def quantize_nvfp4(
         # outils/part-amax4.py dans les codes (plus grand code = niveau 4) — un candidat 4 clampé à 448 n est ni l un
         # ni l autre, il compte dans « clampés »
         stats["amax4"] = int((mieux & (e4.to(torch.float32) < E4M3_MAX)).sum())
+    elif echelle in ("balayage", "balayage-w"):
+        imp = None
+        if echelle == "balayage-w":
+            if importance is None:
+                raise ValueError("balayage-w exige importance [entrées] (poids de la WMSE)")
+            imp = importance.detach().to(torch.float32).reshape(-1)
+            if imp.numel() != orig_k:
+                raise ValueError(f"importance de {imp.numel()} entrées pour un poids à {orig_k}")
+            imp = torch.nn.functional.pad(imp, (0, k - orig_k)).view(1, k // block, block)
+        bs_e4m3, bs, codes, stats["balayes"] = _balayer(
+            wb, bs_e4m3, gs, _BALAYAGE_BAS_W if imp is not None else _BALAYAGE_BAS, _BALAYAGE_HAUT, imp)
     # clampés = échelle de bloc finale == E4M3_MAX : les deux candidats y sont confondus ou tronqués, 4sur6 sans effet
     stats["clampes"] = int((bs_e4m3.to(torch.float32) >= E4M3_MAX).sum())
+    stats["sous_normales"] = sous_normales_e4m3(bs_e4m3)
     sign = (wb < 0).to(torch.uint8) << 3
     codes = codes | sign
     codes = codes.reshape(out_f, k)

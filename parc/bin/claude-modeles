@@ -22,7 +22,7 @@ sys.path.insert(0, "/usr/share/acvram-parc/lib")
 _LIB_LOCALE = Path(__file__).resolve().parent.parent / "lib"
 if (_LIB_LOCALE / "acvram_parc.py").exists():
     sys.path.insert(0, str(_LIB_LOCALE))
-from menu_modeles.config import PARC, CONFIG, GUI_TEST  # noqa: E402
+from menu_modeles.config import PARC, CONFIG, GUI_TEST, seuils_lanceur  # noqa: E402
 from menu_modeles.fenetre import Fenetre, appliquer_habillage  # noqa: E402
 
 # ─── divergences propres à claude-modeles (S5, poste7-menus-cloture-19-09) ───
@@ -49,14 +49,12 @@ PROFIL = {
     "comfy_url": COMFY_URL,
     "port_web": PORT_WEB,
     "kimi_bin": None,
-    # chef 29/09 (vérification GUI P1) : repris de claude-modele, pas recopié à la main.
-    # SEUIL_COMPLET (parc/bin/claude-modele:94) : sous ce seuil, mode_outils() (:98-99)
-    # bascule en « essentiel » (Read/Edit/Bash/Grep, sans MCP) — l'alias se lance quand même.
-    "seuil_complet": 45000,
+    # ph1 (poste6 30/09) : seuils LUS dans le lanceur (`claude-modele --seuils`), jamais recopiés — la copie 15 096
+    # du 29/09 avait survécu au passage du lanceur à 29 120 (mesure de l'invite, menus) : entre les deux, la GUI
+    # lançait puis claude-modele refusait. seuil_complet (mode « essentiel », l'alias se lance) et seuil_minimum
+    # (refus au lancement, rien ne se lance) ; tests/test_seuils_lanceur_ph1.py casse si une copie chiffrée revient.
+    **seuils_lanceur("claude-modele"),
     "mention_reduit": "mode réduit : Read, Edit, Bash, Grep, sans MCP",
-    # seuil_minimum : refus au lancement — PROMPT_BASE(11000, mode essentiel, :99) +
-    # MIN_REPONSE(4096, :94) = 15096, contrôlé à claude-modele:106-107 (err + exit 1).
-    "seuil_minimum": 15096,
 }
 
 

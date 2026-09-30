@@ -7,6 +7,7 @@ Les constantes DIVERGENTES (icône, couleurs, bouton web, chemins d'outils propr
 """
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,6 +34,31 @@ SECRETS = PARC.secrets
 BIN = PARC.bin
 DOSSIERS_LANCEMENT = list(PARC.dossiers_lancement)
 DOSSIER_LANCEMENT_DEFAUT = DOSSIERS_LANCEMENT[0]
+
+
+def seuils_lanceur(nom):
+    """Seuils « réduit » (seuil_complet) et « refus » (seuil_minimum) du lanceur CLI `nom`, imprimés par
+    `<lanceur> --seuils` (une ligne `clé=valeur` par seuil) : la GUI n'en garde AUCUNE copie (ph1, poste6
+    30/09 — une copie « 15 096 » avait survécu au passage de claude-modele à 29 120, et la GUI lançait entre
+    les deux ce que le lanceur refusait). Lanceur du dépôt (parc/bin, à côté de cette lib) d'abord, sinon
+    celui du parc installé ; `nom` peut être un chemin absolu (tests). Valeur vide = pas de seuil (kimi-modele :
+    `seuil_minimum=`, aucun plancher de refus). Lanceur absent, muet ou en erreur :
+    aucun seuil (0 / None — la GUI n'affirme rien, le lanceur tranchera), dit sur stderr."""
+    absent = {"seuil_complet": 0, "seuil_minimum": None}
+    lanceur = Path(nom)
+    if not lanceur.is_absolute():
+        lanceur = _LIB_LOCALE.parent / "bin" / nom
+        if not lanceur.exists():
+            lanceur = BIN / nom
+    try:
+        r = subprocess.run([str(lanceur), "--seuils"], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            raise ValueError(f"rc {r.returncode} : {r.stderr.strip()[:200]}")
+        lu = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+        return {cle: (int(lu[cle]) if lu[cle].strip() else None) for cle in absent}   # vide = pas de seuil (kimi)
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        print(f"{lanceur} --seuils : {e} — aucun seuil affiché", file=sys.stderr)
+        return absent
 # Test en processus, sans clic ni X pilotable (Broadway rend un canvas noir, xdotool exige sudo) :
 # ACVRAM_GUI_TEST=clic:<attribut du bouton>[@<alias>] | filtre:<texte> | trier:<titre de colonne> — le gestionnaire est appelé comme par un clic,
 # À SEC (aucun processus lancé, aucune URI ouverte : argv et URI journalisés), le retour est imprimé en une ligne

@@ -283,3 +283,5 @@ DEFAUTS_PAR_VERSION["0.7.14"] = DEFAUTS_PAR_VERSION["0.7.13"]
 # 1 024 lignes (MASQUE_LIGNES_MIN, refus en dessous) — au bit du seul tenant sur carte.
 DEFAUTS_PAR_VERSION["0.7.15"] = ({**DEFAUTS_PAR_VERSION["0.7.14"][0], "MASQUE_OCTETS_MAX": str(256 << 20),
                                   "MASQUE_LIGNES_MIN": "1024"}, DEFAUTS_PAR_VERSION["0.7.14"][1])
+# 0.7.16 (30/09, menus et parc 0.1.10) : aucun défaut du moteur ne bouge.
+DEFAUTS_PAR_VERSION["0.7.16"] = DEFAUTS_PAR_VERSION["0.7.15"]

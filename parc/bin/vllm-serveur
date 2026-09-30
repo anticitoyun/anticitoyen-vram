@@ -207,16 +207,18 @@ admin_tabby=$(awk '/^admin_key:/{print $2}' /opt/ia/TabbyAPI/api_tokens.yml 2>/d
 [ -n "$admin_tabby" ] && curl -s -m 30 -X POST -H "Authorization: Bearer $admin_tabby" \
   http://127.0.0.1:5000/v1/model/unload >/dev/null 2>&1
 
+_remplaces=()   # PID arrêtés ici : la garde de carte les attend morts
 # un seul gros moteur à la fois : stopper llama.cpp s'il tourne
 if [ -f /mnt/AI_GENERATOR/llamacpp/serveur.pid ]; then
-  kill "$(cat /mnt/AI_GENERATOR/llamacpp/serveur.pid)" 2>/dev/null && sleep 3
+  _remplaces+=("$(cat /mnt/AI_GENERATOR/llamacpp/serveur.pid)")
+  kill "${_remplaces[-1]}" 2>/dev/null && sleep 3
 fi
 # filet de sécurité : tuer le vrai propriétaire du port 8080 (pid-file parfois faux)
 p8080=$(ss -tlnp 2>/dev/null | grep '127.0.0.1:8080' | grep -oP 'pid=\K[0-9]+' | head -1)
-[ -n "$p8080" ] && { kill "$p8080" 2>/dev/null; sleep 4; kill -9 "$p8080" 2>/dev/null; }
+[ -n "$p8080" ] && { _remplaces+=("$p8080"); kill "$p8080" 2>/dev/null; sleep 4; kill -9 "$p8080" 2>/dev/null; }
 
 if [ -f "$DIR/serveur.pid" ]; then
-  ancien=$(cat "$DIR/serveur.pid")
+  ancien=$(cat "$DIR/serveur.pid"); _remplaces+=("$ancien")
   kill "$ancien" 2>/dev/null && sleep 6
   kill -9 "$ancien" 2>/dev/null
 fi
@@ -225,16 +227,18 @@ fi
 # en mémoire et fait échouer le démarrage suivant en « cudaMalloc failed »
 [ -x "$HOME/.local/bin/liberer-vram" ] && "$HOME/.local/bin/liberer-vram" >/dev/null 2>&1
 
-# Tuer un moteur ne rend pas la VRAM instantanément : le pilote met plusieurs
-# secondes à récupérer 20 Go. Démarrer trop tôt échoue en « CUDA out of memory,
-# 291 MiB free » — une erreur qui accuse la taille du modèle alors que la carte
-# est simplement encore occupée par le précédent.
-for _ in $(seq 1 60); do
-  libre=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i 0 2>/dev/null | head -1)
-  [ -n "$libre" ] || break
-  [ "$libre" -gt 24000 ] 2>/dev/null && break
-  sleep 2
-done
+# CARTE RENDUE (kwh 30/09) : un moteur tué n'a pas encore rendu sa VRAM (le pilote la libère après que le PID a
+# quitté compute-apps) ; démarrer là-dessus finit en « CUDA out of memory » qui accuse la taille du modèle. L'ancien
+# « libre > 24 000 Mio » attendait à tort derrière un processus VIVANT et laissait partir trop tôt un gros modèle.
+# Garde partagée des trois lanceurs : parc/lib/carte_rendue.py (ne tue rien : l'appoint 8081 n'y est jamais touché).
+_carte_rendue=${PARC_CARTE_RENDUE:-$(dirname "$(readlink -f "$0")")/../lib/carte_rendue.py}
+[ -f "$_carte_rendue" ] || _carte_rendue=/usr/share/acvram-parc/lib/carte_rendue.py
+if [ -f "$_carte_rendue" ]; then
+  python3 "$_carte_rendue" --nom vllm --remplace "${_remplaces[*]:-}" --cartes "0" || exit 1
+else
+  err "avertissement : $_carte_rendue introuvable — démarrage sans attendre la carte"
+fi
+libre=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i 0 2>/dev/null | head -1)
 [ -n "${libre:-}" ] && printf '%s%s Mio libres sur la 5090%s\n' "$c_d" "$libre" "$c_0"
 
 LONGUEUR=(--max-model-len "$LMAX")

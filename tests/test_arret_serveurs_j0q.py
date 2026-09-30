@@ -157,7 +157,7 @@ echo Paris
     cfg.write_text(f'[chemins]\nkimi_dir = "{kimi}"\ntsv_dir = "{tsv}"\nsecrets = "{tmp_path}/secrets.env"\nbin = "{b}"\n\n'
                    f"[moteurs.acvram]\npresent = true\nport = {port}\n")
     env = {**os.environ, "ACVRAM_PARC_CONFIG": str(cfg), "TMR_ETAT": str(tmp_path / "etat"),
-           "TMR_RESULTATS": str(tsv / "menus-reels.tsv"), "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log"),
+           "TMR_RESULTATS": str(tsv / "menus-reels.tsv"), "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log"), "TMR_CARTE": "",
            "TMR_VERROUS": str(tmp_path / "carte-*.lock")}
     yield {"env": env, "port": port, "tsv": tsv / "menus-reels.tsv", "tmp": tmp_path, "qui": qui}
     for l in qui.read_text().splitlines() if qui.exists() else []:      # un test rouge ne laisse rien derrière lui

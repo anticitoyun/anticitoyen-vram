@@ -26,6 +26,9 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import pytest
+
+pytestmark = pytest.mark.usefixtures("recolte_carte")   # ked/7gb : aucun processus ne survit au test
 
 RACINE = pathlib.Path(__file__).resolve().parent.parent
 SCENARIO = RACINE / "tests" / "aux" / "carte_ticket_scenario2.sh"

@@ -119,6 +119,33 @@ def detecter_moteurs(ancien) -> dict[str, dict]:
     return m
 
 
+def chemin_yals(P) -> str:
+    """zjf (30/09) : kimi-yals du parc lit le dossier de YALS dans [moteurs.yals] chemin (aucun défaut de machine dans
+    le paquet). Un poste qui avait YALS avant le parc n'a pas ce chemin : on le prend (1) du lanceur personnel en place
+    (<bin>/kimi-yals, ligne YALS_DIR=…), (2) sinon d'un YALS vivant (/proc/<pid>/exe). Rend « » si rien ne le donne."""
+    cands = []
+    lanceur = Path(P.bin) / "kimi-yals"
+    try:
+        texte = lanceur.resolve().read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'(?m)^YALS_DIR=["\']?([^"\'\s$]+)', texte)
+        if m:
+            cands.append(Path(m.group(1)))
+    except OSError:
+        pass
+    racine = Path(os.environ.get("PARC_PROC", "/proc"))
+    for exe in racine.glob("[0-9]*/exe"):
+        try:
+            cible = Path(os.readlink(exe))
+        except OSError:
+            continue
+        if cible.name == "YALS":
+            cands.append(cible.parent)
+    for d in cands:
+        if (d / "YALS").is_file() and os.access(d / "YALS", os.X_OK):
+            return str(d / "YALS")
+    return ""
+
+
 def port_libre(voulu: int, occupe_par_moi: bool) -> int:
     def pris(p: int) -> bool:
         with socket.socket() as s:
@@ -482,6 +509,16 @@ def main() -> int:
 
     # 2. moteurs
     moteurs = detecter_moteurs(P)
+    if "yals" in moteurs and not moteurs["yals"].get("chemin"):
+        ch = chemin_yals(P)
+        if not ch:
+            dire("REFUS : [moteurs.yals] présent sans chemin, et ni le lanceur en place (kimi-yals, ligne YALS_DIR=) ni "
+                 "un YALS vivant ne le donne — kimi-yals du parc ne saurait pas où est YALS.")
+            dire(f"  À faire : ajouter chemin = \"<dossier>/YALS\" à [moteurs.yals] de {a.config or 'parc.toml'}, ou "
+                 "present = false si YALS n'est plus sur ce poste, puis relancer parc-installer.")
+            return 4
+        moteurs["yals"]["chemin"] = ch
+        dire(f"yals : chemin repris du poste → {ch}")
     if "acvram" in moteurs and not sm120:
         dire("acvram : présent mais aucune carte sm_120 (NVFP4 = sm_120) → classe acvram RETIRÉE des menus")
         del moteurs["acvram"]

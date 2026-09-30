@@ -41,6 +41,15 @@ _ici=$(dirname "$(readlink -f "$0")")
 [ -n "$CUDA_VISIBLE_DEVICES" ] || CUDA_VISIBLE_DEVICES=0
 export CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER
 
+# CARTE RENDUE (kwh, edz 30/09 00:48 : 10 OOM en 3 min au changement de modèle) : un serveur mort n'a pas encore
+# rendu sa VRAM. Garde partagée des trois lanceurs, parc/lib/carte_rendue.py (le pourquoi y est) ; $1 = PID remplacé.
+_carte_rendue=${PARC_CARTE_RENDUE:-$(dirname "$(readlink -f "$0")")/../lib/carte_rendue.py}
+[ -f "$_carte_rendue" ] || _carte_rendue=/usr/share/acvram-parc/lib/carte_rendue.py
+attendre_carte_rendue() {
+    [ -f "$_carte_rendue" ] || { err "avertissement : $_carte_rendue introuvable — démarrage sans attendre la carte"; return 0; }
+    python3 "$_carte_rendue" --nom acvram --cartes "$CUDA_VISIBLE_DEVICES" ${1:+--remplace "$1"} || exit 1
+}
+
 # déjà servi ? (avant la garde : le modèle en place occupe la VRAM qu'elle compte)
 servi=$(curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
     | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' \
@@ -77,6 +86,9 @@ else:
         exit 1
     fi
 fi
+
+# avant la garde : un serveur arrêté par un autre (menu, harnais) peut encore tenir la VRAM qu'elle compte
+attendre_carte_rendue ""
 
 # Garde VRAM : KV cache estimé pour CTX vs VRAM libre sur la carte sélectionnée.
 # Formule fp16 : 2 (K+V) × couches × têtes_kv × dim_tête × ctx × 2 octets.
@@ -131,7 +143,18 @@ if [ -n "$pid" ]; then
     _j="${ACVRAM_JOURNAL_ARRETS:-$HOME/.cache/acvram/arrets.journal}"; mkdir -p "$(dirname "$_j")" 2>/dev/null || true
     printf '%s\t%s\tSIGTERM\t%s\t%s\n' "$(date +%FT%T)" "$pid" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-160)" \
         "acvram-serveur : remplacé par $alias_nom (servait ${servi:-?}) session=${ACVRAM_SESSION:-?} poste=${ACVRAM_POSTE:-?}" >> "$_j" 2>/dev/null || true
-    kill "$pid" 2>/dev/null || true; sleep 4
+    kill "$pid" 2>/dev/null || true
+    # « sleep 4 » ne prouvait rien : on attend la mort (zombie compris), SIGKILL signé au-delà du délai
+    for _ in $(seq 1 "${ACVRAM_DELAI_TERM:-30}"); do
+        grep -qE '^[0-9]+ \(.*\) [ZX] ' "/proc/$pid/stat" 2>/dev/null || [ ! -e "/proc/$pid" ] && break
+        sleep 1
+    done
+    if [ -e "/proc/$pid" ] && ! grep -qE '^[0-9]+ \(.*\) [ZX] ' "/proc/$pid/stat" 2>/dev/null; then
+        printf '%s\t%s\tSIGKILL\t%s\t%s\n' "$(date +%FT%T)" "$pid" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-160)" \
+            "acvram-serveur : SIGTERM sans effet en ${ACVRAM_DELAI_TERM:-30} s" >> "$_j" 2>/dev/null || true
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    attendre_carte_rendue "$pid"
 fi
 
 # Rien de ce qui decide du placement ou du regime ne doit etre choisi en
@@ -192,20 +215,44 @@ else
     srv_pid=$!
 fi
 
-for _ in $(seq 1 120); do
+# Délai en secondes d'horloge, pas en tours : 120 tours de 2 s coupaient à 241 s des démarrages VIVANTS (edz
+# définitif 30/09, pps : 15 alias GLM-4.7-Flash / 32B à 32 768, chauffe 93-138 s + capture des graphes + recapture ;
+# 4 journaux finissent sur « Uvicorn running » juste après la coupure ; le plus long servi : 238 s).
+DELAI=${ACVRAM_DELAI_DEMARRAGE:-480}
+neuf_du_lancement() {
+    tail -c +$(( debut_log + 1 )) "$LOG" 2>/dev/null | grep -vE 'CUDACachingAllocator|gardée|^[[:space:]]*$' || true
+}
+SECONDS=0   # depuis le lancement du serveur, pas du lanceur (attente kwh de la carte exclue)
+while [ "$SECONDS" -lt "$DELAI" ]; do
     curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 \
         && { echo "acvram prêt sur 127.0.0.1:$PORT ($alias_nom)"; exit 0; }
-    # mort au démarrage (refus de budget KV, OOM, contexte non tenu) : le dire tout de suite, pas après 240 s
+    # mort au démarrage (refus de budget KV, OOM, contexte non tenu) : le dire tout de suite, pas après le délai
     # (t5e 27/09 : devstral à 65 536 refusé en quelques secondes, le menu attendait 4 min)
     if [ -n "${srv_pid:-}" ] && ! kill -0 "$srv_pid" 2>/dev/null; then
         # la cause, pas un avertissement : « disposition Marlin refusée … pile naturelle gardée » n est pas fatale
-        # (edz 28/09, gemma 12B bf16 : seule ligne citée, la vraie cause perdue) ; à défaut, la dernière ligne
-        neuf=$(tail -c +$(( debut_log + 1 )) "$LOG" 2>/dev/null | grep -vE 'CUDACachingAllocator|gardée|^[[:space:]]*$' || true)
-        cause=$(grep -E 'Error|Exception|non tenu|refus :|Killed' <<< "$neuf" | tail -1 || true)
+        # (edz 28/09, gemma 12B bf16 : seule ligne citée, la vraie cause perdue) ; « introuvable : [Errno 2] … manifest »
+        # ne contient pas « Error » (pps : gemma-4-12b-it-bf16, dossier non converti, cause perdue derrière « chargement »)
+        neuf=$(neuf_du_lancement)
+        cause=$(grep -E 'Error|Errno|Exception|introuvable|non tenu|refus :|Killed' <<< "$neuf" | tail -1 || true)
+        # kv31b (30/09) : le moteur dit la fenêtre qui TIENT (« [acvram] fenêtre qui tient : N jetons », loader
+        # `_fenetre_qui_tient`). Si le client l'accepte (CTX_CLIENT_MIN / col4 : claude 29 120, kimi 34 816) on relance
+        # UNE fois à N ; sinon refus nommé avec les deux chiffres — plus « réduire max_model_len » sans dire à combien.
+        tient=$(grep -oE '^\[acvram\] fenêtre qui tient : [0-9]+' <<< "$neuf" | tail -1 | grep -oE '[0-9]+$' || true)
+        if [ -n "$tient" ] && grep -q 'budget KV insuffisant' <<< "$cause"; then
+            if [ "$tient" -ge 1024 ] && [ -z "${ACVRAM_FENETRE_RELANCEE:-}" ] \
+               && { [ -z "$ctx_client_min" ] || [ "$tient" -ge "$ctx_client_min" ]; }; then
+                echo "acvram : fenêtre $CTX non tenue par la carte (budget KV) — relance à $tient jetons (fenêtre qui tient)"
+                ACVRAM_FENETRE_RELANCEE=1 exec "$0" "$CIBLE" "$tient"
+            fi
+            err "Alias refusé : fenêtre qui tient $tient jetons${ctx_client_min:+ < ctx≥$ctx_client_min requis par le client} (fenêtre demandée $CTX ; $(printf '%s' "$cause" | cut -c1-160))"
+            exit 1
+        fi
         err "acvram mort au démarrage : $(printf '%s' "${cause:-$(tail -1 <<< "$neuf")}" | cut -c1-240) (journal : $LOG)"
         exit 1
     fi
     sleep 2
 done
-err "acvram n'a pas démarré (voir $LOG)"
+# vivant mais pas prêt : dire depuis quand et où il en est (la dernière ligne du moteur POUR CE lancement), et que
+# le serveur tourne encore — il tient la carte ; l'arrêter reste à l'appelant (menu, harnais), comme avant
+err "acvram pas prêt en ${SECONDS} s (ACVRAM_DELAI_DEMARRAGE=$DELAI), serveur vivant${srv_pid:+ (PID $srv_pid)} — dernière étape : $(neuf_du_lancement | tail -1 | cut -c1-200) (journal : $LOG)"
 exit 1

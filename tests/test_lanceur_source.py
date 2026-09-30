@@ -27,7 +27,9 @@ def poste(tmp_path):
     src = LANCEUR.read_text().replace("PORT=${PARC_PORT_ACVRAM:-8090}", "PORT=1")
     assert "PORT=1" in src, "fixture : la ligne PORT du lanceur a changé — le test viserait le vrai port"
     lanceur = tmp_path / "acvram-serveur"; lanceur.write_text(src); lanceur.chmod(0o755)
-    env = {**os.environ, "HOME": str(home), "ACVRAM_SERVEUR_A_SEC": "1", "ACVRAM_PAQUET_BIN": str(paquet)}
+    env = {**os.environ, "HOME": str(home), "ACVRAM_SERVEUR_A_SEC": "1", "ACVRAM_PAQUET_BIN": str(paquet),
+           "ACVRAM_ATTENTE_VRAM": "0",
+           "PARC_CARTE_RENDUE": str(LANCEUR.parent.parent / "lib" / "carte_rendue.py")}   # kwh : la vraie carte hors du test ; test_attente_carte_kwh la simule
     env.pop("ACVRAM_ARBRE", None)
     return {"lanceur": lanceur, "env": env, "arbre": arbre, "paquet": paquet}
 
@@ -147,3 +149,41 @@ def test_mort_au_demarrage_dite_sans_attendre(poste, tmp_path):
     except subprocess.TimeoutExpired:
         pytest.fail("le lanceur attend encore un serveur mort")
     assert r.returncode == 1 and "acvram mort au démarrage" in r.stderr, r.stderr
+
+
+def _serveur_faux(poste, tmp_path, corps: str) -> dict:
+    """Paquet factice dont `serve` exécute `corps` (écrit dans le journal du lancement) ; journal et carte.sh du test."""
+    poste["paquet"].write_text("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'acvram 9.9.9'; exit 0; }\n" + corps)
+    env = {**poste["env"], "ACVRAM_CARTE_SH": str(tmp_path / "absent"), "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log")}
+    env.pop("ACVRAM_SERVEUR_A_SEC")
+    return env
+
+
+def test_pas_pret_nomme_vivant_et_derniere_etape_pps(poste, tmp_path):
+    """pps (edz définitif 30/09) : 15 alias coupés à 241 s par « acvram n'a pas démarré », serveur VIVANT en pleine
+    chauffe/capture, sans cause. Le lanceur dit le délai tenu, que le serveur vit, et la dernière ligne du moteur.
+    Rouge avant : 120 tours fixes (ACVRAM_DELAI_DEMARRAGE ignoré → timeout du test) et message sans cause."""
+    env = _serveur_faux(poste, tmp_path, "echo '[acvram] chauffe du contexte : 32768/32768 jetons tenus en 131.5 s'\nwhile :; do sleep 1; done\n")
+    env["ACVRAM_DELAI_DEMARRAGE"] = "3"
+    try:
+        r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True, env=env, timeout=20)
+    finally:
+        subprocess.run(["pkill", "-f", f"{poste['paquet']} serve"], capture_output=True)
+    assert r.returncode == 1, r.stderr
+    assert "pas prêt en" in r.stderr and "ACVRAM_DELAI_DEMARRAGE=3" in r.stderr and "serveur vivant" in r.stderr, r.stderr
+    assert "chauffe du contexte : 32768/32768" in r.stderr, r.stderr
+
+
+def test_delai_par_defaut_au_dela_de_240_s_pps(poste):
+    """Le défaut couvre le plus long démarrage servi (238 s) avec marge : 120 × 2 s ne le couvrait pas."""
+    src = poste["lanceur"].read_text()
+    assert "ACVRAM_DELAI_DEMARRAGE:-480" in src and "seq 1 120" not in src
+
+
+def test_mort_introuvable_nommee_pps(poste, tmp_path):
+    """pps : dossier non converti (acvram_manifest.json absent) — « introuvable : [Errno 2] … » ne contient pas
+    « Error » ; le lanceur citait « chargement de … », la dernière ligne. Rouge avant : cause = « chargement »."""
+    env = _serveur_faux(poste, tmp_path, "echo \"introuvable : [Errno 2] No such file or directory: '/m/acvram_manifest.json'\"\n"
+                                         "echo 'chargement de /m ...'\nexit 1\n")
+    r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True, env=env, timeout=30)
+    assert r.returncode == 1 and "acvram mort au démarrage : introuvable : [Errno 2]" in r.stderr, r.stderr

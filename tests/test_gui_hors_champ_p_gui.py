@@ -3,9 +3,11 @@ PAR CLIENT, tiré du code réel des lanceurs CLI, jamais une constante partagée
 et kimi-modeles :
   - claude-modele : SEUIL_COMPLET=45000 (parc/bin/claude-modele:94, mode_outils()) — sous ce
     seuil, mode « essentiel » (Read/Edit/Bash/Grep, sans MCP), l'alias se lance quand même ;
-    PROMPT_BASE(11000)+MIN_REPONSE(4096)=15096 (:94,99,106-107) — sous CE seuil, claude-modele
-    refuse (err + exit 1), rien ne se lance.
-  - kimi-modele : KIMI_MCP_CTX_MIN=65536 (parc/bin/kimi-modele:110,115) — sous ce seuil, MCP
+    FENETRE_MIN=29120 (PROMPT_BASE_ESSENTIEL 11000 + compaction 13000 + conversation 4096 + sortie
+    1024, tête du fichier ; ph1 30/09, 15096 avant menus) — sous CE seuil, claude-modele refuse
+    (mesure de l'invite, err + exit 1), rien ne se lance. La GUI LIT ces seuils (`--seuils`),
+    tests/test_seuils_lanceur_ph1.py ; aucune copie.
+  - kimi-modele : KIMI_MCP_CTX_MIN=65536 (tête du fichier, lu par `--seuils` — 90q 30/09) — sous ce seuil, MCP
     coupés, l'alias se lance quand même ; aucun plancher dur générique (kimi-modele ne refuse
     jamais lui-même pour une fenêtre trop petite, hors le repli propre à l'engin acvram, géré
     par acvram-serveur).
@@ -59,10 +61,18 @@ def test_claude_sous_seuil_minimum_refuse_sans_spawn(tmp_path):
     parc = _parc(tmp_path, 10000)
     rc, r = _jouer(parc, "claude-modeles", "clic:b_ouvrir@acvram-m")
     assert rc == 0 and r["spawns"] == []
-    assert any("10 000" in t and "15 096" in t for t in r["toasts"]), r["toasts"]
+    assert any("10 000" in t and "29 120" in t for t in r["toasts"]), r["toasts"]
 
 
-def test_claude_mode_reduit_entre_15096_et_45000_ne_bloque_pas(tmp_path):
+def test_claude_entre_15096_et_29120_refuse_sans_spawn(tmp_path):
+    """ph1 : le cas du bogue — 20 000 passait la copie 15 096 de la GUI, puis claude-modele refusait (29 120)."""
+    parc = _parc(tmp_path, 20000)
+    rc, r = _jouer(parc, "claude-modeles", "clic:b_ouvrir@acvram-m")
+    assert rc == 0 and r["spawns"] == []
+    assert any("20 000" in t and "29 120" in t for t in r["toasts"]), r["toasts"]
+
+
+def test_claude_mode_reduit_entre_29120_et_45000_ne_bloque_pas(tmp_path):
     parc = _parc(tmp_path, 30000)
     rc, r = _jouer(parc, "claude-modeles", "clic:b_ouvrir@acvram-m")
     assert rc == 0
@@ -73,7 +83,7 @@ def test_claude_complet_au_dela_de_45000_pas_de_mention(tmp_path):
     parc = _parc(tmp_path, 50000)
     rc, r = _jouer(parc, "claude-modeles", "clic:b_ouvrir@acvram-m")
     assert rc == 0
-    assert not any("45 000" in t or "15 096" in t for t in r["toasts"]), r["toasts"]
+    assert not any("45 000" in t or "29 120" in t for t in r["toasts"]), r["toasts"]
 
 
 def test_kimi_ne_refuse_jamais_meme_tres_bas(tmp_path):

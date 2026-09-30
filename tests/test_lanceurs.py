@@ -86,3 +86,19 @@ def test_llamacpp_cache_kv_jamais_de_types_melanges(sonde, attendu):
     bloc = bloc.replace('"$HOME/.local/bin/gguf-cache-compatible" "$MODELE" 2>/dev/null', f"echo {sonde}")
     r = subprocess.run(["bash", "-c", f"c_d=; c_0=\n{bloc}\necho \"$CK $CV\""], capture_output=True, text=True)
     assert r.stdout.strip().splitlines()[-1] == attendu, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("gabarit,rc,attendu", [("illisible", 1, "Gabarit illisible : "), ("lisible", 0, "--chat-template-file"),
+                                                ("", 0, "TMPL=0")])
+def test_llamacpp_gabarit_illisible_refus_nomme(tmp_path, gabarit, rc, attendu):
+    """kimi-linear 30/09 : GABARIT pointant vers le home d'un autre poste, ignoré en silence (`[ -f ] &&`), le modèle
+    servait le gabarit embarqué. Joue le bloc du lanceur (le script entier tue le 8080). Cassant sur l'ancien bloc."""
+    src = (PARC_BIN / "llamacpp-serveur").read_text()
+    debut = src.index("TMPL=()")
+    fin = src.index("# Sans gabarit imposé", debut)          # le bloc s'arrête au commentaire suivant
+    bloc = src[debut:fin]
+    chemin = {"illisible": "/nulle/part/kimi-linear-hermes.jinja", "lisible": str(tmp_path / "g.jinja"), "": ""}[gabarit]
+    (tmp_path / "g.jinja").write_text("{{ x }}")
+    r = subprocess.run(["bash", "-c", f'err() {{ echo "$*" >&2; }}\nGABARIT="{chemin}"\n{bloc}\necho "TMPL=${{#TMPL[@]}} ${{TMPL[*]:-}}"'],
+                       capture_output=True, text=True)
+    assert r.returncode == rc and attendu in r.stdout + r.stderr, r.stdout + r.stderr

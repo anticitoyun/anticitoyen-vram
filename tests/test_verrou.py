@@ -14,6 +14,8 @@ import torch
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient   # noqa: E402
 
+pytestmark = pytest.mark.usefixtures("recolte_carte")   # ked/7gb : aucun processus ne survit au test
+
 
 @pytest.fixture(scope="module")
 def client(converted):
