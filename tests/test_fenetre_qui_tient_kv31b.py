@@ -66,13 +66,18 @@ def test_le_refus_nomme_une_fenetre_exacte(monkeypatch, capsys):
     msg, p, spec, man, _ = _refus(monkeypatch, libre=int(28.1 * G))
     assert msg and "fenêtre qui tient : " in msg, msg
     n = int(msg.split("fenêtre qui tient : ")[1].split()[0])
-    assert 20000 <= n <= 28000, n
+    # levier 1 : la fenêtre annoncée compte la réserve PLAFONNÉE (MLP par tranches de 4 096 à la relance) : 31 744 à
+    # 28,1 Gio libres (23 552 avec la réserve d'un seul tenant, chiffre du verdict kv31b avant le levier)
+    assert 28000 <= n <= 32767, n
     assert f"[acvram] fenêtre qui tient : {n} jetons" in capsys.readouterr().err
-    # exactitude : N tient, N + 1 024 ne tient pas — avec le plan tel qu'exilé au refus
+    # exactitude : N tient, N + 1 024 ne tient pas — avec le plan tel qu'exilé au refus et la réserve plafonnée
     bornes = LD._borner_kv_par_la_vram(p, man, lambda nom: nom, reserve=0)
     base = int(bornes["cuda:0"])                                    # réserve 0 : libre − poids − marge de base
+    spec.mlp_prefill_plafond = 4096
     cout = lambda k: LD._kv_plancher(p, spec, k, "cuda:0") + LD._reserve_prefill(spec, k, man, p)
     assert cout(n) <= base < cout(n + 1024), (cout(n) / G, base / G, cout(n + 1024) / G)
+    spec.mlp_prefill_plafond = None
+    assert n > 23552, "la réserve plafonnée doit faire tenir plus que la pleine"
 
 
 def test_temoin_carte_large_ne_refuse_pas(monkeypatch):
