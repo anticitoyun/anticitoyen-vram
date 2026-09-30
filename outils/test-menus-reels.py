@@ -359,6 +359,7 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
     avant = serveurs_vivants(port_moteur) if port_moteur is not None else set()   # j0q/dlq : rien d'antérieur n'est arrêté
     # (claude, kimi) : cause « hors champ … » posée par la liste de la campagne (--liste, colonnes 2 et 3), sinon vide
     hc_claude, hc_kimi = (getattr(a, "hors_champ", None) or {}).get(alias, ("", ""))
+    libre = attendre_carte_libre() if moteur not in PERMANENTS else ""
     try:
         if moteur not in AUTO_CHARGES:
             if port is None:
@@ -447,6 +448,8 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
         ligne["verdict"] = "OK"
         return ligne
     finally:
+        if libre:
+            ligne["detail"] = libre + (" ; " + ligne["detail"] if ligne["detail"] else "")
         if moteur in PERMANENTS:
             ligne["arret"] = "service permanent laissé"
         elif port_moteur is not None and (a_arreter(moteur) or moteur in PORT_MOTEUR):
@@ -502,6 +505,41 @@ def cli_claude(p) -> str:
     """Version du CLI claude servi (cible du lien ~/.local/bin/claude : …/versions/<x.y.z>)."""
     f = p.bin / "claude"
     return f.resolve().name if f.exists() else "absent"
+
+
+# cni 30/09 00:48 : le serveur suivant démarrait dans la seconde où le précédent était rendu, VRAM pas encore libérée
+# (journal du verrou : « prise » avant « rendue ») — un OOM au démarrage en entraînait neuf autres en 3 min, chaque
+# mourant tenant encore la carte pendant le démarrage du suivant. Avant chaque bras : carte vide ou délai, nommé.
+CARTE = os.environ.get("TMR_CARTE", "0")          # index nvidia-smi de la carte servie ; vide = pas de contrôle (tests)
+SEUIL_LIBRE_MIO, DELAI_LIBRE = 1024, 120
+
+
+def carte_occupee() -> tuple[list[int], int]:
+    """(PID de calcul, Mio utilisés) sur la carte servie ; ([], 0) si le contrôle est coupé ou nvidia-smi muet."""
+    if not CARTE:
+        return [], 0
+    try:
+        q = lambda *a: subprocess.run(["nvidia-smi", "-i", CARTE, *a, "--format=csv,noheader,nounits"],
+                                      capture_output=True, text=True, timeout=20).stdout
+        pids = [int(x) for x in q("--query-compute-apps=pid").split() if x.strip().isdigit()]
+        return [x for x in pids if not est_permanent(x)], int((q("--query-gpu=memory.used").split() or ["0"])[0])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return [], 0
+
+
+def attendre_carte_libre(delai: int = DELAI_LIBRE, pas: float = 2.0) -> str:
+    """Attend qu'aucun processus ne calcule sur la carte servie et qu'elle soit sous SEUIL_LIBRE_MIO. Rend « » si
+    libre d'emblée, « carte libérée en N s », ou « carte NON libérée en N s (pids, Mio) » (le bras part quand même,
+    et sa panne éventuelle porte ce motif)."""
+    t0 = time.monotonic()
+    while True:
+        pids, mio = carte_occupee()
+        if not pids and mio <= SEUIL_LIBRE_MIO:
+            dt = time.monotonic() - t0
+            return f"carte libérée en {dt:.0f} s" if dt >= pas else ""
+        if time.monotonic() - t0 >= delai:
+            return f"carte NON libérée en {delai} s ({pids}, {mio} Mio)"
+        time.sleep(pas)
 
 
 def reporter(chemin: Path) -> int:
@@ -615,13 +653,15 @@ def main() -> int:
             with RESULTATS.open("a", encoding="utf-8") as f:
                 f.write("\t".join([l["alias"], l["date"]] + [l[c] for c in COLONNES[2:]]) + "\n")
             print(f"[{marque}{i}/{len(liste)}] {l['verdict']:5s} {m:9s} {al} {l['etape']} {l['cause'][:120]}", flush=True)
-            # une cause de configuration (alias ou chemin absent) ne change pas au second essai : pas de rejeu
-            if l["verdict"] == "PANNE" and not re.search(r"absent", l["cause"]):
+            # une cause de configuration (alias ou chemin absent) ne change pas au second essai : pas de rejeu ;
+            # hors --rapide, seul le préchargement est rejoué (cni : OOM en cascade, carte pas encore libérée)
+            if (l["verdict"] == "PANNE" and not re.search(r"absent", l["cause"])
+                    and (a.rapide or l["etape"] == "préchargement")):
                 pannes.append((al, m, e))
         return pannes
 
     pannes = passe(choix)
-    if a.rapide and pannes:
+    if pannes:
         print(f"rejeu unique de {len(pannes)} panne(s) en fin de liste", flush=True)
         passe(pannes, "rejeu ")
     return 0

@@ -48,6 +48,7 @@ def parc(tmp_path):
     # acvram-serveur factice : « acvram-panne » échoue ; « acvram-autre » sert un autre id ; sinon sert l'alias
     (b / "acvram-serveur").write_text(f'''#!/bin/sh
 echo "$1 ctx=$2 graphes=$GRAPHES min=$CTX_CLIENT_MIN" >> {tmp_path}/lanceur.log
+[ "$1" = acvram-intermittent ] && [ ! -e {tmp_path}/deja ] && {{ touch {tmp_path}/deja; echo "OOM au démarrage" >&2; exit 1; }}
 [ "$1" = acvram-panne ] && {{ echo "RuntimeError: cause au journal serveur" >> "$ACVRAM_SERVEUR_LOG"; echo "OOM simulé au chargement" >&2; exit 1; }}
 id="$1"; [ "$1" = acvram-autre ] && id=un-autre-modele
 setsid {sys.executable} {tmp_path}/serveur.py {port} "$id" >/dev/null 2>&1 < /dev/null &
@@ -65,7 +66,7 @@ exit 1
                    f"[moteurs.acvram]\npresent = true\nport = {port}\n")
     env = {**os.environ, "ACVRAM_PARC_CONFIG": str(cfg), "TMR_ETAT": str(tmp_path / "etat"),
            "TMR_RESULTATS": str(tsv / "menus-reels.tsv"),
-           "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log")}
+           "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log"), "TMR_CARTE": ""}
     yield {"env": env, "port": port, "tsv": tsv / "menus-reels.tsv", "tmp": tmp_path}
     # un test rouge ne laisse pas de faux serveur derrière lui (orphelins du 28/09 : arrêt sauté, port lu à None)
     r = subprocess.run(["ss", "-tlnpH"], capture_output=True, text=True)
@@ -212,6 +213,7 @@ def test_yals_moteur_arrete_apres_le_bras(parc, monkeypatch):
     m = _module()
     moteur = _port_libre()
     monkeypatch.setitem(m.PORT_MOTEUR, "yals", moteur)
+    monkeypatch.setattr(m, "CARTE", "")
     b = parc["tmp"] / "bin"
     (b / "kimi-modele").write_text(f'#!/bin/sh\nsetsid {sys.executable} {parc["tmp"]}/serveur.py {moteur} x '
                                    f'>/dev/null 2>&1 < /dev/null &\nsleep 1\necho Paris\n')
@@ -264,3 +266,33 @@ def test_cli_claude_mis_a_jour_n_arrete_pas_la_passe(parc):
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
     l = _lignes(parc)
     assert "cli claude 2.1.284" in l["acvram-bon"][12] and "cli claude 2.1.285" in l["acvram-degenere"][12], l
+
+
+def test_attend_la_carte_liberee_avant_le_bras(monkeypatch):
+    """cni 30/09 00:48 : un OOM au démarrage en entraînait neuf (le suivant démarrait avant que la VRAM du mourant soit
+    rendue). Le bras attend que la carte soit vide ; au délai, il part et le motif est nommé."""
+    m = _module()
+    etats = iter([([4242], 20000), ([], 9000), ([], 300)])
+    monkeypatch.setattr(m, "carte_occupee", lambda: next(etats))
+    assert m.attendre_carte_libre(delai=30, pas=0.01).startswith("carte libérée en")
+    monkeypatch.setattr(m, "carte_occupee", lambda: ([4242], 20000))
+    assert m.attendre_carte_libre(delai=0.05, pas=0.01) == "carte NON libérée en 0.05 s ([4242], 20000 Mio)"
+    monkeypatch.setattr(m, "carte_occupee", lambda: ([], 0))
+    assert m.attendre_carte_libre(delai=30, pas=0.01) == ""
+
+
+def test_panne_de_prechargement_rejouee_une_fois_hors_rapide(parc):
+    """Hors --rapide, une panne de PRÉCHARGEMENT est rejouée une fois en fin d'étape (les pannes de client, non)."""
+    cfg = Path(parc["env"]["ACVRAM_PARC_CONFIG"])
+    kimi = cfg.read_text().split('kimi_dir = "')[1].split('"')[0]
+    with open(Path(kimi) / "config.toml", "a") as f:
+        f.write('[models.acvram-intermittent]\nprovider = "acvram"\nmodel = "acvram-intermittent"\nmax_context_size = 32768\n')
+    liste = parc["tmp"] / "l.tsv"
+    liste.write_text("acvram-intermittent\nacvram-muet\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 0 and "rejeu unique de 1 panne" in r.stdout, r.stdout[-1500:] + r.stderr[-1500:]
+    brut = [l.split("\t") for l in parc["tsv"].read_text().splitlines() if l and not l.startswith("#")]
+    assert [(c[0], c[3], c[4]) for c in brut] == [("acvram-intermittent", "PANNE", "préchargement"),
+                                                  ("acvram-muet", "PANNE", "claude"),
+                                                  ("acvram-intermittent", "OK", "")], brut
+    assert "rejeu" in brut[2][12]
