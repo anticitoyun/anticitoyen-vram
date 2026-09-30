@@ -137,10 +137,10 @@ class Fenetre(Adw.ApplicationWindow):
         barre.append(self.b_outils)
         # puces vedettes (poste7-menus-vedettes-19-09 § 4) : premier mot-clé d'usage de la fiche
         self.b_vedettes = Gtk.ToggleButton(label="≈ Opus/Fable",
-                                           tooltip_text="Lignées ≈Opus / ≈Fable (fiche d'usage commençant par ≈)")
+                                           tooltip_text="Lignées ≈Opus / ≈Fable (classées depuis l'alias, jamais depuis la fiche d'usage)")
         self.b_vedettes.connect("toggled", self._sur_drapeaux)
         self.b_code_os = Gtk.ToggleButton(label="code Android/Linux",
-                                          tooltip_text="Fiche d'usage commençant par « code android/linux »")
+                                          tooltip_text="Lignée code android/linux (classée depuis l'alias, jamais depuis la fiche d'usage)")
         self.b_code_os.connect("toggled", self._sur_drapeaux)
         barre.append(self.b_vedettes)
         barre.append(self.b_code_os)
@@ -446,9 +446,9 @@ class Fenetre(Adw.ApplicationWindow):
             return False
         if self.filtre_outils and not m.outils_ok:
             return False
-        if self.filtre_vedettes and not (m.usage or "").startswith("≈"):
+        if self.filtre_vedettes and m.vedette not in ("≈Opus", "≈Fable"):
             return False
-        if self.filtre_code_os and not (m.usage or "").lower().startswith("code android/linux"):
+        if self.filtre_code_os and m.vedette != "code android/linux":
             return False
         if self.filtre_texte:
             txt = self.filtre_texte
@@ -617,6 +617,11 @@ class Fenetre(Adw.ApplicationWindow):
                     r["erreur"], rc = f"bouton inconnu : {nom}", 2
                 elif isinstance(b, Gtk.ToggleButton):
                     b.set_active(not b.get_active()); r["actif"] = b.get_active()
+                    # pièce tri/filtres (30/09) : les bascules de filtre (b_censure,
+                    # b_outils, b_vedettes, b_code_os) n'avaient aucun moyen de faire
+                    # constater un filtre qui ne trouve plus rien — visibles/total sont
+                    # ceux du modèle FILTRÉ réel, pas déclaratifs.
+                    r["visibles"], r["total"] = self.selection.get_n_items(), self.store.get_n_items()
                 else:
                     r["sensible"] = b.get_sensitive(); b.emit("clicked")
             elif genre == "trier":
