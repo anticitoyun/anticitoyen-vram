@@ -65,3 +65,13 @@ R élargi à l'image ; (e) Mistral/Devstral SWA = même mécanique, gain différ
 2. Groupes d'allocation et tables par groupe dans le runner, R fixe, noyaux inchangés (à sec : tiny modèle, S1 au bit avec fenêtre 4, bloc 2).
 3. Préfill de l'attention par morceaux pour le groupe fenêtre (S1 au bit sur un prompt > 5 fenêtres).
 4. Carte : S2-S6 sur gemma-4-31B à 32 768, puis kimi 34 816. Défaut : OFF (`ACVRAM_KV_FENETRE=1`) tant que S1-S6 ne sont pas tenus.
+
+## 6. Versé après coup (chef, duck.ai 30/09 soir, accord des 3 modèles)
+* Q1 : le préremplissage par morceaux de vLLM N'EST PAS au bit (ordre de réduction du softmax en ligne sur les morceaux de KV), et l'écart
+  peut changer un jeton échantillonné. Chez nous la règle reste le bit : découpe par LIGNES DE REQUÊTE, chaque ligne réduisant sur le même
+  KV, dans le même ordre, avec le même noyau (ce qui a rendu le masque par blocs de lignes d'poste1 au bit, 72/72). L'étape 1 suit cette
+  règle (`poste6-prefill-morceaux-verdict-30-09.md`) ; le jouet ajoute : mêmes chemins à petit M et même côté du seuil de fusion gate/up.
+* Q2 : llama.cpp garde un anneau strict et retombe en préremplissage complet quand l'état n'est pas reconstructible (recul au-delà de la
+  fenêtre) ; vLLM ne réutilise pas le préfixe hors fenêtre pour les couches à fenêtre glissante — comme prévu en § 2 (préfixe partagé hors
+  du groupe fenêtre ; recul spéculatif < fenêtre).
+* Écart 0,82 (duck.ai) contre 0,94 Mio/jeton (manifeste) : le manifeste (le code) fait foi, l'écart est noté.

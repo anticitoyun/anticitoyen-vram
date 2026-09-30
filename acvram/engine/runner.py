@@ -20,6 +20,7 @@ import json
 import os
 import threading
 import time
+import types
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Optional
@@ -76,6 +77,28 @@ _PREFILL_TRANCHES = os.environ.get("ACVRAM_PREFILL_TRANCHES", "1") == "1"
 # chacune rapatrié (copie épinglée + événement) APRÈS le lancement du forward suivant et ÉMIS aussitôt (`Engine.emettre`) — le
 # coût fixe du pas est payé une fois par groupe, la 4e requête n'attend plus la 7e (276 j : pas [1, 1, 3, 7], p50 +17 ms).
 _PREFILL_FILE = os.environ.get("ACVRAM_PREFILL_FILE", "0") == "1"
+# kv31b levier 2, étape 1 (poste6 30/09, ordre chef) : préfill de l'ATTENTION par morceaux de N jetons d'invite
+# (0 = OFF, défaut) — chaque morceau est un lot `_build_batch(limite=…)` comme le cache de préfixe en produit déjà, et
+# les morceaux passent COUCHE PAR COUCHE dans `forward_tranches` (284 b : à chaque couche, le morceau k écrit ses K/V puis
+# le morceau k+1 les relit par sa table de blocs). C'est la précondition de l'anneau (KV borné à la fenêtre glissante).
+# Numérique : au bit d'un seul tenant quand le cache KV rend ses K/V exactement (16 bits) ; en int8 les morceaux relisent
+# des K/V quantifiés, comme une reprise après le cache de préfixe. Déclaré au régime (« prefill=…(morceaux@N) »).
+try:
+    _PREFILL_MORCEAU = max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU", "0") or 0))
+except ValueError:
+    _PREFILL_MORCEAU = 0
+# Au bit exige que chaque morceau — le dernier compris — prenne les MÊMES chemins qu'un seul tenant : au-dessus du seuil
+# de fusion gate/up (`attention.SEUIL_FUSION`, 256 : en dessous le MLP passe par la projection empilée, 1,8e-4 sur le
+# jouet) et au-dessus des chemins à petit M (jouet CPU : 32-96 lignes ≠ 128-160, mesuré). D'où un plancher de lignes.
+_MORCEAU_LIGNES_MIN = 128
+
+
+def _morceau_min(fin: int) -> int:
+    """Lignes minimales d'un morceau (le dernier compris) pour une invite qui va jusqu'à ``fin`` : le seul tenant et les
+    morceaux doivent être du MÊME côté du seuil de fusion — invite ≤ seuil : tous fusionnés, le plancher suffit ;
+    invite > seuil : chaque morceau > seuil, comme le seul tenant."""
+    from .attention import SEUIL_FUSION
+    return _MORCEAU_LIGNES_MIN if fin <= int(SEUIL_FUSION) else max(_MORCEAU_LIGNES_MIN, int(SEUIL_FUSION) + 1)
 
 # Pièce 277e : pas de recouvrement gardés après un repli du spéculatif sur le pas simple (proposeur muet) avant de
 # revider pour reproposer (`_pas_speculatif`) ; 0 = reproposer à chaque pas. Sans effet sous --speculative none (défaut).
@@ -186,6 +209,7 @@ class EngineStats:
     decode_tokens: int = 0
     prefill_seconds: float = 0.0
     prefill_tranches: int = 0      # 284 b : pas de préfill passés couche par couche (preuve de prise)
+    prefill_morceaux: int = 0      # levier 2 étape 1 : invites passées par morceaux (preuve de prise)
     decode_seconds: float = 0.0
     running: int = 0
     waiting: int = 0
@@ -938,7 +962,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "chemin_moe": chemin_moe,
             # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
-            "prefill": kernels.prefill_regime() + self._prefill_coupe_texte(),
+            "prefill": kernels.prefill_regime() + self._prefill_coupe_texte() + self._prefill_morceau_texte(),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             # pièce 139 : « cublas+bf16(origine fp8 ×233) » quand des int8 ré-encodés du fp8 passent en déquant bf16
             "prefill_int8": kernels.prefill_int8_regime() + (
@@ -1348,6 +1372,90 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             return f"(coupé@{self._pas_insta})"
         return ""
 
+    def _prefill_morceau_texte(self) -> str:
+        """« (morceaux@N) » derrière `prefill=` quand le préfill de l'attention passe par morceaux (levier 2, étape 1)."""
+        return f"(morceaux@{_PREFILL_MORCEAU})" if self._morceaux_actifs() else ""
+
+    def _morceaux_actifs(self) -> bool:
+        # une couche à récurrence linéaire porte un état séquentiel entre morceaux (instantanés, MECANISMES 20/09 :
+        # « un prefill en deux morceaux n'a pas la numérique d'un morceau ») : hors périmètre, l'attention seule est visée
+        if _PREFILL_MORCEAU <= 0 or getattr(self.spec, "couches_recurrentes", 0):
+            return False
+        if _PREFILL_MORCEAU < _MORCEAU_LIGNES_MIN:
+            if not getattr(self, "_morceau_refus_dit", False):
+                self._morceau_refus_dit = True
+                print(f"[acvram] ACVRAM_PREFILL_MORCEAU={_PREFILL_MORCEAU} ignoré : un morceau doit faire au moins "
+                      f"{_MORCEAU_LIGNES_MIN} lignes (chemins à petit M) pour rester au bit d'un seul tenant", flush=True)
+            return False
+        return True
+
+    def _morceaux_pour(self, seq: Sequence, fin: int) -> bool:
+        """Cette invite se découpe-t-elle ? Active, plus longue qu'un morceau, et morceau ≥ `_morceau_min(fin)` (au-delà
+        du seuil de fusion pour une invite qui le dépasse — sinon elle passe d'un seul tenant, dit une fois)."""
+        if not self._morceaux_actifs() or fin - seq.prefill_len <= _PREFILL_MORCEAU:
+            return False
+        if _PREFILL_MORCEAU < _morceau_min(fin):
+            if not getattr(self, "_morceau_fusion_dit", False):
+                self._morceau_fusion_dit = True
+                print(f"[acvram] morceaux@{_PREFILL_MORCEAU} ≤ seuil de fusion gate/up : les invites au-delà de "
+                      f"{_morceau_min(fin) - 1} jetons passent d'un seul tenant (au bit exige des morceaux > seuil)", flush=True)
+            return False
+        return True
+
+    def _morceaux_requis(self, seqs: list) -> bool:
+        return any(self._morceaux_pour(s, len(s.prompt_ids)) for s in seqs)
+
+    @staticmethod
+    def _limites_morceaux(seq: Sequence, fin: int, morceau: int) -> list[int]:
+        """Bornes de fin ABSOLUES des morceaux, croissantes, la dernière = ``fin`` ; une borne qui tomberait dans une
+        image est déplacée par `_eviter_coupe_image` (au début de l'image si elle est encore à faire, sinon à sa fin :
+        une image se calcule d'un seul morceau). Ne modifie pas ``seq``."""
+        limites: list[int] = []
+        curseur = seq.prefill_len
+        while curseur < fin:
+            borne = min(fin, curseur + morceau)
+            if borne < fin:
+                borne = Engine._eviter_coupe_image(types.SimpleNamespace(prefill_len=curseur, images=seq.images), borne)
+            if borne <= curseur:                      # image plus longue que le morceau depuis son début : jusqu'à sa fin
+                borne = min(fin, next((im.fin for im in seq.images if im.debut <= curseur < im.fin), fin))
+            # un dernier morceau plus court que le plancher de lignes (`_morceau_min`) est fondu dans le précédent : il
+            # prendrait les chemins à petit M (fusion gate/up ≤ 256, décodage à q_len = 1…) que le seul tenant ne prend pas
+            if limites and fin - limites[-1] < _morceau_min(fin) and borne == fin:
+                limites[-1] = fin
+            else:
+                limites.append(borne)
+            curseur = borne
+        return limites
+
+    def _prefill_morceaux(self, seq: Sequence, fin: int) -> Optional[torch.Tensor]:
+        """Levier 2, étape 1 : l'invite de ``seq`` de `prefill_len` à ``fin`` par morceaux de `_PREFILL_MORCEAU` jetons,
+        chacun un lot `_build_batch(limite=…)`, tous passés couche par couche par `forward_tranches` (ou, si le modèle
+        refuse les tranches — images, deepstack, tête MTP —, l'un après l'autre par `forward`, découpés quand même).
+        Rend les logits du dernier morceau ; None si non applicable (réglage à 0, récurrence, invite ≤ un morceau).
+        ``seq.prefill_len`` est rendu tel que reçu : l'appelant le porte à ``fin`` comme pour un seul tenant."""
+        if not self._morceaux_pour(seq, fin):
+            return None
+        limites = self._limites_morceaux(seq, fin, _PREFILL_MORCEAU)
+        if len(limites) < 2:
+            return None
+        debut, n = seq.prefill_len, len(seq.prompt_ids)
+        lots = []
+        try:
+            for borne in limites:
+                lots.append(self._build_batch([seq], prefill=True, limite=borne if borne < n else None))
+                seq.prefill_len = borne
+        finally:
+            seq.prefill_len = debut
+        mtp_lue = getattr(self.speculator, "name", None) == "mtp"
+        if self.model.tranches_possibles(lots, mtp_lue):
+            logits = self.model.forward_tranches(lots)[-1]
+        else:
+            logits = None
+            for lot in lots:
+                logits = self.model(lot)
+        self.stats.prefill_morceaux += 1
+        return logits
+
     def _prefill_tranches(self, seqs: list) -> Optional[list]:
         """Pièce 284 b : la boucle « une par une » ci-dessous, réordonnée COUCHE PAR COUCHE (`forward_tranches`) —
         une première vague porte chaque séquence jusqu'à sa frontière d'instantané, puis les instantanés (comme
@@ -1744,10 +1852,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                            and s not in new] + a_prefiller
 
         if new and not budget and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
-                and all(self._frontiere_insta(s) is None for s in new) and _PREFILL_FILE and len(new) > 1:
+                and all(self._frontiere_insta(s) is None for s in new) and _PREFILL_FILE and len(new) > 1 \
+                and not self._morceaux_requis(new):
             outputs += self._prefill_en_file(new)
         elif new and not budget and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
-                and all(self._frontiere_insta(s) is None for s in new):
+                and all(self._frontiere_insta(s) is None for s in new) and not self._morceaux_requis(new):
             t0 = time.perf_counter()
             batch = self._build_batch(new, prefill=True)
             logits = self.model(batch)
@@ -1768,7 +1877,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # On précalcule les séquences nouvellement admises une par une.
             # Mêler une longue invite à un lot de décodage bloquerait derrière
             # elle toutes les séquences en cours.
-            if not budget and len(a_prefiller) > 1 and _PREFILL_TRANCHES:
+            if not budget and len(a_prefiller) > 1 and _PREFILL_TRANCHES and not self._morceaux_requis(a_prefiller):
                 faits = self._prefill_tranches(a_prefiller)
                 if faits is not None:
                     outputs += faits
@@ -1796,10 +1905,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 if budget:
                     fin = min(fin, seq.prefill_len + budget)
                     fin = self._eviter_coupe_image(seq, fin)
-                batch = self._build_batch(
-                    [seq], prefill=True,
-                    limite=fin if fin < len(seq.prompt_ids) else None)
-                logits = self.model(batch)
+                logits = self._prefill_morceaux(seq, fin)              # levier 2 étape 1 ; None = un seul tenant
+                if logits is None:
+                    batch = self._build_batch(
+                        [seq], prefill=True,
+                        limite=fin if fin < len(seq.prompt_ids) else None)
+                    logits = self.model(batch)
                 if os.environ.get("ACVRAM_CHRONO_SYNC"):
                     torch.cuda.synchronize()
                 self.stats.prefill_seconds += time.perf_counter() - t0
