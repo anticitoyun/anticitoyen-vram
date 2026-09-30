@@ -38,3 +38,14 @@ fin de tour : « completed » partout.
 ## Restes
 PID 2008404 (bash orphelin, tient un tuyau mort ; parent du proxy 5011) laissé, inoffensif. Les 4 délais d'poste1
 sont à rejouer après le correctif de la cause 1, sinon ils redonneront 300 s.
+
+## Suite (décisions chef, 30/09 12 h)
+* Cause 1 corrigée hors dépôt (aucun outil du dépôt ne génère ces scripts) : `~/.local/bin/kimi-yals` (proxy, YALS) et
+  `kimi-tabby` (proxy, TabbyAPI), 4 sites : redirection sur le sous-shell + `exec setsid nohup` ; sauvegardes
+  `*.avant-yals-20260930-120417`, écriture atomique, `bash -n` propre. Test à sec sur le TEXTE réel de chaque site
+  (commande remplacée par `sleep 8`, sous capture) : avant 8,0 s ×4, après 0,0 s ×4, démon vivant après retour ×4.
+  poste1 prévenue avant le rejeu de ses 4 délais.
+* Cause 2 : les 4 alias gemma4 sont retirés des menus (même méthode que lfm25 : sauvegardes `*.avant-yals-gemma4-<date>`,
+  écriture atomique). Comptes avant → après : notes-modeles 463 → 459, usage-sources 719 → 712, ~/.kimi-code et
+  ~/.kimi-code-local/config.toml 349 → 345 modèles chacun (yals 35, TOML relu, aucun des 4). Les fichiers GGUF restent sur le disque.
+* Cause 3 : anticitoyen-vram-zjf (P3), non corrigée.
