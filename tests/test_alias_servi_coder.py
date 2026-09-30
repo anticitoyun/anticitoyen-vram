@@ -54,6 +54,8 @@ ALIAS_PAR_VERSION = {
     "0.7.13": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
     # 0.7.14 (29/09, kimi/claude/vLLM, ya1, 8fx) : menus réparés, reprise après OOM, même alias.
     "0.7.14": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
+    # 0.7.15 (29/09, cqy masque découpé, menus GUI par client) : même alias.
+    "0.7.15": ("Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c", "efcc12e3417e8d53c9377956e38e65efa2d92344467c4afac499c77276832e15", 18432),
 }
 # Formats par famille, identiques pour i8c et S1b (107 bis § 6) : ce qui distingue les deux est dans les experts
 # (calibrés ou non), pas dans les formats.

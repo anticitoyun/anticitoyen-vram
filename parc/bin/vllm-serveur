@@ -134,7 +134,9 @@ case "$nom_min" in
                                     tp=hermes;      rp=deepseek_r1 ;;
   *devstral*|*mistral*|*magistral*|*dolphin*)
                                     tp=mistral;     rp="" ;;
-  *ernie*)                          tp=hermes;      rp=deepseek_r1 ;;
+  # ERNIE-4.5-Thinking écrit « </think> <response>…</response> » : deepseek_r1 laisse les balises
+  # <response> dans content, ernie45 les retire (gabarit et vocabulaire les portent, relevé 29/09)
+  *ernie*)                          tp=hermes;      rp=ernie45 ;;
   *glm*)                            tp=glm45;       rp=glm45 ;;
   *deepseek*v3.1*|*deepseek*v31*)   tp=deepseek_v31; rp=deepseek_r1 ;;
   *deepseek*)                       tp=deepseek_v3; rp=deepseek_r1 ;;

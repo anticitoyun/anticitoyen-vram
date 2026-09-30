@@ -110,14 +110,17 @@ def test_claude_modele_fenetre_servie(tmp_path, faux):
 
 def test_claude_modele_sortie_dans_la_fenetre(tmp_path, faux):
     """t5e 27/09 : claude réserve 32 000 jetons de sortie dans la fenêtre ; à 32 768 il refusait sans rien envoyer.
-    Sortie annoncée = fenêtre − PROMPT_BASE, plafonnée à 8 192. iqm 28/09 : à 32 768 le jeu est essentiel
+    Sortie annoncée = fenêtre − PROMPT_BASE, plafonnée à 8 192 (menus 29/09 : moins le tampon de compaction). iqm 28/09 : à 32 768 le jeu est essentiel
     (PROMPT_BASE 11 000 → 8 192), et la commande porte --tools Read,Edit,Bash,Grep sans MCP. Q40 : variables
     d'auto-mémoire et de skills posées, en-tête d'attribution coupé par --settings."""
     env = _poste_acvram(tmp_path, faux, 32768, '{"data":[{"id":"acvram-un"}]}')
     r = subprocess.run(["bash", str(PARC / "bin" / "claude-modele"), "--afficher", "acvram-un"],
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr[-600:]
-    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192" in r.stdout, r.stdout[-600:]
+    # menus (poste6 29/09) : sortie = fenêtre − 13 000 (tampon de compaction de claude 2.1.284) − invite − 4 096 de
+    # conversation = 4 672 pour l'invite estimée 11 000 (--afficher ne fait pas l'essai à blanc) ; compaction à 15 096
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS=4672" in r.stdout, r.stdout[-600:]
+    assert "invite 11000 jetons (estimée (sans essai)) · sortie 4672 · compaction à 15096" in r.stdout
     assert "outils : essentiel Read, Edit, Bash, Grep, sans MCP (fenêtre 32768 < 45000)" in r.stdout
     assert r"--tools Read\,Edit\,Bash\,Grep --disallowedTools mcp__\*" in r.stdout
     assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1" in r.stdout and "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1" in r.stdout

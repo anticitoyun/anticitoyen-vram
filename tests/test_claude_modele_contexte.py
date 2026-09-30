@@ -16,7 +16,9 @@ def _fonctions() -> str:
     texte = SCRIPT.read_text()
     err = re.search(r"^err\(\) \{.*\}$", texte, re.M).group(0)
     mode = re.search(r"^mode_outils\(\) \{.*?^\}$", texte, re.M | re.S).group(0)
-    return f"c_r=; c_0=\n{err}\n{mode}\n"
+    constantes = re.search(r"^TAMPON_COMPACTION=.*$", texte, re.M).group(0)
+    sortie = re.search(r"^sortie_pour\(\) \{.*?^\}$", texte, re.M | re.S).group(0)
+    return f"c_r=; c_0=\n{err}\n{mode}\n{constantes}\n{sortie}\n"
 
 
 def _mode(ctx: str, *args: str) -> tuple[int, str]:
@@ -72,7 +74,7 @@ def test_commande_porte_les_outils_du_mode():
 
 
 def test_fenetre_servie_au_dessus_de_la_colonne_3(tmp_path):
-    """edz 28/09 : acvram-serveur relève le contexte à CTX_CLIENT_MIN (29 096) pour une colonne 3 à 15 360 ; claude-modele
+    """edz 28/09 : acvram-serveur relève le contexte à CTX_CLIENT_MIN (29 120 depuis menus, 29 096 alors) pour une colonne 3 à 15 360 ; claude-modele
     ne prenait la fenêtre servie que si elle BAISSAIT le contexte → refus « 15360 insuffisant » d'un serveur qui tient 29 096."""
     import os, stat, subprocess
     racine = Path(__file__).resolve().parents[1]
@@ -82,7 +84,7 @@ def test_fenetre_servie_au_dessus_de_la_colonne_3(tmp_path):
     (tsv / "acvram-chemins.tsv").write_text(f"acvram-un\t{tmp_path}\t15360\n")
     exe(b / "acvram-serveur", "#!/bin/bash\nexit 0\n")
     exe(b / "curl", "#!/bin/bash\ncase \"$*\" in *models*) printf '%s' "
-        "'{\"data\":[{\"id\":\"acvram-un\",\"acvram\":{\"max_model_len\":29096}}]}' ;; esac\n")
+        "'{\"data\":[{\"id\":\"acvram-un\",\"acvram\":{\"max_model_len\":29120}}]}' ;; esac\n")
     exe(b / "faux-claude", "#!/bin/bash\necho \"CTX=$CLAUDE_CODE_MAX_CONTEXT_TOKENS\"\n")
     cfg = tmp_path / "parc.toml"
     cfg.write_text(f'[chemins]\ntsv_dir = "{tsv}"\nbin = "{b}"\nsecrets = "{tmp_path}/absent.env"\n'
@@ -91,4 +93,36 @@ def test_fenetre_servie_au_dessus_de_la_colonne_3(tmp_path):
            "PARC_EXEC": str(b / "faux-claude")}
     r = subprocess.run(["bash", str(racine / "parc" / "bin" / "claude-modele"), "acvram-un", "-p", "OK"],
                        capture_output=True, text=True, env=env, timeout=60)
-    assert r.returncode == 0 and "CTX=29096" in r.stdout, r.stdout[-400:] + r.stderr[-400:]
+    assert r.returncode == 0 and "CTX=29120" in r.stdout, r.stdout[-400:] + r.stderr[-400:]
+
+
+def _sortie(ctx: str, invite: str) -> tuple[int, str]:
+    prog = _fonctions() + 'MODE_OUTILS=essentiel; sortie_pour "$@"\n'
+    r = subprocess.run(["bash", "-c", prog, "--", ctx, invite, "mon-alias"], capture_output=True, text=True, timeout=5)
+    return r.returncode, r.stdout + r.stderr
+
+
+def test_sortie_laisse_la_compaction_possible():
+    """menus (poste6 29/09) : claude 2.1.284 compacte à fenêtre − sortie − 13 000 ; la sortie laisse 4 096 jetons de
+    conversation avant ce seuil. Invite edz 13 938 sur 32 768 : 32 768 − 13 000 − 13 938 − 4 096 = 1 734."""
+    assert _sortie("32768", "13938") == (0, "1734\n")
+    assert _sortie("34816", "15128") == (0, "2592\n")
+
+
+def test_sortie_plafonnee_a_8192():
+    assert _sortie("65536", "26000") == (0, "8192\n")
+
+
+def test_fenetre_trop_petite_pour_l_invite_mesuree():
+    """Invite 15 128 (crochets du projet) sur 32 768 : 544 < 1 024 de sortie minimale → refus avec la fenêtre
+    nécessaire 15 128 + 13 000 + 4 096 + 1 024 = 33 248 ; à 33 248 exactement, sortie 1 024."""
+    rc, out = _sortie("32768", "15128")
+    assert rc != 0 and "33248" in out and "15128" in out and "13000" in out and "essentiel" in out
+    assert _sortie("33248", "15128") == (0, "1024\n")
+
+
+def test_lancement_mesure_puis_choisit():
+    texte = SCRIPT.read_text()
+    assert '{ read -r invite; read -r ORIGINE_INVITE; } < <(mesurer_invite "$url" "$cle" "$modele" "$@")' in texte
+    assert 'sortie=$(sortie_pour "$ctx" "$invite" "$modele") || exit 1' in texte
+    assert 'export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$sortie"' in texte

@@ -40,6 +40,7 @@
   <supports><control>pointing</control><control>keyboard</control></supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.15" date="2026-09-29"><description><p>Large attention masks are split into row blocks up front (bit-exact), so long Claude Code prompts no longer run out of memory; model menus mark aliases below each client’s minimum context.</p></description></release>
     <release version="0.7.14" date="2026-09-29"><description><p>Model menus fixed for Claude Code and kimi (API keys, vLLM on RTX 5090, prompt order), expert stacks built before warm-up, and recovery after an out-of-memory prefill.</p></description></release>
     <release version="0.7.13" date="2026-09-29"><description><p>Marlin MoE kernels are now shipped in the .deb and the Flatpak (they were missing since 0.6.13), with a fingerprinted precompiled kernel. Claude Code tools work on local models served by acvram.</p></description></release>
     <release version="0.7.12" date="2026-09-28"><description><p>A startup warning when offloading would collapse throughput, with the context that fits without offloading. Menus and Open WebUI video models (Wan 2.2, LTX-2.3) in the companion parc package.</p></description></release>

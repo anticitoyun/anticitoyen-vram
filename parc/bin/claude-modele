@@ -109,6 +109,83 @@ mode_outils() {  # $1 fenêtre servie (vide = inconnue)  $2 modèle  $3… args 
   fi
 }
 
+# menus (poste6 29/09, binaire claude 2.1.284 lu à sec, revue/poste6-menus-verdict-29-09.md) : Claude Code
+# compacte quand la conversation atteint fenêtre − sortie − 13 000 (tampon de résumé, fonction SQ du binaire), bloque
+# à fenêtre − sortie − 3 000, et CLAUDE_CODE_AUTO_COMPACT_WINDOW n'accepte que 100k-1M (sans effet sous 100 k). Une
+# invite plus lourde que ce seuil (32 768 − 8 192 − 13 000 = 11 576, pour 13 938 jetons mesurés en edz) rend la
+# compaction impossible : la conversation grossit jusqu'au 400 du moteur (« invite de 32 8xx jetons au-delà de
+# max_model_len 32 768 »). D'où : la sortie est ce qui laisse à la conversation MARGE_CONVERSATION jetons avant le
+# seuil ; en dessous de SORTIE_MIN, refus nommé avec la fenêtre nécessaire. Constantes du binaire 2.1.284 : à relire
+# à chaque version de claude (strings, « Auto-compact window »).
+TAMPON_COMPACTION=13000; SORTIE_MIN=1024; SORTIE_MAX=8192; MARGE_CONVERSATION=4096
+sortie_pour() {  # $1 fenêtre  $2 invite (jetons)  $3 modèle → imprime la sortie ; rc 1 (message nommé) si rien ne tient
+  local ctx="$1" invite="$2" modele="$3"
+  local sortie=$(( ctx - TAMPON_COMPACTION - invite - MARGE_CONVERSATION ))
+  [ "$sortie" -gt "$SORTIE_MAX" ] && sortie=$SORTIE_MAX
+  if [ "$sortie" -lt "$SORTIE_MIN" ]; then
+    err "alias $modele : fenêtre $ctx jetons insuffisante pour l'invite mesurée ($invite jetons, outils $MODE_OUTILS) — Claude Code compacte à fenêtre − sortie − $TAMPON_COMPACTION ; il faut ≥ $(( invite + TAMPON_COMPACTION + MARGE_CONVERSATION + SORTIE_MIN )) jetons (invite + $TAMPON_COMPACTION + $MARGE_CONVERSATION de conversation + $SORTIE_MIN de sortie)"
+    return 1
+  fi
+  echo "$sortie"
+}
+# Mesure de l'invite de démarrage : claude -p contre un serveur factice local qui capture la requête portant la
+# sentinelle (les crochets de l'utilisateur peuvent en envoyer d'autres), comptée par /v1/messages/count_tokens du
+# moteur (acvram) ; moteur muet (llama.cpp, vLLM) ou capture manquée : octets/3,3 (mesuré 3,56-3,65 o/jeton, LFM2 et
+# Qwen, ratio pris conservateur). PARC_INVITE_JETONS=<n> impose la valeur (tests, edz) ; PARC_EXEC ou
+# PARC_MESURE_INVITE=0 ou --afficher : pas d'essai, PROMPT_BASE. Imprime deux lignes : jetons, origine. Un crochet
+# SessionStart lent retient claude (44 s vus le 29/09, ICM) : au-delà de 20 s l'essai est abandonné, PROMPT_BASE.
+mesurer_invite() {  # $1 base_url  $2 clé  $3 modèle  $4… args claude (seuls --tools/--disallowedTools comptent)
+  local url="$1" cle="$2" modele="$3"; shift 3
+  if [ -n "${PARC_INVITE_JETONS:-}" ]; then printf '%s\nimposée\n' "$PARC_INVITE_JETONS"; return; fi
+  if [ -n "${PARC_EXEC:-}" ] || [ "${AFFICHER:-0}" = 1 ] || [ "${PARC_MESURE_INVITE:-1}" = 0 ]; then printf '%s\nestimée (sans essai)\n' "$PROMPT_BASE"; return; fi
+  local outils=() a prev="" sentinelle="acvram-mesure-invite-$$"
+  for a in "$@"; do
+    case "$prev" in --tools|--disallowedTools|--allowedTools) outils+=("$prev" "$a") ;; esac
+    case "$a" in --tools=*|--disallowedTools=*|--allowedTools=*) outils+=("$a") ;; esac
+    prev="$a"
+  done
+  local capture; capture=$(mktemp -t acvram-invite.XXXXXX)
+  local port; port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+  python3 - "$port" "$capture" "$sentinelle" <<'PY' &
+import http.server, json, sys
+port, capture, sentinelle = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+class H(http.server.BaseHTTPRequestHandler):
+    def _json(self, code, d):
+        b = json.dumps(d).encode(); self.send_response(code)
+        self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+    def do_GET(self): self._json(200, {"object": "list", "data": []})
+    def do_POST(self):
+        b = self.rfile.read(int(self.headers.get("content-length", 0)))
+        if sentinelle.encode() in b:
+            open(capture, "wb").write(b)
+        self._json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "mesure de l'invite"}})
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+  local pid_faux=$!
+  sleep 0.2
+  ANTHROPIC_BASE_URL="http://127.0.0.1:$port" ANTHROPIC_AUTH_TOKEN=x ANTHROPIC_MODEL="$modele" \
+    timeout 20 "${PARC_CLAUDE/#\~/$HOME}" --strict-mcp-config --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" \
+    --settings '{"env":{"CLAUDE_CODE_ATTRIBUTION_HEADER":"0"}}' "${OUTILS_ARGS[@]}" "${outils[@]}" \
+    -p "$sentinelle" </dev/null >/dev/null 2>&1   # sur 400, claude réessaie deux fois et sort (~0,4 s) ; --max-turns 1 le laisse pendu
+  kill "$pid_faux" 2>/dev/null; wait "$pid_faux" 2>/dev/null
+  local n="" origine
+  if [ -s "$capture" ]; then
+    n=$(curl -s -m 20 -X POST "$url/v1/messages/count_tokens" -H "x-api-key: $cle" -H "Authorization: Bearer $cle" \
+          -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' --data-binary "@$capture" 2>/dev/null \
+        | python3 -c 'import json,sys
+try: v = json.load(sys.stdin).get("input_tokens")
+except Exception: v = None
+print(v if isinstance(v, int) and v > 0 else "")' 2>/dev/null)
+    if [ -n "$n" ]; then origine="mesurée par le moteur"
+    else n=$(( $(stat -c %s "$capture") * 10 / 33 )); origine="estimée à octets/3,3"; fi
+  else
+    n="$PROMPT_BASE"; origine="estimée (capture manquée)"
+  fi
+  rm -f "$capture"; printf '%s\n%s\n' "$n" "$origine"
+}
+
 lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ args claude]
   local url="$1" cle="$2" modele="$3" ctx="$4"; shift 4
   local code
@@ -143,12 +220,19 @@ for m in json.load(sys.stdin).get("data", []):
   [ -n "$ctx" ] && export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx"   # fenêtre réelle du moteur
   # claude réserve sa sortie maximale (32 000) DANS la fenêtre : à 32 768 il refuse sans rien envoyer
   # (« Prompt is too long », 0 requête — t5e 27/09, faux serveur). Sortie = ce qui reste après l'invite, 8 192 au plus.
+  # menus (poste6 29/09) : l'invite est MESURÉE (essai à blanc, voir mesurer_invite) et la sortie laisse à la
+  # conversation MARGE_CONVERSATION jetons avant le seuil de compaction ; fenêtre trop petite : refus nommé.
   if [ -n "$ctx" ]; then
-    local sortie=$(( ctx - PROMPT_BASE )); [ "$sortie" -gt 8192 ] && sortie=8192
+    local invite sortie ORIGINE_INVITE
+    { read -r invite; read -r ORIGINE_INVITE; } < <(mesurer_invite "$url" "$cle" "$modele" "$@")
+    sortie=$(sortie_pour "$ctx" "$invite" "$modele") || exit 1
     export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$sortie"
+    LIGNE_INVITE="invite $invite jetons ($ORIGINE_INVITE) · sortie $sortie · compaction à $(( ctx - sortie - TAMPON_COMPACTION ))"
   fi
   printf '\n%s→ claude sur %s (%s)%s\n' "$c_t" "$modele" "$url" "$c_0"
-  printf '%soutils : %s%s\n\n' "$c_t" "$LIGNE_OUTILS" "$c_0"
+  printf '%soutils : %s%s\n' "$c_t" "$LIGNE_OUTILS" "$c_0"
+  [ -n "${LIGNE_INVITE:-}" ] && printf '%s%s%s\n' "$c_t" "$LIGNE_INVITE" "$c_0"
+  printf '\n'
   # UN SEUL constructeur : --afficher imprime le tableau que l'exec reçoit (poste7 21/09) ;
   # PARC_EXEC=<programme> le reçoit à la place de claude (test à sec, quatre moteurs).
   # Q40 : l'en-tête « x-anthropic-billing-header » ouvre l'invite système ; une valeur qui change invalide le cache
@@ -183,8 +267,9 @@ case "$choix" in
   acvram-*)
     # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte),
     # /v1/messages (API Anthropic) expose nativement par le serveur.
-    # claude CLI charge ~24 150 jetons au démarrage (t5e 27/09) : PROMPT_BASE=25000 + MIN_REPONSE=4096.
-    CTX_CLIENT_MIN=29096 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    # fenêtre minimale = ce que sortie_pour exige de l'invite essentielle estimée : PROMPT_BASE 11 000 + tampon de
+    # compaction 13 000 + 4 096 de conversation + 1 024 de sortie = 29 120 (menus, poste6 29/09 ; 29 096 avant).
+    CTX_CLIENT_MIN=29120 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
     ctx=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f3)
     ctx_client=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f4)
     [ -n "$ctx_client" ] && [ "$ctx_client" -gt "${ctx:-0}" ] 2>/dev/null && ctx="$ctx_client"

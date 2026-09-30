@@ -116,9 +116,9 @@ def alias_du_menu(p) -> list[tuple[str, str, dict]]:
 
 
 def lanceur(p, alias: str, moteur: str, rapide: bool = False,
-            ctx_client: int = 29096, sans_claude: bool = False) -> tuple[list[str], dict[str, str], str | None] | str:
+            ctx_client: int = 29120, sans_claude: bool = False) -> tuple[list[str], dict[str, str], str | None] | str:
     """(argv, env, id attendu sur /v1/models) — ou la cause pour laquelle rien n'est lançable. Même résolution que
-    claude-modele/kimi-modele (colonnes des TSV), mêmes lanceurs ; CTX_CLIENT_MIN : celui de claude (29 096,
+    claude-modele/kimi-modele (colonnes des TSV), mêmes lanceurs ; CTX_CLIENT_MIN : celui de claude (29 120,
     claude-modele:151) — kimi-modele pose le sien (34 816) et relance si besoin ; un alias trop court pour kimi garde
     ainsi le résultat de claude au lieu de tomber au préchargement. `sans_claude` (claude hors champ, liste de la
     campagne) : préchargement du repli de kimi (kimi-modele:167), le seul chemin réel qui reste à l'alias."""
@@ -312,7 +312,10 @@ def queue(texte: str, n: int = 160) -> str:
 
 # Pièce claude (29/09) : claude termine TOUJOURS par « [claude-code:unrecognized_model] {…} » (116 réussites de la
 # liste-1 le portent) — la dernière ligne n'est pas la cause. La cause est la première ligne d'erreur nommée.
-MOTIFS_CAUSE = ("API Error", "Error:", "REFUS", "refus", "erreur", "mort au démarrage")
+# poste5-menus (29/09) : phi-4 sous claude — cause « Prompt is too long » (stdout), mais le repli rendait la dernière
+# ligne de stderr, l'avertissement « ⚠ claude.ai connectors are disabled » que claude imprime à CHAQUE lancement.
+MOTIFS_CAUSE = ("API Error", "Error:", "REFUS", "refus", "erreur", "mort au démarrage", "Prompt is too long")
+BRUIT_REPLI = ("connectors are disabled", "Permission allow rule")   # jamais une cause, même en dernière ligne
 
 
 def cause_de(stderr: str, stdout: str) -> str:
@@ -320,7 +323,8 @@ def cause_de(stderr: str, stdout: str) -> str:
         for l in (texte or "").splitlines():
             if any(m in l for m in MOTIFS_CAUSE) and "unrecognized_model" not in l:
                 return l.strip()[:160].replace("\t", " ")
-    return queue(stderr) or queue(stdout)
+    net = ["\n".join(l for l in (t or "").splitlines() if not any(b in l for b in BRUIT_REPLI)) for t in (stderr, stdout)]
+    return queue(net[0]) or queue(net[1]) or queue(stderr) or queue(stdout)
 
 
 def client(p, nom: str, alias: str, journal: Path, delai: int) -> tuple[str, str]:
@@ -400,7 +404,10 @@ def tester(p, cles: dict, alias: str, moteur: str, entree: dict, a) -> dict:
                                 "temperature": 0}, delai=min(a.delai_client, PLAFOND_RAPIDE) if a.rapide else a.delai_client)
                 msg = rep["choices"][0]["message"]
                 fin = rep["choices"][0].get("finish_reason")
-                brut = (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+                # vLLM ≥ 0.13 rend le raisonnement dans « reasoning » (protocol.py:71 en 0.29), plus dans
+                # « reasoning_content » : ne lire que l'ancien champ comptait un raisonnement coupé pour une réponse vide
+                brut = next((s for s in (str(msg.get(k) or "").strip()
+                                         for k in ("content", "reasoning", "reasoning_content")) if s), "")
                 final = contenu_final(msg.get("content") or "")
             except Exception as e:  # noqa: BLE001
                 return panne("complétion", f"{type(e).__name__} : {e}"[:200])
@@ -577,7 +584,7 @@ def main() -> int:
     ap.add_argument("--delai-client", type=int, default=600, help="délai de chaque client (s)")
     ap.add_argument("--liste", type=Path,
                     help="fichier d'alias (1re colonne, un par ligne) : joués dans CET ordre, même déjà dans le TSV")
-    ap.add_argument("--ctx-client", type=int, default=29096,
+    ap.add_argument("--ctx-client", type=int, default=29120,
                     help="CTX_CLIENT_MIN du préchargement acvram (34 816 : celui de kimi, évite son rechargement)")
     ap.add_argument("--rapide", action="store_true",
                     help=f"preuve réduite au modèle servi (/v1/models + réponse non vide), contexte {CTX_RAPIDE}, sans "

@@ -47,6 +47,14 @@ PROFIL = {
     "comfy_url": None,
     "port_web": PORT_WEB,
     "kimi_bin": KIMI_BIN,
+    # chef 29/09 (vérification GUI P1) : repris de kimi-modele, pas recopié à la main.
+    # KIMI_MCP_CTX_MIN (parc/bin/kimi-modele:110,115) : sous ce seuil, kimi_local() démarre
+    # sans MCP — l'alias se lance quand même, aucun `err`/`exit` associé (kimi-modele n'a
+    # pas d'équivalent au plancher dur de claude-modele, sauf le repli propre à l'engin
+    # acvram, géré et signalé par acvram-serveur lui-même : kimi-modele:166-167).
+    "seuil_complet": 65536,
+    "mention_reduit": "mode réduit : kimi sans MCP",
+    "seuil_minimum": None,
 }
 
 

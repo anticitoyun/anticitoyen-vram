@@ -334,6 +334,19 @@ class Fenetre(Adw.ApplicationWindow):
             lbl.set_text((m.usage or "").split(" · ")[0])
             lbl.set_tooltip_text(m.usage or None)
 
+        def rendu_ctx(lbl, m):
+            txt = f"{m.ctx:,}".replace(",", " ")
+            mode = self._mode_client(m)
+            if mode == "refuse":
+                lbl.set_markup(f'<span foreground="#e01b24">⛔ {txt}</span>')
+                lbl.set_tooltip_text(self._raison_mode_client(m, mode))
+            elif mode == "reduit":
+                lbl.set_markup(f'<span foreground="#e5a50a">◐ {txt}</span>')
+                lbl.set_tooltip_text(self._raison_mode_client(m, mode))
+            else:
+                lbl.set_text(txt)
+                lbl.set_tooltip_text(None)
+
         def rendu_caps(lbl, m):
             marques = []
             if "thinking" in m.capacites:
@@ -361,8 +374,7 @@ class Fenetre(Adw.ApplicationWindow):
             self._colonne("Refus", rendu_refus, lambda m: rang_refus(m.refus), 88,
                           inconnu=lambda m: m.refus == "inconnu"),
             self._colonne("Usage", rendu_usage, lambda m: (m.usage or "").lower(), 112),
-            self._colonne("Contexte", lambda l, m: l.set_text(f"{m.ctx:,}".replace(",", " ")),
-                          lambda m: m.ctx, 96),
+            self._colonne("Contexte", rendu_ctx, lambda m: m.ctx, 96),
             self._colonne("Capacités", rendu_caps, None, expand=True),
         ]
         for c in cols:
@@ -786,6 +798,27 @@ class Fenetre(Adw.ApplicationWindow):
     def toast(self, texte):
         self.toasts.add_toast(Adw.Toast(title=texte, timeout=4))
 
+    def _mode_client(self, m):
+        """« complet », « reduit » ou « refuse » pour l'alias `m`, sous CE profil (claude
+        ou kimi ont chacun leur seuil — jamais une constante partagée, cf. seuil_complet/
+        seuil_minimum du PROFIL, sourcés dans les lanceurs CLI). ctx=0 (inconnu) : complet,
+        rien à affirmer sur une fenêtre qu'on ne connaît pas."""
+        if not m.ctx:
+            return "complet"
+        seuil_min = self.profil.get("seuil_minimum")
+        if seuil_min and m.ctx < seuil_min:
+            return "refuse"
+        if m.ctx < self.profil["seuil_complet"]:
+            return "reduit"
+        return "complet"
+
+    def _raison_mode_client(self, m, mode):
+        if mode == "refuse":
+            return (f"{m.alias} : fenêtre {m.ctx:,} jetons — {self.profil['nom']} refuse en dessous de "
+                    f"{self.profil['seuil_minimum']:,} (ne se lance pas)").replace(",", " ")
+        return (f"{m.alias} : fenêtre {m.ctx:,} jetons < {self.profil['seuil_complet']:,} — "
+                f"{self.profil['mention_reduit']}").replace(",", " ")
+
     def _occupe(self, oui):
         self.b_stop.set_sensitive(oui)
         self.b_precharger.set_sensitive(not oui and bool(self.selection_courante()
@@ -904,6 +937,12 @@ class Fenetre(Adw.ApplicationWindow):
             self.toast(f"{MOTEURS[m.provider].nom} n'expose pas l'API Anthropic : "
                        "choisir un alias llamacpp-*, rapide-*, vllm-* ou acvram-*.")
             return
+        mode = self._mode_client(m)
+        if mode == "refuse":
+            self.toast(self._raison_mode_client(m, mode))
+            return
+        if mode == "reduit":
+            self.toast(self._raison_mode_client(m, mode))
         term = self._terminal()
         if term is None:
             self.toast("Aucun terminal graphique trouvé")
