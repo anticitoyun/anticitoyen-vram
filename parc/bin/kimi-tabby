@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# kimi-tabby — kimi sur un modèle EXL3 servi par TabbyAPI (exllamav3) : choix, démarrage du serveur, puis kimi.
+# Usage : kimi-tabby [alias] [arguments kimi...]
+#   kimi-tabby                        menu interactif
+#   kimi-tabby tabby-qwen38-27b-ara   lance directement cet alias
+# Importé dans le parc le 30/09 (zjf, avec kimi-yals, même famille) depuis un script personnel : chemins par parc.toml
+# et le config.yml de TabbyAPI, clés lues à l'exécution dans son api_tokens.yml, aucun chemin ni clé dans ce fichier.
+#   dossier : dossier de [moteurs.tabby] chemin (main.py) ou tokens, sinon KIMI_TABBY_DIR
+#   port du serveur et dossier des modèles : network.port et model.model_dir de <dossier>/config.yml
+#   port du proxy mémoire : KIMI_TABBY_PORT_PROXY (5001)
+set -uo pipefail
+
+PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
+_ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
+set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
+
+TABBY_DIR=${KIMI_TABBY_DIR:-$(dirname "${PARC_CHEMIN_TABBY:-${PARC_TOKENS_TABBY:-/opt/ia/TabbyAPI/x}}")}
+lire_conf() { awk -v k="$1" '$1 == k":" {print $2; exit}' "$TABBY_DIR/config.yml" 2>/dev/null; }
+TABBY_PORT=$(lire_conf port); TABBY_PORT=${TABBY_PORT:-${PARC_PORT_TABBY:-5000}}
+API="http://127.0.0.1:$TABBY_PORT"
+PROXY_PORT=${KIMI_TABBY_PORT_PROXY:-5001}
+MODELES_EXL3=$(lire_conf model_dir)
+REPONSE=$(mktemp); trap 'rm -f "$REPONSE"' EXIT      # corps de la réponse de /load (était /tmp/kimi-tabby-load.json)
+
+c_t=$'\e[1;35m'; c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_t=''; c_d=''; c_v=''; c_r=''; c_0=''; }
+
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+
+# --- liste des alias tabby : 7 colonnes tabulées --------------------------------
+lister_alias() {
+  python3 - "$PARC_CONFIG" "$PARC_NOTES_TSV" <<'PY'
+import sys, tomllib
+NOTES = {}
+try:
+    for ligne in open(sys.argv[2]):
+        c = ligne.rstrip('\n').split('\t')
+        if len(c) == 5:
+            NOTES[c[0]] = (c[1], c[2], c[3], c[4])
+except OSError:
+    pass
+
+d = tomllib.load(open(sys.argv[1], 'rb'))
+items = [(a, m) for a, m in d.get('models', {}).items()
+         if m.get('provider') == 'tabby']
+items.sort()
+for alias, m in items:
+    refus, tps, qual, usage = NOTES.get(alias, ('?', '?', '?', '?'))
+    print('\t'.join([alias, m.get('model', '?'), str(m.get('max_context_size', '')), refus, tps, qual, usage]))
+PY
+}
+
+# --- le disque des modèles doit être monté ----------------------------------
+monter_disque() {
+  [ -n "$MODELES_EXL3" ] || { err "model_dir absent de $TABBY_DIR/config.yml."; return 1; }
+  [ -d "$MODELES_EXL3" ] && return 0
+  local etiquette
+  etiquette=$(printf '%s' "$MODELES_EXL3" | awk -F/ '$2 == "mnt" {print $3}')
+  printf '%sDisque des modèles non monté, montage…%s\n' "$c_d" "$c_0"
+  [ -n "$etiquette" ] && udisksctl mount -b "/dev/disk/by-label/$etiquette" >/dev/null 2>&1
+  [ -d "$MODELES_EXL3" ] && return 0
+  err "Dossier des modèles introuvable : $MODELES_EXL3 (disque non monté ?)"
+  return 1
+}
+
+# --- clés d'API générées par tabby au premier démarrage ----------------------
+cle_api()   { awk '/^api_key:/{print $2}'   "$TABBY_DIR/api_tokens.yml" 2>/dev/null; }
+cle_admin() { awk '/^admin_key:/{print $2}' "$TABBY_DIR/api_tokens.yml" 2>/dev/null; }
+
+pid_port() { ss -tlnp 2>/dev/null | grep "127.0.0.1:$1 " | grep -oP 'pid=\K[0-9]+' | head -1; }
+
+# yals 30/09 : même défaut que kimi-yals — le sous-shell de `( cd … && setsid nohup X >> log & )` gardait le
+# stdout/stderr de l'appelant jusqu'à la mort de X. Redirection sur le sous-shell, exec vers le démon.
+detacher() {   # detacher <journal> <commande…>  (cwd = TABBY_DIR)
+  local journal=$1; shift
+  ( cd "$TABBY_DIR" && exec setsid nohup "$@" ) >> "$journal" 2>&1 < /dev/null &
+}
+
+# --- proxy mémoire + compaction automatique -----------------------------------
+demarrer_proxy() {
+  [ -n "$(pid_port "$PROXY_PORT")" ] && return 0
+  printf '%sDémarrage du proxy mémoire (journal + compaction)…%s\n' "$c_d" "$c_0"
+  PROXY_PORT=$PROXY_PORT PROXY_AMONT="$API" detacher "$TABBY_DIR/proxy.log" .venv/bin/python kimi-memoire-proxy.py
+  for _ in $(seq 1 15); do
+    [ -n "$(pid_port "$PROXY_PORT")" ] && return 0
+    sleep 1
+  done
+  err "Le proxy mémoire n'a pas démarré (voir $TABBY_DIR/proxy.log)."
+  return 1
+}
+
+# --- démarrage de TabbyAPI et attente de son port ---------------------------
+demarrer_tabby() {
+  if curl -s -m 3 "$API/health" | grep -q '"healthy"'; then
+    demarrer_proxy || return 1
+    return 0
+  fi
+  local pid; pid=$(pid_port "$TABBY_PORT")   # ce serveur-là, pas un « main.py » homonyme du poste
+  [ -n "$pid" ] && { kill "$pid" 2>/dev/null; sleep 2; }
+  printf '%sDémarrage de TabbyAPI…%s\n' "$c_d" "$c_0"
+  # RTX 5090 seule : la 3080 Ti est réservée à ComfyUI + modèle d'appoint (port 8081)
+  CUDA_VISIBLE_DEVICES=0 CUDA_DEVICE_ORDER=PCI_BUS_ID detacher "$TABBY_DIR/tabby.log" .venv/bin/python main.py
+  for _ in $(seq 1 60); do
+    curl -s -m 3 "$API/health" | grep -q '"healthy"' && { printf '%sTabbyAPI prêt sur 127.0.0.1:%s%s\n' "$c_v" "$TABBY_PORT" "$c_0"; demarrer_proxy; return 0; }
+    sleep 2
+  done
+  err "TabbyAPI n'a pas démarré (voir $TABBY_DIR/tabby.log)."
+  return 1
+}
+
+modele_charge() {
+  curl -s -m 3 -H "Authorization: Bearer $(cle_api)" "$API/v1/model" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null
+}
+
+# --- chargement du modèle via l'API admin ------------------------------------
+# Le format d'appels d'outils vient du tabby_config.yml posé dans chaque dossier
+# de modèle (model: tool_format: …) — prioritaire sur tout paramètre de requête.
+charger_modele() {
+  local modele="$1" ctx="$2" t0=$SECONDS actuel
+  actuel=$(modele_charge)
+  [ "$actuel" = "$modele" ] && { printf '%sModèle déjà chargé.%s\n' "$c_v" "$c_0"; return 0; }
+  printf '%sChargement de %s (contexte %s)…%s\n' "$c_d" "$modele" "$ctx" "$c_0"
+  local code
+  code=$(curl -s -m 900 -o "$REPONSE" -w '%{http_code}' \
+    -H "Authorization: Bearer $(cle_admin)" -H 'Content-Type: application/json' \
+    -d "{\"model_name\": \"$modele\", \"max_seq_len\": $ctx, \"cache_mode\": \"Q8\"}" \
+    "$API/v1/model/load")
+  if [ "$code" = "200" ]; then
+    printf '%sModèle chargé en %ss%s\n' "$c_v" "$((SECONDS - t0))" "$c_0"
+    return 0
+  fi
+  err "Échec du chargement (HTTP $code) : $(head -c 200 "$REPONSE" 2>/dev/null)"
+  return 1
+}
+
+# --- programme principal ----------------------------------------------------
+choix=""
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+  choix="$1"; shift
+fi
+
+if [ -z "$choix" ]; then
+  _lib="$_ici/../share/kimi-menu.lib.sh"; [ -f "$_lib" ] || _lib="$PARC_LIB"
+  . "$_lib"
+  choix=$(choisir_alias "Modèles TabbyAPI (exllamav3)" "$(modele_charge)") || exit 1
+fi
+
+modele=$(lister_alias | awk -F'\t' -v a="$choix" '$1 == a {print $2}')
+contexte=$(lister_alias | awk -F'\t' -v a="$choix" '$1 == a {print $3}')
+if [ -z "$modele" ]; then
+  err "Alias tabby inconnu : $choix"
+  err "Alias disponibles : $(lister_alias | cut -f1 | tr '\n' ' ')"
+  exit 1
+fi
+[ -n "$contexte" ] || contexte=65536
+
+# mode Auto dès le démarrage, sauf en mode prompt (-p) où kimi le refuse
+AUTO=(--auto)
+for arg in "$@"; do
+  case "$arg" in -p|--prompt|--output-format) AUTO=(); break;; esac
+done
+
+monter_disque || exit 1
+demarrer_tabby || exit 1
+# un seul gros moteur à la fois : stopper vLLM et llama.cpp s'ils tournent
+for pf in /mnt/AI_GENERATOR/vLLM/serveur.pid /mnt/AI_GENERATOR/llamacpp/serveur.pid; do
+  [ -f "$pf" ] && kill "$(cat "$pf")" 2>/dev/null && sleep 4
+done
+
+# filet de sécurité : tuer le vrai propriétaire des ports vLLM et llama.cpp (pid-file parfois faux)
+for port in "${PARC_PORT_VLLM:-8000}" "${PARC_PORT_LLAMACPP:-8080}"; do
+  p=$(pid_port "$port")
+  [ -n "$p" ] && { kill "$p" 2>/dev/null; sleep 4; kill -9 "$p" 2>/dev/null; }
+done
+
+# le serveur reçoit le DOUBLE du contexte de l'alias : kimi laisse le prompt croître
+# jusqu'à max_context_size ET envoie max_tokens = max_context_size (prompt + réponse).
+ctx_serveur=$(( contexte * 2 ))
+[ "$ctx_serveur" -gt 163840 ] && ctx_serveur=163840   # mesuré : 262144 charge mais l'inférence manque de VRAM
+charger_modele "$modele" "$ctx_serveur" || exit 1
+
+printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
+rm -f "$REPONSE"   # exec ne passe pas par le trap EXIT
+exec "$PARC_KIMI" "${AUTO[@]}" -m "$choix" "$@"

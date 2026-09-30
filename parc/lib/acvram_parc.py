@@ -119,7 +119,8 @@ class Parc:
         for cle, m in self.moteurs.items():
             K = cle.upper()
             lignes += [f"PARC_PORT_{K}={int(m['port'])}", f"PARC_CLE_{K}={q(m['cle_defaut'])}",
-                       f"PARC_ROUTE_{K}={q(m['route'])}", f"PARC_JOURNAL_{K}={q(m.get('journal', ''))}"]
+                       f"PARC_ROUTE_{K}={q(m['route'])}", f"PARC_JOURNAL_{K}={q(m.get('journal', ''))}",
+                       f"PARC_CHEMIN_{K}={q(m.get('chemin', ''))}"]   # kimi-yals / kimi-tabby : dossier du serveur
         for k, v in self.extras.items():
             if isinstance(v, (str, int, float)):
                 lignes.append(f"PARC_EXTRA_{k.upper()}={q(v)}")
