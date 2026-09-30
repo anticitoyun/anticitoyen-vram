@@ -126,8 +126,12 @@ kimi_local() {  # $1 alias  [$2 contexte servi]
     rm -f "$d/mcp.json"; printf '{"mcpServers": {}}\n' > "$d/mcp.json"
   fi
   [ -e "$src/AGENTS.md" ] && ln -sfn "$src/AGENTS.md" "$d/AGENTS.md"
-  # les CLE_* de ia-secrets.env sont des variables du shell, non exportées : passées explicitement
-  CLE_VLLM="${CLE_VLLM:-}" CLE_LLAMACPP="${CLE_LLAMACPP:-}" CLE_RAPIDE="${CLE_RAPIDE:-}" \
+  # les CLE_* de ia-secrets.env sont des variables du shell, non exportées : passées explicitement.
+  # tabby (edz définitif 30/09, 0/17, poste6) : TabbyAPI authentifie avec SON api_tokens.yml (qu'il génère lui-même), et le
+  # routeur 8790 n'accepte à l'entrée que cette clé-là pour /tabby — CLE_TABBY de ia-secrets.env (installateur 28/09) lui est
+  # inconnue : 16 × 401 « clé d'API invalide » au journal du routeur. La copie locale prend la clé du fichier, lue ici.
+  local cle_tabby=""; [ -r "${PARC_TOKENS_TABBY:-}" ] && cle_tabby=$(awk '/^api_key:/{print $2; exit}' "$PARC_TOKENS_TABBY")
+  CLE_VLLM="${CLE_VLLM:-}" CLE_LLAMACPP="${CLE_LLAMACPP:-}" CLE_RAPIDE="${CLE_RAPIDE:-}" CLE_TABBY="$cle_tabby" \
   python3 - "$CONFIG" "$d/config.toml" "$1" "${2:-}" <<'PY' || return 1
 import os, re, sys
 src, dst, alias, ctx = sys.argv[1:5]
@@ -136,7 +140,7 @@ t = open(src, encoding="utf-8").read()
 # n'accepte qu'une clé égale à une clé moteur de ia-secrets.env (CLE_*), que parc-installer a CRÉÉ le 28/09 avec des
 # clés aléatoires ; config.toml gardait les défauts d'avant (vllm-local…). Les fournisseurs routés prennent ici,
 # dans la copie locale seulement, la clé CLE_<MOTEUR> courante — une rotation des secrets ne casse plus kimi.
-for moteur in ("vllm", "llamacpp", "rapide"):
+for moteur in ("vllm", "llamacpp", "rapide", "tabby"):   # tabby : clé d'api_tokens.yml (30/09), pas de secrets
     cle = os.environ.get(f"CLE_{moteur.upper()}")
     if cle:
         bloc = re.compile(r"(^\[providers\." + moteur + r"\]\n(?:(?!^\[).*\n)*?)api_key = \"[^\"]*\"", re.M)
