@@ -74,3 +74,56 @@ def test_filtre_code_os_trouve_le_code_exclut_le_temoin(tmp_path, gui):
     assert d["actif"] is True
     assert d["visibles"] == 1, d          # ALIAS_CODE seul ; ALIAS_TEMOIN_CODE est un témoin exclu
     assert d["total"] == 5, d
+
+
+# ---- « Tous » remet les bascules à zéro (ordre chef, 30/09) ---------------
+
+@pytest.mark.parametrize("gui", ["claude-modeles", "kimi-modeles"])
+def test_tous_remet_les_bascules_a_zero(tmp_path, gui):
+    parc, _n = _parc_vedettes(tmp_path)
+    chemin = os.path.join(ICI, "parc", "bin", gui)
+    env = {**os.environ, "ACVRAM_GUI_TEST": "clic:moteur.acvram+b_vedettes+moteur.tous",
+          "ACVRAM_PARC_CONFIG": str(parc), "CUDA_VISIBLE_DEVICES": "",
+          "PYTHONPATH": os.path.join(ICI, "parc", "lib")}
+    env.pop("XDG_CONFIG_HOME", None)
+    r = subprocess.run(["xvfb-run", "-a", "--server-args=-screen 0 1340x900x24", PY, chemin],
+                       capture_output=True, text=True, env=env, timeout=60)
+    lignes = [l for l in r.stdout.splitlines() if l.startswith("GUI_TEST ")]
+    assert len(lignes) == 1, r.stdout[-800:] + r.stderr[-800:]
+    d = json.loads(lignes[0][len("GUI_TEST "):])
+    assert "erreur" not in d, d
+    # le filtre moteur « acvram » puis la bascule « vedettes » ont été activés, dans cet ordre ;
+    # « Tous » doit avoir ramené moteur ET vedettes à l'état neutre : 2/2 visibles (pas 1/2 — la
+    # bascule vedettes ne filtre plus), et la bascule est bien rendue inactive.
+    assert d["bascules"] == {"censure": False, "outils": False, "vedettes": False,
+                             "code_os": False, "tous": True}, d
+    assert d["visibles"] == 5 and d["total"] == 5, d
+
+
+# ---- « Outils OK » se grise, avec raison, tant qu'aucun alias n'est mesuré --
+
+def _parc_sans_banc_outils(tmp_path):
+    kimi = tmp_path / "kimi"; kimi.mkdir()
+    tsv = tmp_path / "tsv"; tsv.mkdir()
+    noms = [ALIAS_OPUS, ALIAS_NEUTRE]
+    (kimi / "config.toml").write_text(
+        "".join(f'[models."{a}"]\nprovider="acvram"\nmodel="{a}"\n' for a in noms))
+    parc = tmp_path / "parc.toml"
+    parc.write_text(f'[chemins]\nkimi_dir="{kimi}"\ntsv_dir="{tsv}"\n[moteurs.acvram]\npresent=true\n')
+    return parc
+
+
+@pytest.mark.parametrize("gui", ["claude-modeles", "kimi-modeles"])
+def test_outils_ok_grise_sans_aucune_mesure(tmp_path, gui):
+    parc = _parc_sans_banc_outils(tmp_path)
+    chemin = os.path.join(ICI, "parc", "bin", gui)
+    env = {**os.environ, "ACVRAM_GUI_TEST": "clic:b_outils", "ACVRAM_PARC_CONFIG": str(parc),
+          "CUDA_VISIBLE_DEVICES": "", "PYTHONPATH": os.path.join(ICI, "parc", "lib")}
+    env.pop("XDG_CONFIG_HOME", None)
+    r = subprocess.run(["xvfb-run", "-a", "--server-args=-screen 0 1340x900x24", PY, chemin],
+                       capture_output=True, text=True, env=env, timeout=60)
+    lignes = [l for l in r.stdout.splitlines() if l.startswith("GUI_TEST ")]
+    assert len(lignes) == 1, r.stdout[-800:] + r.stderr[-800:]
+    d = json.loads(lignes[0][len("GUI_TEST "):])
+    assert "erreur" not in d, d
+    assert d["sensible"] is False, d      # aucun des 2 alias n'a de score banc-outils

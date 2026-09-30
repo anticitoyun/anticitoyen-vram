@@ -121,6 +121,7 @@ class Fenetre(Adw.ApplicationWindow):
             if premier is None:
                 premier = b
                 b.set_active(True)
+                self.b_tous = b            # nommé pour ACVRAM_GUI_TEST=clic:b_tous
             else:
                 b.set_group(premier)
             b.connect("toggled", self._sur_moteur, cle)
@@ -132,6 +133,7 @@ class Fenetre(Adw.ApplicationWindow):
         self.b_censure.connect("toggled", self._sur_drapeaux)
         self.b_outils = Gtk.ToggleButton(label="Outils OK",
                                          tooltip_text="Appels d'outils validés (agent-ok)")
+        self._bulle_outils_normale = self.b_outils.get_tooltip_text()
         self.b_outils.connect("toggled", self._sur_drapeaux)
         barre.append(self.b_censure)
         barre.append(self.b_outils)
@@ -474,8 +476,28 @@ class Fenetre(Adw.ApplicationWindow):
     def _sur_moteur(self, bouton, cle):
         if bouton.get_active():
             self.filtre_moteur = cle
+            if cle is None:
+                # « Tous » (ordre chef, pièce tri/filtres 30/09) : remet aussi les
+                # bascules d'étiquette à zéro — sinon un filtre moteur relâché restait
+                # combiné en ET avec des bascules qu'on ne voit plus comme actives.
+                for b in (self.b_censure, self.b_outils, self.b_vedettes, self.b_code_os):
+                    if b.get_active():
+                        b.set_active(False)   # déclenche _sur_drapeaux, un filtre.changed suffit
             self.filtre.changed(Gtk.FilterChange.DIFFERENT)
             self._compter()
+
+    def _maj_bouton_outils(self):
+        """Ordre chef (30/09) : un filtre qui ne peut RIEN trouver se grise avec la
+        raison, plutôt que de vider la liste sans un mot — au lieu de constater 0/N
+        après coup, l'utilisatrice le voit avant de cliquer."""
+        mesure = any(m.outils_etat != "?" for m in self.parc)
+        self.b_outils.set_sensitive(mesure)
+        if not mesure and self.filtre_outils:
+            self.filtre_outils = False
+            self.b_outils.set_active(False)
+        self.b_outils.set_tooltip_text(
+            self._bulle_outils_normale if mesure else
+            "Aucun alias mesuré par banc-outils pour l'instant — lancer « Banc d'outils » sur un alias d'abord")
 
     def _sur_drapeaux(self, _b):
         self.filtre_sans_censure = self.b_censure.get_active()
@@ -609,13 +631,44 @@ class Fenetre(Adw.ApplicationWindow):
                 self.recherche.set_text(arg); self._sur_recherche(self.recherche)   # search-changed n'arrive qu'après 150 ms
                 r["visibles"], r["total"] = self.selection.get_n_items(), self.store.get_n_items()
             elif genre == "clic":
-                nom, _, alias = arg.partition("@")
+                # « + » enchaîne plusieurs clics de BASCULES dans le MÊME processus (pièce
+                # tri/filtres, 30/09 : « Tous » remet les bascules à zéro ne se constate
+                # qu'en enchaînant « activer une bascule, cliquer ailleurs, cliquer Tous »).
+                # « moteur.<clé> » adresse `self.boutons_moteur[<clé>]` (pas d'attribut nommé
+                # par moteur) ; « moteur.tous » vaut `self.b_tous`.
+                noms, _, alias = arg.partition("@")
                 if alias:
                     r["selection"] = self._selectionner(alias)
-                b = getattr(self, nom, None)
+                suite = noms.split("+")
+
+                def _resoudre(nom):
+                    if nom.startswith("moteur."):
+                        cle = nom[len("moteur."):]
+                        return self.b_tous if cle == "tous" else self.boutons_moteur.get(cle)
+                    return getattr(self, nom, None)
+
+                if len(suite) > 1:
+                    for nom in suite:
+                        b = _resoudre(nom)
+                        if not isinstance(b, Gtk.ToggleButton):
+                            r["erreur"], rc = f"bouton-bascule inconnu dans la suite : {nom}", 2
+                            break
+                        b.set_active(not b.get_active())
+                    else:
+                        r["visibles"], r["total"] = self.selection.get_n_items(), self.store.get_n_items()
+                        r["bascules"] = {n: bt.get_active() for n, bt in
+                                         (("censure", self.b_censure), ("outils", self.b_outils),
+                                          ("vedettes", self.b_vedettes), ("code_os", self.b_code_os),
+                                          ("tous", self.b_tous))}
+                    print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
+                    self.get_application().rc_test = rc
+                    self.get_application().quit()
+                    return False
+                b = _resoudre(noms)
                 if not isinstance(b, Gtk.Button):
-                    r["erreur"], rc = f"bouton inconnu : {nom}", 2
+                    r["erreur"], rc = f"bouton inconnu : {noms}", 2
                 elif isinstance(b, Gtk.ToggleButton):
+                    r["sensible"] = b.get_sensitive()
                     b.set_active(not b.get_active()); r["actif"] = b.get_active()
                     # pièce tri/filtres (30/09) : les bascules de filtre (b_censure,
                     # b_outils, b_vedettes, b_code_os) n'avaient aucun moyen de faire
@@ -1261,6 +1314,7 @@ class Fenetre(Adw.ApplicationWindow):
         for m in parc:
             self.store.append(m)
         self._compter()
+        self._maj_bouton_outils()
         cible = 0
         if alias_garde:
             for i in range(self.selection.get_n_items()):
