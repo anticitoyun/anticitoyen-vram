@@ -31,3 +31,9 @@ libres sur Coder-30B qkvo-i8c (48 couches) ; le plan leur compte 0 (`loader.py`,
 Les poids de la tour de vision sont déjà comptés sous la borne du KV (`loader.py`, `_octets_annexes`, pièce 201). L'OOM de
 qwen3-vl-30b à `vision.py:415` suit donc très probablement le coût non compté des piles. La charger avant le KV la ferait
 échouer plus tôt, nommément (même geste que aym), sans la faire servir : à décider après la mesure de 5v7.
+
+## Ajout avant la mesure : correctif et bras B (même prise)
+Correctif écrit à sec (`moe.py`, `_compacter_survivants`, témoin `ACVRAM_PILES_COMPACTER=0`, 5 tests dont 5 rouges sur
+main). Prise : `BRAS="A B" diag.sh` — A = compaction 0 (confirme ou réfute H), B = compaction 1.
+* Prédit si H vraie : B libère ≥ 3,5 Gio de plus que A après les piles (libres B ≥ 9,5 Gio), plus de refus « 6,04 pour 6,90 ».
+* Si A montre réservé − alloué < 1 Gio : H fausse, B sans effet attendu, le correctif ne part pas.
