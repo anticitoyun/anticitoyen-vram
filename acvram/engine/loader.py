@@ -1336,11 +1336,35 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
               f"jetons ({manque / 2**20:.0f} Mio manquants) : exil supplémentaire (tour {tour + 1})",
               file=sys.stderr)
         _reajuster_plan(plan, manifest, top_k=top_k, reserve=reserve + supplement)
+    # kv31b (poste6 30/09, edz définitif : 15 refus gemma-4-31B à 32 768) : dire la fenêtre qui TIENT, pas seulement
+    # « réduire max_model_len ». Le lanceur (acvram-serveur) relit cette ligne et relance à cette fenêtre si le client
+    # l'accepte (CTX_CLIENT_MIN), sinon refuse en nommant les deux chiffres.
+    tient = min((_fenetre_qui_tient(plan, spec, manifest, t.name, int(bornes.get(t.name, plan.kv_budget[t.name])),
+                                    reserve, max_model_len)
+                 for t in plan.tiers if t.kind == "gpu" and t.name in plan.kv_budget), default=0)
+    print(f"[acvram] fenêtre qui tient : {tient} jetons (plancher KV d'une séquence + activations de préfill ≤ VRAM "
+          f"libre − poids résidents − marge, par pas de 1 024 ; 0 = aucune)", file=sys.stderr, flush=True)
     raise RuntimeError(
         f"refus : budget KV insuffisant après {tours} tours d'exil — "
         f"{ {k: round(v / 2**30, 2) for k, v in plan.kv_budget.items()} } Gio pour un plancher "
         f"d'une séquence de {max_model_len} jetons ({manque / 2**20:.0f} Mio manquants) ; "
-        f"réduire max_model_len ou forcer l'exil (ACVRAM_EXIL_COUCHES)")
+        f"fenêtre qui tient : {tient} jetons — réduire max_model_len ou forcer l'exil (ACVRAM_EXIL_COUCHES)")
+
+
+def _fenetre_qui_tient(plan: Plan, spec: ModelSpec, manifest: dict, dev: str, borne_brute: int,
+                       reserve_pleine: int, max_model_len: Optional[int], pas: int = 1024) -> int:
+    """Plus grande fenêtre N (multiple de ``pas``, ≤ max_model_len) telle que plancher KV d'UNE séquence de N jetons +
+    réserve de préfill à N (`_reserve_prefill` : activations d'un préfill d'un seul tenant, croissantes en N) ≤ base,
+    où base = borne brute + réserve pleine = VRAM libre − poids résidents − marge de base (ce que la carte laisse au KV
+    et aux activations réunis, avec le plan tel qu'exilé au moment du refus). 0 si même ``pas`` jetons ne tiennent pas.
+    gemma-4-31B à 32 768 (edz 30/09) : KV 15,1 Gio + préfill 10,4 Gio pour 28,1 − 5,8 − 1,6 : ≈ 25 000 tiennent."""
+    base = int(borne_brute) + int(reserve_pleine)
+    n = (int(max_model_len or 2048) // pas) * pas
+    while n >= pas:
+        if _kv_plancher(plan, spec, n, dev) + _reserve_prefill(spec, n, manifest, plan) <= base:
+            return n
+        n -= pas
+    return 0
 
 
 def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None,
