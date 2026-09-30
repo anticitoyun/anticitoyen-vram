@@ -177,3 +177,38 @@ def test_gabarit_refuse_par_yals_echec_immediat_nomme(poste):
     assert r.returncode == 1 and "KIMI" not in r.stdout, r.stdout + r.stderr
     assert "Gabarit de chat refusé par YALS : Unknown test: sequence (gabarit du GGUF)" in r.stderr, r.stderr
     assert dt < 20
+
+
+# ── bascule : parc-installer remplit [moteurs.yals] chemin depuis le poste ─────────────────────────────────────
+import sys  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_paquet_parc import _installer, poste as poste_parc  # noqa: E402,F401  (fixture)
+
+
+def _yals_present(p, tmp_path, lanceur_texte: str | None):
+    import tomllib
+    p["cfg"].parent.mkdir(parents=True, exist_ok=True)
+    p["cfg"].write_text("[moteurs.yals]\npresent = true\nport = 5011\n")
+    d = tmp_path / "IA" / "YALS"; d.mkdir(parents=True)
+    (d / "YALS").write_text("#!/bin/sh\n"); (d / "YALS").chmod(0o755)
+    if lanceur_texte is not None:
+        b = p["home"] / ".local" / "bin"; b.mkdir(parents=True, exist_ok=True)
+        (b / "kimi-yals").write_text(lanceur_texte.replace("@DOSSIER@", str(d)))
+    p["env"]["PARC_PROC"] = str(tmp_path / "proc-vide")          # aucun YALS vivant (le vrai poste en a peut-être un)
+    return d, lambda: tomllib.loads(p["cfg"].read_text()).get("moteurs", {}).get("yals", {})
+
+
+def test_bascule_chemin_yals_repris_du_lanceur_en_place(poste_parc, tmp_path):
+    d, lire = _yals_present(poste_parc, tmp_path, '#!/usr/bin/env bash\nYALS_DIR="@DOSSIER@"\nAPI=x\n')
+    r = _installer(poste_parc)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert lire().get("chemin") == str(d / "YALS") and f"yals : chemin repris du poste → {d / 'YALS'}" in r.stdout + r.stderr
+
+
+def test_bascule_chemin_yals_introuvable_refus_nomme(poste_parc, tmp_path):
+    _, lire = _yals_present(poste_parc, tmp_path, None)
+    r = _installer(poste_parc)
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "REFUS : [moteurs.yals] présent sans chemin" in r.stdout + r.stderr
+    assert not lire().get("chemin")
