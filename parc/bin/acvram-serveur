@@ -215,20 +215,31 @@ else
     srv_pid=$!
 fi
 
-for _ in $(seq 1 120); do
+# Délai en secondes d'horloge, pas en tours : 120 tours de 2 s coupaient à 241 s des démarrages VIVANTS (edz
+# définitif 30/09, pps : 15 alias GLM-4.7-Flash / 32B à 32 768, chauffe 93-138 s + capture des graphes + recapture ;
+# 4 journaux finissent sur « Uvicorn running » juste après la coupure ; le plus long servi : 238 s).
+DELAI=${ACVRAM_DELAI_DEMARRAGE:-480}
+neuf_du_lancement() {
+    tail -c +$(( debut_log + 1 )) "$LOG" 2>/dev/null | grep -vE 'CUDACachingAllocator|gardée|^[[:space:]]*$' || true
+}
+SECONDS=0   # depuis le lancement du serveur, pas du lanceur (attente kwh de la carte exclue)
+while [ "$SECONDS" -lt "$DELAI" ]; do
     curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 \
         && { echo "acvram prêt sur 127.0.0.1:$PORT ($alias_nom)"; exit 0; }
-    # mort au démarrage (refus de budget KV, OOM, contexte non tenu) : le dire tout de suite, pas après 240 s
+    # mort au démarrage (refus de budget KV, OOM, contexte non tenu) : le dire tout de suite, pas après le délai
     # (t5e 27/09 : devstral à 65 536 refusé en quelques secondes, le menu attendait 4 min)
     if [ -n "${srv_pid:-}" ] && ! kill -0 "$srv_pid" 2>/dev/null; then
         # la cause, pas un avertissement : « disposition Marlin refusée … pile naturelle gardée » n est pas fatale
-        # (edz 28/09, gemma 12B bf16 : seule ligne citée, la vraie cause perdue) ; à défaut, la dernière ligne
-        neuf=$(tail -c +$(( debut_log + 1 )) "$LOG" 2>/dev/null | grep -vE 'CUDACachingAllocator|gardée|^[[:space:]]*$' || true)
-        cause=$(grep -E 'Error|Exception|non tenu|refus :|Killed' <<< "$neuf" | tail -1 || true)
+        # (edz 28/09, gemma 12B bf16 : seule ligne citée, la vraie cause perdue) ; « introuvable : [Errno 2] … manifest »
+        # ne contient pas « Error » (pps : gemma-4-12b-it-bf16, dossier non converti, cause perdue derrière « chargement »)
+        neuf=$(neuf_du_lancement)
+        cause=$(grep -E 'Error|Errno|Exception|introuvable|non tenu|refus :|Killed' <<< "$neuf" | tail -1 || true)
         err "acvram mort au démarrage : $(printf '%s' "${cause:-$(tail -1 <<< "$neuf")}" | cut -c1-240) (journal : $LOG)"
         exit 1
     fi
     sleep 2
 done
-err "acvram n'a pas démarré (voir $LOG)"
+# vivant mais pas prêt : dire depuis quand et où il en est (la dernière ligne du moteur POUR CE lancement), et que
+# le serveur tourne encore — il tient la carte ; l'arrêter reste à l'appelant (menu, harnais), comme avant
+err "acvram pas prêt en ${SECONDS} s (ACVRAM_DELAI_DEMARRAGE=$DELAI), serveur vivant${srv_pid:+ (PID $srv_pid)} — dernière étape : $(neuf_du_lancement | tail -1 | cut -c1-200) (journal : $LOG)"
 exit 1
