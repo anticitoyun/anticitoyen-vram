@@ -1,0 +1,33 @@
+# 5v7 — coût net des piles MoE (4,58 Gio sur Coder-30B) : hypothèse et prédiction scellées AVANT la mesure (poste1, 30/09)
+
+Mesuré (fenêtre du 30/09, `poste1-aym-verdict-30-09.md`) : après les piles construites au chargement, 10,62 → 6,04 Gio
+libres sur Coder-30B qkvo-i8c (48 couches) ; le plan leur compte 0 (`loader.py`, `_reserve_prefill` : Σ × 1).
+
+## Lecture du code (à sec)
+* La pile naturelle est une copie (`torch.stack`) puis les experts deviennent des VUES (`moe.py`, `one()`) : les tenseurs
+  d'origine se libèrent. La Marlin remplace la naturelle, rendue par `_liberer_pile_naturelle`. Il n'y a pas de seconde
+  copie survivante au code, et `NVFP4Tensor` / `QuantLinear` ne gardent aucun cache dérivé. Le coût net attendu est ≈ 0.
+* Un expert de Coder-30B pèse 768 × 2 048 / 2 = 0,75 Mio (+ 96 Kio d'échelles) : il vit dans le **bassin des petits blocs** de
+  l'allocateur (< 1 Mio, segments de 2 Mio), aux côtés de petits tenseurs qui SURVIVENT à la pile :
+  * les `global_scale` des couches refusées en Marlin (sous-normales, Coder) ;
+  * les `ChannelScaler` AWQ par expert.
+* Un segment n'est rendu au pilote que vide. Hypothèse : les segments restent **réservés, non alloués** ; `mem_get_info` les
+  voit occupés. C'est la même famille que gemma (commentaire de `_rendre_le_cache_apres_la_pile`) : pas un défaut du plan,
+  une fragmentation.
+
+## Prédiction (bras de 1 min : chargement Coder-30B à 29 096, ligne « piles … au chargement » de 286c08485)
+* **H vraie** :
+  * réservé − alloué ≥ 3,5 Gio après les piles ;
+  * dans le bassin des petits blocs, réservé − alloué ≥ 3,5 Gio.
+  * Correctif alors : regrouper les petits survivants d'une couche dans UN tampon (grand bassin), par vues, AVANT de rendre
+    les originaux. Les segments se vident et `empty_cache` les rend. Le plan reste juste (coût ≈ 0).
+* **H fausse** :
+  * réservé − alloué < 1 Gio : les piles allouent vraiment 4,5 Gio de plus ;
+  * suite : un instantané mémoire (`torch.cuda.memory_snapshot`) pour trouver QUI, puis le plan compte ce coût réel (demande
+    de chef, test cassant sur `_reserve_prefill`).
+* **Entre les deux** (1-3,5 Gio) : les deux causes à la fois, nommées séparément.
+
+## Pièce (2), vrm
+Les poids de la tour de vision sont déjà comptés sous la borne du KV (`loader.py`, `_octets_annexes`, pièce 201). L'OOM de
+qwen3-vl-30b à `vision.py:415` suit donc très probablement le coût non compté des piles. La charger avant le KV la ferait
+échouer plus tôt, nommément (même geste que aym), sans la faire servir : à décider après la mesure de 5v7.
