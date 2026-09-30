@@ -1233,9 +1233,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="simple arrondi au plus proche, sans mise a l'echelle AWQ")
     cv.add_argument("--hadamard", choices=["auto", "always", "never"],
                     default="auto")
-    cv.add_argument("--echelle", choices=["max6", "4sur6"], default="max6",
-                    help="echelle de bloc nvfp4 : max6 (amax/6, classique) ou 4sur6 (par bloc, "
-                         "amax/6 contre amax/4 au moindre MSE, arXiv 2512.02010 ; format et noyaux inchanges)")
+    cv.add_argument("--echelle", choices=["max6", "4sur6", "balayage", "balayage-w"], default="max6",
+                    help="echelle de bloc nvfp4 : max6 (amax/6, classique, defaut) ; 4sur6 (par bloc, amax/6 contre "
+                         "amax/4 au moindre MSE, arXiv 2512.02010) ; balayage (ScaleSweep, arXiv 2606.07618 : motifs "
+                         "E4M3 de s_base-3 a +7 au moindre MSE) ; balayage-w (idem, WMSE ponderee par (E|x|/s)^2 des "
+                         "statistiques de calibration, s_base-8 a +7 ; exige une calibration). Format et noyaux inchanges")
     cv.add_argument("--grid", type=int, default=20,
                     help="finesse de la grille de recherche AWQ")
     cv.add_argument("--lm-head-format", help="format de la projection de sortie")
