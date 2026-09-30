@@ -5,7 +5,7 @@
 #   kimi-yals yals-qwen3-coder     lance directement cet alias
 # Importé dans le parc le 30/09 (zjf) depuis un script personnel : chemins par parc.toml et le config.yml de YALS,
 # clés lues à l'exécution dans l'api_tokens.yml que YALS génère, aucun chemin ni clé dans ce fichier.
-#   dossier YALS : dossier de [moteurs.yals] chemin (le binaire), sinon KIMI_YALS_DIR, sinon /mnt/AI_GENERATOR/YALS
+#   dossier YALS : KIMI_YALS_DIR, sinon dossier de [moteurs.yals] chemin (le binaire) ; aucun défaut de machine
 #   port du serveur et dossier des modèles : network.port et model.model_dir de <dossier>/config.yml
 #   port du proxy mémoire (celui que kimi interroge) : [moteurs.yals] port (5011)
 set -uo pipefail
@@ -15,7 +15,7 @@ _ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && P
 set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
 
 YALS_DIR=${KIMI_YALS_DIR:-${PARC_CHEMIN_YALS:+$(dirname "$PARC_CHEMIN_YALS")}}
-YALS_DIR=${YALS_DIR:-/mnt/AI_GENERATOR/YALS}
+[ -n "$YALS_DIR" ] || { printf 'dossier de YALS inconnu : [moteurs.yals] chemin = "<dossier>/YALS" dans parc.toml, ou KIMI_YALS_DIR\n' >&2; exit 1; }
 lire_conf() { awk -v k="$1" '$1 == k":" {print $2; exit}' "$YALS_DIR/config.yml" 2>/dev/null; }
 YALS_PORT=$(lire_conf port); YALS_PORT=${YALS_PORT:-5010}
 API="http://127.0.0.1:$YALS_PORT"
@@ -222,6 +222,30 @@ charger_modele() {
   return 1
 }
 
+# --- le gabarit de chat passe-t-il ? -------------------------------------------
+# nemotron 30/09 : le gabarit du GGUF utilisait le test Jinja `sequence`, inconnu du moteur Jinja de YALS ; YALS
+# rendait 200 et un flux VIDE à chaque requête, kimi réessayait 9 fois (attente doublée) : 300 s de silence. Une
+# complétion d'un jeton, avec un outil comme kimi en envoie, fait rendre le gabarit tout de suite ; l'erreur est
+# lue dans le journal de CETTE requête.
+sonder_gabarit() {
+  local debut rep erreur
+  debut=$(stat -c %s "$YALS_DIR/yals.log" 2>/dev/null || echo 0)
+  rep=$(curl -s -m 120 -H "Authorization: Bearer $(cle_api)" -H 'Content-Type: application/json' \
+    -d "{\"model\": \"$(basename "$1")\", \"max_tokens\": 1, \"stream\": false,
+         \"messages\": [{\"role\": \"system\", \"content\": \"sonde\"}, {\"role\": \"user\", \"content\": \"ok\"}],
+         \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"sonde\", \"description\": \"sonde\",
+                      \"parameters\": {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}}}}]}" \
+    "$API/v1/chat/completions" 2>/dev/null)
+  erreur=$(tail -c +$(( debut + 1 )) "$YALS_DIR/yals.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+    | grep -oE '^Error: .*' | head -1)
+  if [ -n "$erreur" ]; then
+    err "Gabarit de chat refusé par YALS : ${erreur#Error: } (gabarit ${2:-du GGUF})"
+    return 1
+  fi
+  python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.stdin.read())["choices"] else 1)' <<< "$rep" 2>/dev/null \
+    || { err "Complétion d'essai sans réponse (YALS) : $(head -c 160 <<< "$rep")"; return 1; }
+}
+
 # --- programme principal ----------------------------------------------------
 choix=""
 if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
@@ -247,6 +271,7 @@ fi
 monter_disque || exit 1
 demarrer_yals || exit 1
 charger_modele "$modele" "$contexte" || exit 1
+sonder_gabarit "$modele" "$(template_outils "$modele")" || exit 1
 
 printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
 rm -f "$REPONSE"   # exec ne passe pas par le trap EXIT

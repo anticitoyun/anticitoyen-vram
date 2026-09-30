@@ -5,7 +5,7 @@
 #   kimi-tabby tabby-qwen38-27b-ara   lance directement cet alias
 # Importé dans le parc le 30/09 (zjf, avec kimi-yals, même famille) depuis un script personnel : chemins par parc.toml
 # et le config.yml de TabbyAPI, clés lues à l'exécution dans son api_tokens.yml, aucun chemin ni clé dans ce fichier.
-#   dossier : dossier de [moteurs.tabby] chemin (main.py) ou tokens, sinon KIMI_TABBY_DIR
+#   dossier : KIMI_TABBY_DIR, sinon dossier de [moteurs.tabby] chemin (main.py) ou tokens ; aucun défaut de machine
 #   port du serveur et dossier des modèles : network.port et model.model_dir de <dossier>/config.yml
 #   port du proxy mémoire : KIMI_TABBY_PORT_PROXY (5001)
 set -uo pipefail
@@ -14,7 +14,9 @@ PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
 _ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
 set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
 
-TABBY_DIR=${KIMI_TABBY_DIR:-$(dirname "${PARC_CHEMIN_TABBY:-${PARC_TOKENS_TABBY:-/opt/ia/TabbyAPI/x}}")}
+_ref=${PARC_CHEMIN_TABBY:-${PARC_TOKENS_TABBY:-}}
+TABBY_DIR=${KIMI_TABBY_DIR:-${_ref:+$(dirname "$_ref")}}
+[ -n "$TABBY_DIR" ] || { printf 'dossier de TabbyAPI inconnu : [moteurs.tabby] chemin ou tokens dans parc.toml, ou KIMI_TABBY_DIR\n' >&2; exit 1; }
 lire_conf() { awk -v k="$1" '$1 == k":" {print $2; exit}' "$TABBY_DIR/config.yml" 2>/dev/null; }
 TABBY_PORT=$(lire_conf port); TABBY_PORT=${TABBY_PORT:-${PARC_PORT_TABBY:-5000}}
 API="http://127.0.0.1:$TABBY_PORT"
@@ -164,7 +166,9 @@ done
 monter_disque || exit 1
 demarrer_tabby || exit 1
 # un seul gros moteur à la fois : stopper vLLM et llama.cpp s'ils tournent
-for pf in /mnt/AI_GENERATOR/vLLM/serveur.pid /mnt/AI_GENERATOR/llamacpp/serveur.pid; do
+# (fichiers PID à côté de leurs journaux déclarés dans parc.toml)
+for j in "${PARC_JOURNAL_VLLM:-}" "${PARC_JOURNAL_LLAMACPP:-}"; do
+  [ -n "$j" ] || continue; pf="$(dirname "$j")/serveur.pid"
   [ -f "$pf" ] && kill "$(cat "$pf")" 2>/dev/null && sleep 4
 done
 

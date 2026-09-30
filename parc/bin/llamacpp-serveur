@@ -122,7 +122,12 @@ CK=${lu% *}; CV=${lu#* }
 # Sert quand le gabarit embarqué dans le GGUF ne correspond pas à ce que le modèle
 # sait produire (tokens spéciaux absents du vocabulaire, format d outils exotique).
 TMPL=()
-[ -n "${GABARIT:-}" ] && [ -f "$GABARIT" ] && TMPL=(--chat-template-file "$GABARIT")
+# un GABARIT demandé mais illisible était ignoré EN SILENCE (kimi-linear 30/09 : chemin d'un autre poste dans
+# gguf-chemins col. 4, le modèle tournait sur le gabarit embarqué, outils cassés) : refus nommé
+if [ -n "${GABARIT:-}" ]; then
+  [ -r "$GABARIT" ] && [ -f "$GABARIT" ] || { err "Gabarit illisible : $GABARIT (colonne 4 de gguf-chemins ou GABARIT=)"; exit 1; }
+  TMPL=(--chat-template-file "$GABARIT")
+fi
 # Sans gabarit imposé : assouplir automatiquement les gabarits Qwen3.x qui refusent un message
 # système hors première position (sinon l'API Anthropic de Claude Code échoue : « Unable to
 # generate parser for this template »). Voir ~/.local/bin/gabarit-souple.

@@ -40,6 +40,12 @@ class H(BaseHTTPRequestHandler):
         return self.rendre(200, {"id": charge["id"]}) if charge["id"] else self.rendre(503, {"detail": "no model"})
     def do_POST(self):
         d = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        if self.path.endswith("/chat/completions"):
+            if mode == "gabarit":        # YALS 3610610 : gabarit refusé → trace Jinja au journal, 200 et rien dedans
+                print("Error: Unknown test: sequence", flush=True)
+                print("    at Interpreter.evaluateTestExpression (file:///jinja/index.js:1854:13)", flush=True)
+                return self.rendre(200, {})
+            return self.rendre(200, {"choices": [{"message": {"role": "assistant", "content": "o"}}]})
         ctx = d.get("max_seq_len", 0)
         if mode == "arch":
             print("llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'gemma4'", flush=True)
@@ -162,3 +168,12 @@ def test_aucun_chemin_personnel_ni_cle(poste):
         src = (PARC / "bin" / nom).read_text()
         assert "/home/" not in src and "$HOME/.kimi-code" not in src and "~/TSV" not in src, nom
         assert "4TO_SATACMR" not in src and "api_key:" not in src.replace("'/^api_key:/", ""), nom
+
+
+def test_gabarit_refuse_par_yals_echec_immediat_nomme(poste):
+    """nemotron 30/09 : chargement réussi, gabarit refusé à chaque requête (200 vide) ; kimi réessayait 9 fois → 300 s.
+    Cassant : sans la sonde, le lanceur passe la main à kimi (rc 0, « KIMI » imprimé)."""
+    r, dt = poste["lancer"]("kimi-yals", "yals-essai", mode="gabarit")
+    assert r.returncode == 1 and "KIMI" not in r.stdout, r.stdout + r.stderr
+    assert "Gabarit de chat refusé par YALS : Unknown test: sequence (gabarit du GGUF)" in r.stderr, r.stderr
+    assert dt < 20
