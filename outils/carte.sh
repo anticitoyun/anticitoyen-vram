@@ -193,6 +193,39 @@ _reaper_setsid_orphelins() {
   done
 }
 
+# anticitoyen-vram-7gb (27/09) : PID 248433, ne juste apres la prise chef-suite-076b, tenait 2,7 Gio hors
+# verrou au debut de la mesure suivante. Le reaper c7w ne regarde que compute-apps AU MOMENT de la sortie : un
+# descendant pas encore sur la carte (contexte CUDA ouvert plus tard, worker lance en retard) lui echappe. Ici, TOUT
+# processus vivant marque ACVRAM_CARTE_TENUE=<cette prise>, ne apres elle et qui n'est plus sous elle (reparente :
+# les aides du trap, elles, sont encore nos enfants), est NOMME (journal + stderr) puis arrete — GPU ou non.
+_stat_champ() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk -v k="$2" '{print $(k-2)}'; }
+_reaper_descendants() {
+  local moi=$1 journal=$2 nom=$3 marque="ACVRAM_CARTE_TENUE=$1"
+  local e p a n debut debut_moi cmd
+  debut_moi=$(_stat_champ "$moi" 22)
+  # un seul grep sur tous les environ (un par processus coutait 2 s par prise sur 720 processus)
+  for e in $(grep -lzFx -- "$marque" /proc/[0-9]*/environ 2>/dev/null); do
+    p=${e#/proc/}; p=${p%/environ}
+    [ "$p" = "$moi" ] && continue
+    a=$p; n=0
+    while [ -n "$a" ] && [ "$a" -gt 1 ] 2>/dev/null && [ "$n" -lt 64 ]; do
+      a=$(_stat_champ "$a" 4); n=$((n + 1))
+      [ "$a" = "$moi" ] && continue 2          # encore sous la prise : une aide de ce trap, pas un orphelin
+    done
+    debut=$(_stat_champ "$p" 22)                 # ne avant la prise : marque d'un pid recycle, pas le notre
+    [ -n "$debut" ] && [ -n "$debut_moi" ] && [ "$debut" -ge "$debut_moi" ] 2>/dev/null || continue
+    cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | cut -c1-120)
+    printf '%s ORPHELIN %-8s %-32s descendant pid %s (%s) TERM (7gb)\n' "$(date +%FT%T)" "$moi" "$nom" "$p" "$cmd" >> "$journal" 2>/dev/null || true
+    echo "carte.sh : le descendant $p ($cmd) survivait a la prise « $nom » — arrete (7gb)" >&2
+    kill -TERM "$p" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done
+    if kill -0 "$p" 2>/dev/null; then
+      kill -KILL "$p" 2>/dev/null
+      printf '%s ORPHELIN %-8s %-32s descendant pid %s KILL (7gb)\n' "$(date +%FT%T)" "$moi" "$nom" "$p" >> "$journal" 2>/dev/null || true
+    fi
+  done
+}
+
 # Piece 244 : un TERM/INT/HUP recu par carte.sh LUI-MEME (un `kill` externe,
 # pas notre propre garde DUREE_MAX) tuait ce script sans jamais toucher a la
 # commande, encore vivante dans son groupe (`setsid`, ci-dessous) — le verrou
@@ -250,7 +283,7 @@ if [ "$TYPE" = partage ]; then
   # restitution (setsid tue mais pas assez vite, ou reparente avant coup) ne
   # doit pas survivre a la prise et contaminer la suivante — meme reaper que
   # la classe mesure (marque ACVRAM_CARTE_TENUE, jamais un pid etranger).
-  trap 'rm -f "$QP"; _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; printf "%s rendue  %-8s %-32s partage tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true' EXIT
+  trap 'rm -f "$QP"; _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; _reaper_descendants "$$" "$JOURNAL" "$NOM"; printf "%s rendue  %-8s %-32s partage tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true' EXIT
   # ked (27/09) : sans setsid ni trap TERM/INT/HUP ici, un signal externe sur
   # CE script (un `.terminate()` de pytest, un `kill` de session) le tuait
   # sans jamais toucher la commande — orphelin (« carte.sh sleep N ») reparente
@@ -454,7 +487,7 @@ printf '%s prise   %-8s %-32s %s\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" >> "$JO
 # profondeur, flock devrait deja l'empecher), et une trace ANOMALIE si jamais
 # ce trap trouvait un .qui qui n'est plus le sien — pour laisser une preuve la
 # prochaine fois, au lieu d'un silence.
-trap '[ -n "${_charge_pid:-}" ] && kill "$_charge_pid" 2>/dev/null; _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
+trap '[ -n "${_charge_pid:-}" ] && kill "$_charge_pid" 2>/dev/null; _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; _reaper_descendants "$$" "$JOURNAL" "$NOM"; p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
 # Piece 244 : voir _244_signal ci-dessus — un TERM/INT/HUP externe sur carte.sh
 # ne doit jamais laisser la commande vivre hors verrou.
 trap '_244_signal 15' TERM
@@ -476,9 +509,11 @@ if [ "$TYPE" = mesure ]; then
   mkdir -p "$CHARGE_DIR" 2>/dev/null
   _nom_fs=$(printf '%s' "$NOM" | tr -c 'A-Za-z0-9_.-' '_')
   CHARGE_FICHIER="$CHARGE_DIR/$_nom_fs.$$.tsv"
-  ( while :; do
+  # `sleep & wait` + trap : tue, le releveur emporte son `sleep` (sinon orphelin d'1 s marque de la prise, 7gb)
+  ( trap 'kill $! 2>/dev/null; exit 0' TERM
+    while :; do
       printf '%s\t%s\n' "$(date +%FT%T)" "$(cut -d' ' -f1-3 /proc/loadavg)" >> "$CHARGE_FICHIER" 2>/dev/null
-      sleep 1
+      sleep 1 & wait $!
     done ) 8>&- 9>&- </dev/null >/dev/null 2>&1 &
   _charge_pid=$!
 fi

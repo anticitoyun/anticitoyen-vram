@@ -11,6 +11,10 @@ import signal
 import subprocess
 import time
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("recolte_carte")   # ked : rien ne survit au test
+
 CARTE = pathlib.Path(__file__).resolve().parent.parent / "outils" / "carte.sh"
 
 
@@ -52,6 +56,15 @@ def _finir(popen):
     popen.wait(timeout=5)
 
 
+def _tuer_service(srv: str):
+    """Un service de carte.sh est détaché par setsid : son PID est chef de groupe ; tuer le groupe."""
+    if srv.isdigit():
+        try:
+            os.killpg(int(srv), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _partage(verrou, secondes, nom):
     """Lance un PARTAGE détaché (sleep) et rend le Popen de carte.sh."""
     return _popen(["bash", str(CARTE), "sleep", str(secondes)],
@@ -74,6 +87,7 @@ def test_un_partage_ne_bloque_pas_un_service(tmp_path):
     verrou = tmp_path / "v.lock"
     p = _partage(verrou, 20, "conv")
     time.sleep(1.5)
+    r = None
     try:
         # un service (LOCK_EX sur VERROU seul) doit démarrer malgré le partage
         r = subprocess.run(["bash", str(CARTE), "sleep", "10"],
@@ -85,7 +99,9 @@ def test_un_partage_ne_bloque_pas_un_service(tmp_path):
         assert srv_pid.isdigit(), r.stdout
     finally:
         _finir(p)
-        subprocess.run(["pkill", "-f", "sleep 10"], check=False)
+        # ked : jamais `pkill -f "sleep 10"` (tuait tout « sleep 10 » du poste) — le service est chef de son
+        # groupe (setsid de carte.sh) : on tue CE groupe
+        _tuer_service(r.stdout.strip() if r else "")
 
 
 def test_une_mesure_exclut_les_partages(tmp_path):
@@ -153,8 +169,7 @@ def test_partage_admis_pendant_service(tmp_path):
         assert p.poll() is None, "le partagé s'est arrêté (aurait dû tourner)"
     finally:
         _finir(p)
-        if srv.isdigit():
-            subprocess.run(["kill", srv], check=False)
+        _tuer_service(srv)
 
 
 def test_promesse_violee_refuse_sans_kill(tmp_path):
