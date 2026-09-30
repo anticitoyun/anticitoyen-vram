@@ -10,12 +10,14 @@ Cassures (chacune vérifiée à la main avant d'écrire ce fichier) :
     test_gui_lit_le_lanceur le prouve avec un faux lanceur, pas avec une seconde copie du chiffre."""
 import os
 import pathlib
+import re
 import subprocess
-import sys
 
 RACINE = pathlib.Path(__file__).resolve().parent.parent
 LANCEUR = RACINE / "parc" / "bin" / "claude-modele"
 GUI = RACINE / "parc" / "bin" / "claude-modeles"
+KIMI = RACINE / "parc" / "bin" / "kimi-modele"
+KIMI_GUI = RACINE / "parc" / "bin" / "kimi-modeles"
 PY = "/usr/bin/python3"
 
 
@@ -76,16 +78,31 @@ def test_gui_lanceur_muet_aucun_seuil(tmp_path):
 def test_gui_sans_copie_chiffree():
     """Aucun `"seuil_complet": <chiffre>` ni `"seuil_minimum": <chiffre>` dans claude-modeles : les deux viennent
     de seuils_lanceur("claude-modele")."""
-    import re
     texte = GUI.read_text(encoding="utf-8")
     assert not re.search(r'"seuil_(complet|minimum)"\s*:\s*\d', texte), "copie chiffrée d'un seuil du lanceur dans la GUI"
     assert 'seuils_lanceur("claude-modele")' in texte
+    # 90q : kimi-modeles de même (seuil_complet 65536 recopié de KIMI_MCP_CTX_MIN, poste3-gui 29/09) — et pas de `None` codé non plus
+    texte = KIMI_GUI.read_text(encoding="utf-8")
+    assert not re.search(r'"seuil_(complet|minimum)"\s*:', texte), "copie d'un seuil du lanceur dans kimi-modeles"
+    assert 'seuils_lanceur("kimi-modele")' in texte
+
+
+def test_kimi_lanceur_imprime_ses_seuils(tmp_path):
+    """90q : `kimi-modele --seuils` sous HOME vide → KIMI_MCP_CTX_MIN (65 536) et seuil_minimum VIDE (aucun plancher de refus) ;
+    l'env KIMI_MCP_CTX_MIN reste honoré (même valeur que kimi_local() lira), preuve qu'il n'y a qu'une définition."""
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+    r = subprocess.run([str(KIMI), "--seuils"], capture_output=True, text=True, env=env, timeout=10)
+    assert r.returncode == 0 and r.stdout == "seuil_complet=65536\nseuil_minimum=\n", r.stdout + r.stderr
+    r = subprocess.run([str(KIMI), "--seuils"], capture_output=True, text=True, env={**env, "KIMI_MCP_CTX_MIN": "40000"}, timeout=10)
+    assert r.stdout == "seuil_complet=40000\nseuil_minimum=\n"
+    texte = KIMI.read_text(encoding="utf-8")
+    assert len(re.findall(r"65536", texte)) == 1, "KIMI_MCP_CTX_MIN défini à plus d'un endroit"
+    assert _lire_par_la_gui(tmp_path, "kimi-modele") == "{'seuil_complet': 65536, 'seuil_minimum': None}"
 
 
 def test_prechargement_utilise_fenetre_min():
     """acvram-serveur est préchargé à `CTX_CLIENT_MIN=$FENETRE_MIN`, jamais à un chiffre en dur : le seuil affiché par
     la GUI et la fenêtre demandée au serveur ne peuvent pas diverger."""
-    import re
     texte = LANCEUR.read_text(encoding="utf-8")
     assert re.search(r'^\s*CTX_CLIENT_MIN=\$FENETRE_MIN ', texte, re.M)
     assert not re.search(r'^\s*CTX_CLIENT_MIN=\d', texte, re.M), "CTX_CLIENT_MIN en dur dans claude-modele"

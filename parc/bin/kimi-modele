@@ -5,6 +5,13 @@
 #   tabby-*     → TabbyAPI (EXL2/EXL3)   http://127.0.0.1:5000/v1
 # Usage : kimi-modele [alias] [arguments kimi...]
 set -uo pipefail
+# Seuil de fenêtre — UNE SEULE SOURCE, lue aussi par la GUI kimi-modeles via `kimi-modele --seuils` (90q, poste6 30/09, même
+# méthode que ph1/claude-modele). KIMI_MCP_CTX_MIN (d19, chef 27/09) : contexte SERVI à partir duquel kimi_local() garde
+# les MCP (invite MCP 58-64 k) ; en dessous, sans MCP — l'alias se lance quand même. Aucun plancher de refus générique
+# (seuil_minimum vide : kimi-modele ne refuse jamais une fenêtre lui-même, hors le repli propre à acvram-serveur).
+KIMI_MCP_CTX_MIN="${KIMI_MCP_CTX_MIN:-65536}"
+# --seuils : imprime et sort AVANT de charger le parc (aucun python, aucun parc.toml : la GUI le joue au démarrage)
+if [ "${1:-}" = "--seuils" ]; then printf 'seuil_complet=%s\nseuil_minimum=\n' "$KIMI_MCP_CTX_MIN"; exit 0; fi
 
 # parc.toml (acvram-parc) : chemins, ports, clés et moteurs du poste ; rien n'est codé ici
 PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
@@ -112,9 +119,9 @@ fi
 kimi_local() {  # $1 alias  [$2 contexte servi]
   local d="${PARC_KIMI_LOCAL:-$HOME/.kimi-code-local}" src; src=$(dirname "$CONFIG")
   mkdir -p "$d" || return 1
-  if [ -n "${2:-}" ] && [ "$2" -ge "${KIMI_MCP_CTX_MIN:-65536}" ] 2>/dev/null && [ -e "$src/mcp.json" ]; then
+  if [ -n "${2:-}" ] && [ "$2" -ge "$KIMI_MCP_CTX_MIN" ] 2>/dev/null && [ -e "$src/mcp.json" ]; then
     rm -f "$d/mcp.json"; ln -s "$src/mcp.json" "$d/mcp.json"
-    printf '%skimi : MCP gardés (contexte servi %s ≥ %s)%s\n' "$c_d" "$2" "${KIMI_MCP_CTX_MIN:-65536}" "$c_0" >&2
+    printf '%skimi : MCP gardés (contexte servi %s ≥ %s)%s\n' "$c_d" "$2" "$KIMI_MCP_CTX_MIN" "$c_0" >&2
   else
     rm -f "$d/mcp.json"; printf '{"mcpServers": {}}\n' > "$d/mcp.json"
   fi
@@ -163,7 +170,8 @@ case "$choix" in
     # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte)
     # le plus grand contexte que le moteur tient (clampé par la chauffe) ; si la carte ne peut pas même planifier
     # 65 536 (budget KV d'un dense, devstral-24B), 34 816 = invite sans MCP (29 107) + 4 096 de réponse, arrondi.
-    CTX_CLIENT_MIN=65536 "$PARC_BIN/acvram-serveur" "$choix" \
+    # 90q : la demande haute EST KIMI_MCP_CTX_MIN (tête du fichier) — servi à cette fenêtre, kimi_local garde les MCP.
+    CTX_CLIENT_MIN=$KIMI_MCP_CTX_MIN "$PARC_BIN/acvram-serveur" "$choix" \
       || CTX_CLIENT_MIN=34816 "$PARC_BIN/acvram-serveur" "$choix" "${KIMI_CTX_REPLI:-34816}" || exit 1
     kimi_local "$choix" "$(ctx_servi "http://127.0.0.1:${PARC_PORT_ACVRAM:-8090}" "$choix")" || exit 1
     printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
