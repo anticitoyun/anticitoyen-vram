@@ -1,5 +1,39 @@
 # Journal des changements
 
+## 0.7.16 (30/09/2026)
+
+### Menus claude-modeles et kimi-modeles (paquet parc 0.1.10)
+
+* **Test réel définitif** (poste1, `acvram-memoire/revue/poste1-edz-definitif-verdict-30-09.md`) : 343 alias sur le parc
+  0.7.15 / 0.1.9, 287 servis ; claude-modele 95,2 %, kimi-modele 82,8 % des alias dans le champ. Les pannes restantes
+  sont corrigées ci-dessous ou nommées.
+* **Préchargement** (poste1, pps) : le délai fixe de 241 s coupait des serveurs VIVANTS (le plus long démarrage servi :
+  238 s) ; `acvram-serveur` attend 480 s (`ACVRAM_DELAI_DEMARRAGE`) et nomme la dernière étape atteinte.
+* **Carte rendue** (poste5, kwh) : `acvram-serveur`, `vllm-serveur` et `llamacpp-serveur` attendent que la carte ait rendu
+  la VRAM du serveur précédent (garde unique `parc/lib/carte_rendue.py`, délai borné, refus nommé) ; l'appoint 8081
+  n'est jamais touché. Preuve réelle : 4/4 changements de modèle sans OOM ; la garde n'a pas eu à attendre au calme.
+* **Seuils** (poste6, ph1, 90q) : claude-modeles et kimi-modeles lisent leurs seuils de contexte dans leur lanceur
+  (`claude-modele --seuils`, `kimi-modele --seuils`), une seule source ; claude-modele mesure l'invite réelle
+  (`/v1/messages/count_tokens`) et refuse en disant pourquoi quand elle ne tient pas.
+* **YALS et TabbyAPI dans le paquet** (poste5, zjf, yals, yals2) : `kimi-yals` et `kimi-tabby` rejoignent parc, sans
+  chemin personnel (dossier lu dans `parc.toml`, repris du lanceur en place par parc-installer) ; le lancement ne garde
+  plus la sortie de l'appelant (les « silences de 300 s ») ; une complétion d'un jeton après le chargement fait échouer
+  tout de suite, en le nommant, un gabarit illisible, un modèle refusé par le chargeur ou un GGUF absent ; un 422 KV
+  réessaie à contexte moitié puis échoue nommé. llamacpp-serveur refuse et nomme un GABARIT illisible.
+* **kimi sur TabbyAPI** (poste6, tabby) : 0/17 à cause de la clé : la copie locale de kimi prend celle
+  d'`api_tokens.yml`.
+* **Outils d'appel** (poste6, 1w1) : `/v1/chat/completions` décode les arguments d'appel reçus en chaîne JSON avant le
+  gabarit (Qwen3-Coder échouait sur `arguments|items` et retombait sans outils).
+* Guide des menus à jour (`parc/GUIDE.md`, poste3).
+
+### Moteur et outils
+
+* **ScaleSweep** (poste6, `poste6-scalesweep-verdict-30-09.md`, `poste6-11e-verdict-30-09.md`) :
+  `acvram convert --echelle {max6,4sur6,balayage,balayage-w}` ; le défaut (max6) ne change pas, testé au bit. Sur de
+  vrais poids, l'erreur de quantification du balayage vaut 0,735× celle de l'AbsMax ; la perplexité reste à mesurer.
+* **carte.sh** (poste5, 7gb, ked) : à la sortie d'une prise, tout processus né sous elle et orphelin est nommé puis
+  arrêté ; les tests qui lancent de vrais carte.sh échouent s'ils laissent un processus vivant.
+
 ## 0.7.15 (29/09/2026)
 
 ### Masque d'attention : découpé d'emblée au-delà de 256 Mio (cqy)

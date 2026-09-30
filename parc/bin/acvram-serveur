@@ -234,6 +234,19 @@ while [ "$SECONDS" -lt "$DELAI" ]; do
         # ne contient pas « Error » (pps : gemma-4-12b-it-bf16, dossier non converti, cause perdue derrière « chargement »)
         neuf=$(neuf_du_lancement)
         cause=$(grep -E 'Error|Errno|Exception|introuvable|non tenu|refus :|Killed' <<< "$neuf" | tail -1 || true)
+        # kv31b (30/09) : le moteur dit la fenêtre qui TIENT (« [acvram] fenêtre qui tient : N jetons », loader
+        # `_fenetre_qui_tient`). Si le client l'accepte (CTX_CLIENT_MIN / col4 : claude 29 120, kimi 34 816) on relance
+        # UNE fois à N ; sinon refus nommé avec les deux chiffres — plus « réduire max_model_len » sans dire à combien.
+        tient=$(grep -oE '^\[acvram\] fenêtre qui tient : [0-9]+' <<< "$neuf" | tail -1 | grep -oE '[0-9]+$' || true)
+        if [ -n "$tient" ] && grep -q 'budget KV insuffisant' <<< "$cause"; then
+            if [ "$tient" -ge 1024 ] && [ -z "${ACVRAM_FENETRE_RELANCEE:-}" ] \
+               && { [ -z "$ctx_client_min" ] || [ "$tient" -ge "$ctx_client_min" ]; }; then
+                echo "acvram : fenêtre $CTX non tenue par la carte (budget KV) — relance à $tient jetons (fenêtre qui tient)"
+                ACVRAM_FENETRE_RELANCEE=1 exec "$0" "$CIBLE" "$tient"
+            fi
+            err "Alias refusé : fenêtre qui tient $tient jetons${ctx_client_min:+ < ctx≥$ctx_client_min requis par le client} (fenêtre demandée $CTX ; $(printf '%s' "$cause" | cut -c1-160))"
+            exit 1
+        fi
         err "acvram mort au démarrage : $(printf '%s' "${cause:-$(tail -1 <<< "$neuf")}" | cut -c1-240) (journal : $LOG)"
         exit 1
     fi

@@ -171,6 +171,8 @@ charger_modele() {
     demarrer_yals || return 1
   fi
   local code gabarit supplement="" essai ctx_essai="$ctx" debut neuf cause reponse="$REPONSE"
+  # yals 30/09 : deux alias pointaient vers un GGUF disparu ; YALS rendait 200 sans modèle, 3 × 2 min d'attente
+  [ -f "$MODELES_GGUF/$modele" ] || { err "GGUF absent : $MODELES_GGUF/$modele (alias fantôme ?)"; return 1; }
   gabarit=$(template_outils "$modele")
   [ -n "$gabarit" ] && supplement=", \"prompt_template\": \"$gabarit\""
   for essai in 1 2 3; do
@@ -187,9 +189,13 @@ charger_modele() {
     fi
     # la cause est dans le journal de CE chargement (YALS rend 200 même quand llama.cpp refuse le modèle)
     neuf=$(tail -c +$(( debut + 1 )) "$YALS_DIR/yals.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-    cause=$(grep -oE "unknown model architecture: '[^']*'" <<< "$neuf" | tail -1)
+    # yals 30/09 : llama.cpp de YALS refuse le modèle (gemma4 « unknown model architecture », Qwen3.8/Ornith « missing
+    # tensor blk.N.ssm_conv1d » : GGUF plus récent que ce llama.cpp, poids > carte « unable to allocate CUDA0 buffer »)
+    # et YALS rend quand même 200 en 0,5 s ; l'ancien lanceur attendait 3 × 2 min. Rien à réessayer : échec nommé.
+    cause=$(grep -oE 'llama_model_load: error loading model: .*' <<< "$neuf" | tail -1)
+    cause=${cause#llama_model_load: error loading model: }; cause=${cause#error loading model architecture: }
     if [ -n "$cause" ]; then
-      # yals 30/09 : gemma4 inconnu de ce YALS — trois essais de 2 min pour rien ; rien à réessayer
+      case "$cause" in *"unable to allocate"*) cause="$cause (poids plus gros que la carte : num_gpu_layers 999)" ;; esac
       err "Alias non servable par ce YALS : $cause (HTTP $code)"
       return 1
     fi
