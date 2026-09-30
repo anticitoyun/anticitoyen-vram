@@ -75,7 +75,8 @@ exit 1
     cfg.write_text(f'[chemins]\nkimi_dir = "{kimi}"\ntsv_dir = "{tsv}"\nsecrets = "{tmp_path}/secrets.env"\nbin = "{b}"\n\n'
                    f"[moteurs.acvram]\npresent = true\nport = {port}\n")
     env = {**os.environ, "ACVRAM_PARC_CONFIG": str(cfg), "TMR_ETAT": str(tmp_path / "etat"),
-           "TMR_RESULTATS": str(tsv / "menus-reels.tsv"), "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log")}
+           "TMR_RESULTATS": str(tsv / "menus-reels.tsv"), "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log"),
+           "TMR_CARTE": ""}     # pas d attente « carte vide » (249674e39) : sous une prise GPU, elle attendait 120 s par bras
     yield {"env": env, "tsv": tsv / "menus-reels.tsv", "tmp": tmp_path}
 
 
