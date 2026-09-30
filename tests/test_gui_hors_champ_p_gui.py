@@ -7,7 +7,7 @@ et kimi-modeles :
     1024, tête du fichier ; ph1 30/09, 15096 avant menus) — sous CE seuil, claude-modele refuse
     (mesure de l'invite, err + exit 1), rien ne se lance. La GUI LIT ces seuils (`--seuils`),
     tests/test_seuils_lanceur_ph1.py ; aucune copie.
-  - kimi-modele : KIMI_MCP_CTX_MIN=65536 (parc/bin/kimi-modele:110,115) — sous ce seuil, MCP
+  - kimi-modele : KIMI_MCP_CTX_MIN=65536 (tête du fichier, lu par `--seuils` — 90q 30/09) — sous ce seuil, MCP
     coupés, l'alias se lance quand même ; aucun plancher dur générique (kimi-modele ne refuse
     jamais lui-même pour une fenêtre trop petite, hors le repli propre à l'engin acvram, géré
     par acvram-serveur).

@@ -41,7 +41,8 @@ def seuils_lanceur(nom):
     `<lanceur> --seuils` (une ligne `clé=valeur` par seuil) : la GUI n'en garde AUCUNE copie (ph1, poste6
     30/09 — une copie « 15 096 » avait survécu au passage de claude-modele à 29 120, et la GUI lançait entre
     les deux ce que le lanceur refusait). Lanceur du dépôt (parc/bin, à côté de cette lib) d'abord, sinon
-    celui du parc installé ; `nom` peut être un chemin absolu (tests). Lanceur absent, muet ou en erreur :
+    celui du parc installé ; `nom` peut être un chemin absolu (tests). Valeur vide = pas de seuil (kimi-modele :
+    `seuil_minimum=`, aucun plancher de refus). Lanceur absent, muet ou en erreur :
     aucun seuil (0 / None — la GUI n'affirme rien, le lanceur tranchera), dit sur stderr."""
     absent = {"seuil_complet": 0, "seuil_minimum": None}
     lanceur = Path(nom)
@@ -54,7 +55,7 @@ def seuils_lanceur(nom):
         if r.returncode != 0:
             raise ValueError(f"rc {r.returncode} : {r.stderr.strip()[:200]}")
         lu = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
-        return {cle: int(lu[cle]) for cle in absent}
+        return {cle: (int(lu[cle]) if lu[cle].strip() else None) for cle in absent}   # vide = pas de seuil (kimi)
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
         print(f"{lanceur} --seuils : {e} — aucun seuil affiché", file=sys.stderr)
         return absent
