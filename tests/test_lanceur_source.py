@@ -27,7 +27,8 @@ def poste(tmp_path):
     src = LANCEUR.read_text().replace("PORT=${PARC_PORT_ACVRAM:-8090}", "PORT=1")
     assert "PORT=1" in src, "fixture : la ligne PORT du lanceur a changé — le test viserait le vrai port"
     lanceur = tmp_path / "acvram-serveur"; lanceur.write_text(src); lanceur.chmod(0o755)
-    env = {**os.environ, "HOME": str(home), "ACVRAM_SERVEUR_A_SEC": "1", "ACVRAM_PAQUET_BIN": str(paquet)}
+    env = {**os.environ, "HOME": str(home), "ACVRAM_SERVEUR_A_SEC": "1", "ACVRAM_PAQUET_BIN": str(paquet),
+           "ACVRAM_ATTENTE_VRAM": "0"}   # kwh : la vraie carte hors du test ; test_attente_carte_kwh la simule
     env.pop("ACVRAM_ARBRE", None)
     return {"lanceur": lanceur, "env": env, "arbre": arbre, "paquet": paquet}
 
