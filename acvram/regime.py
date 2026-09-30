@@ -247,6 +247,8 @@ VARIABLES: tuple[Variable, ...] = (
              "cqy (29/09) : lignes par bloc au moins, pour un masque découpé ; refus sous 1 024 (blocs de 7 lignes : pas au bit sur carte)"),
     Variable("PILES_AU_CHARGEMENT", "1", None, None,
              "aym (30/09, 0.7.17) : piles d experts MoE et repack Marlin construits au chargement, AVANT le KV (au bit du témoin paresseux sur carte) ; un OOM du repack garde la pile naturelle, nommé ; 0 = témoin (construction paresseuse, après le KV)"),
+    Variable("PILES_COMPACTER", "1", None, None,
+             "5v7 (30/09, 0.7.17) : les petits survivants des piles d experts (échelles AWQ, global_scale) regroupés par vues avant de rendre le cache — ils épinglaient des segments de 2 Mio (Coder-30B : 7,4 Gio réservés non alloués) ; mêmes valeurs ; 0 = témoin"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",

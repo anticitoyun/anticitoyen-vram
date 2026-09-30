@@ -9,8 +9,11 @@
   repack, ou chauffe à 0 jeton). Elles se construisent désormais au chargement, avant le KV — **au bit** du chemin
   paresseux sur carte (sorties des blocs, génération T=0). `ACVRAM_PILES_AU_CHARGEMENT=0` = témoin.
 * Un OOM pendant le repack Marlin garde la pile naturelle (chemin d'avant), avec sa raison, au lieu de tuer le serveur.
-* Le chargeur dit la VRAM libre avant et après les piles. Sur Coder-30B, elles coûtent 4,58 Gio nets que le plan ne
-  compte pas encore : le serveur refuse désormais au chargement, nommément, au lieu de mourir en OOM.
+* Le chargeur dit la VRAM libre avant et après les piles (alloué, réservé, bassin des petits blocs).
+* **Coder-30B sert à 29 096 (5v7)** : les petits tenseurs qui survivent aux piles (échelles AWQ par expert,
+  `global_scale`) épinglaient les segments de 2 Mio de l'allocateur — 7,4 Gio réservés non alloués, le KV ne tenait plus.
+  Ils sont regroupés par vues (mêmes valeurs) avant de rendre le cache : 6,04 → 13,15 Gio libres après les piles, chauffe
+  29 096/29 096. `ACVRAM_PILES_COMPACTER=0` = témoin.
 
 ## 0.7.16 (30/09/2026)
 

@@ -293,6 +293,7 @@ VARIABLES_LUES = {
     "ACVRAM_MASQUE_OCTETS_MAX", # engine/layers.py : cqy, masque dense découpé d emblée au-delà (défaut 256 Mio, 0 = témoin)
     "ACVRAM_MASQUE_LIGNES_MIN", # engine/layers.py : cqy, lignes par bloc au moins (défaut 1024, refus en dessous)
     "ACVRAM_PILES_AU_CHARGEMENT", # engine/loader.py : aym, piles MoE et repack Marlin avant le KV (défaut 1, 0 = témoin paresseux)
+    "ACVRAM_PILES_COMPACTER",     # engine/moe.py : 5v7, survivants des piles regroupés (défaut 1, 0 = témoin)
     "ACVRAM_PREFILL_FILE",      # engine/runner.py : 276 k, préfill en file dans le pas (opt-in, défaut 0)
     "ACVRAM_TOUR_GRAPHE",       # engine/vision.py : 276 j, graphe CUDA de la tour de vision (opt-in, défaut 0)
     "ACVRAM_TOUR_GRAPHE_MAX",   # engine/vision.py : 276 j, formes d image capturées au plus (défaut 8)

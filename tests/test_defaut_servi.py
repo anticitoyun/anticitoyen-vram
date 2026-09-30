@@ -287,5 +287,6 @@ DEFAUTS_PAR_VERSION["0.7.15"] = ({**DEFAUTS_PAR_VERSION["0.7.14"][0], "MASQUE_OC
 DEFAUTS_PAR_VERSION["0.7.16"] = DEFAUTS_PAR_VERSION["0.7.15"]
 # 0.7.17 (aym, 30/09) : piles d experts MoE et repack Marlin construits au chargement, avant le KV (PILES_AU_CHARGEMENT) —
 # au bit du témoin paresseux sur carte ; un OOM du repack garde la pile naturelle, nommé.
-DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_CHARGEMENT": "1"},
+# 5v7 : survivants des piles regroupés (PILES_COMPACTER) — mêmes valeurs, 7,4 Gio de segments rendus sur Coder-30B.
+DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_CHARGEMENT": "1", "PILES_COMPACTER": "1"},
                                  DEFAUTS_PAR_VERSION["0.7.16"][1])

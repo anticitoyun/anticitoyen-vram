@@ -37,3 +37,16 @@ Correctif écrit à sec (`moe.py`, `_compacter_survivants`, témoin `ACVRAM_PILE
 main). Prise : `BRAS="A B" diag.sh` — A = compaction 0 (confirme ou réfute H), B = compaction 1.
 * Prédit si H vraie : B libère ≥ 3,5 Gio de plus que A après les piles (libres B ≥ 9,5 Gio), plus de refus « 6,04 pour 6,90 ».
 * Si A montre réservé − alloué < 1 Gio : H fausse, B sans effet attendu, le correctif ne part pas.
+
+## Mesure (30/09 16:36-16:38, carte.sh `poste1-5v7-diag`, tenue 132 s ; début et fin : 5090 vide, seul 8081 ; arbre 4be289f8f)
+Coder-30B qkvo-i8c, 29 096, piles au chargement ; ligne du chargeur (`diag-A.log`, `diag-B.log`) :
+
+| bras | libres avant → après piles | alloué | réservé | petits blocs réservé/alloué | suite |
+|---|---|---|---|---|---|
+| A (compaction 0) | 10,62 → 6,04 Gio | 16,78 | 24,69 | **7,42 / 0,14 Gio** | refus « 6,04 pour 6,90 Gio de KV » |
+| B (compaction 1) | 10,62 → **13,15 Gio** | 16,78 | 17,58 | 0,31 / 0,02 Gio | chauffe **29 096/29 096** (26,7 s, 3 962 Mio libres), Uvicorn : **SERT** |
+
+**Verdict : H VRAIE.** Alloué identique (16,78 Gio) : les piles ne coûtent rien de réel. Les 4,58 Gio, et même 7,3 Gio de
+réservé non alloué, étaient des segments de 2 Mio épinglés par les petits survivants. Le regroupement les rend tous :
+13,15 Gio libres, contre 10,62 avant les piles, car les originaux des experts sont rendus eux aussi. La prémisse du plan
+(Σ × 1) est JUSTE : rien à compter de plus. Le correctif ne touche pas le plan.
