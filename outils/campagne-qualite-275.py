@@ -5,11 +5,14 @@ de trois lancements manuels.
 
 `--simule` (défaut) : aucune carte, aucun processus — imprime le plan (alias présent
 au menu, référence trouvée, doublon de dossier, durée prédite) et sort 0.
-`--executer` : lance `outils/qualite.sh <alias> <bras>` pour chaque candidat, dans
-l'ordre, sous ATTENDU=<HEAD court> ; s'arrête au premier FAUX (REGLES : un FAUX est
-un résultat, on ne l'enterre pas sous une suite qui continue quand même). Requiert
-ATTENDU déjà posé dans l'environnement (le même contrôle que qualite.sh lui-même) ET
-la confirmation explicite `--je-sais-que-la-carte-est-libre`, jamais déduite ici.
+`--executer` : génère d'abord la référence manquante (Qwen3-4B-srcgguf-nvfp4, décision
+chef 30/09 — les 3 modèles, pas 2) via `generer-reference-v2.sh`, puis lance
+`outils/qualite.sh <alias> <bras>` pour chaque candidat, dans l'ordre, sous
+ATTENDU=<HEAD court> ; s'arrête au premier FAUX (REGLES : un FAUX est un résultat, on
+ne l'enterre pas sous une suite qui continue quand même). Requiert ATTENDU déjà posé
+dans l'environnement (même contrôle que qualite.sh) ET la confirmation explicite
+`--je-sais-que-la-carte-est-libre`, jamais déduite ici. `ACVRAM_POSTE=poste2` posé pour
+chaque sous-appel (carte.sh, ordre chef 30/09) sauf s'il est déjà dans l'environnement.
 """
 import argparse
 import os
@@ -133,18 +136,38 @@ def _head() -> str:
                            capture_output=True, text=True, check=True).stdout.strip()
 
 
+def _env():
+    e = dict(os.environ)
+    e.setdefault("ACVRAM_POSTE", "poste2")
+    return e
+
+
 def executer():
     if "ATTENDU" not in os.environ:
         print("REFUS : ATTENDU=<HEAD court> requis (même contrôle que qualite.sh)", file=sys.stderr)
         return 66
     lignes = preparer()
     for l in lignes:
-        if not l["present"] or not l["reference"] or l["doublon_de"] or l["hors_champ"]:
+        if not l["present"] or l["doublon_de"] or l["hors_champ"]:
             print(f"REFUS : {l['alias']} n'est pas prêt (rejoue --simule)", file=sys.stderr)
             return 66
+
+    for l in lignes:
+        if l["reference"]:
+            continue
+        ref_dossier = next(c["ref_dossier"] for c in CANDIDATS if c["alias"] == l["alias"])
+        print(f"=== référence manquante {ref_dossier} — génération (5 prises)")
+        r = subprocess.run(
+            ["scratchpad/poste2-p275-26-09/generer-reference-v2.sh", ref_dossier],
+            cwd=RACINE, env=_env(),
+        )
+        if r.returncode != 0:
+            print(f"REFUS : génération de référence échouée pour {ref_dossier} (rc={r.returncode})", file=sys.stderr)
+            return r.returncode
+
     for c in CANDIDATS:
         print(f"=== {c['alias']} (bras={BRAS})")
-        r = subprocess.run(["outils/qualite.sh", c["alias"], BRAS], cwd=RACINE)
+        r = subprocess.run(["outils/qualite.sh", c["alias"], BRAS], cwd=RACINE, env=_env())
         if r.returncode != 0:
             print(f"FAUX sur {c['alias']} (rc={r.returncode}) — arrêt, pas de suite en aveugle", file=sys.stderr)
             return r.returncode
