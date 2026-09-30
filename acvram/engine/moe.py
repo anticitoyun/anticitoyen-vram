@@ -343,7 +343,20 @@ class MoEBlock(nn.Module):
         self._stacks = piles
         self._stacks_awq = awq
         self._raison_marlin = ""
-        self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
+        try:
+            self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
+        except torch.OutOfMemoryError:
+            # aym : le repack (seconde copie + w13) n était pas sous la garde de la pile naturelle ci-dessus — le
+            # serveur mourait (edz 30/09, 15 alias Coder-30B). Refus nommé, pile naturelle gardée : le chemin d avant,
+            # celui d une couche refusée pour ses sous-normales
+            self._stacks_marlin = None
+            self._raison_marlin = "mémoire GPU insuffisante pendant le repack Marlin"
+            # pas d empty_cache ICI : la trace de l exception tient encore les copies partielles ; le rendu au
+            # pilote se fait en sortie (`_rendre_le_cache_apres_la_pile`)
+            if not getattr(MoEBlock, "_marlin_oom_dit", False):
+                MoEBlock._marlin_oom_dit = True
+                print(f"[acvram] disposition Marlin refusée : {self._raison_marlin} — pile naturelle gardée, "
+                      "prefill « groupe », décodage d'avant", flush=True)
         self._tensor_refus = self._raison_tensor()              # pièce 65 : "" = chemin tensor pris en charge
         if self._stacks_marlin is not None:
             if _DOUBLE_DIAG:

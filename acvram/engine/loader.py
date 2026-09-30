@@ -942,6 +942,20 @@ def load_model(path: str, plan: Optional[Plan] = None,
             elif hasattr(m, "fuse") and type(m).__name__ == "GatedDeltaNet":
                 m.fuse()
 
+    # aym (30/09, edz définitif : 18 alias qwen3-coder-30b-a3b / qwen3-vl-30b-a3b à 29 096-32 768 morts au démarrage) :
+    # les piles d experts et leur repack Marlin se construisaient APRÈS le KV — dans `GraphRunner._eligible`
+    # (graphs.py:473) ou avant la chauffe (ya1, contexte.py) —, quand le budget KV avait déjà rempli la carte jusqu à la
+    # marge : pile empilée + copie Marlin + concaténation w13 d une couche ne tenaient plus (OOM dans
+    # `_construire_marlin` à 48 Mio libres, ou 11 couches sur 48 en boucle par expert puis chauffe à 0 jeton). Le plan
+    # compte déjà la pile en régime établi (loader `_reserve_prefill` : Σ × 1, la Marlin REMPLACE la naturelle) ; seul le
+    # transitoire manquait. Construites ici, KV encore libre, comme les fusions ci-dessus : mêmes piles, même sortie,
+    # seul le moment change. ACVRAM_PILES_AU_CHARGEMENT=0 : témoin (construction d avant, paresseuse).
+    if a_allouer and os.environ.get("ACVRAM_PILES_AU_CHARGEMENT", "1") != "0":
+        from .contexte import construire_piles_sur_carte
+        n_piles = construire_piles_sur_carte(layers)
+        if n_piles:
+            print(f"[acvram] piles d experts construites au chargement, avant le KV : {n_piles} couches", flush=True)
+
     # Chaque empilement alloue son tenseur concatene avant de liberer les deux
     # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent
     # dans le cache de l'allocateur, a des tailles qui ne correspondent plus a
