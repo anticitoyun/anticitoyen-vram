@@ -398,6 +398,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
+    Variable("PREFILL_MORCEAU", "0", ("acvram.engine.runner", "_PREFILL_MORCEAU"), None,
+             "kv31b levier 2 étape 1 (30/09, OPT-IN, défaut 0 = un seul tenant) : préfill de l'attention par morceaux de N jetons "
+             "d'invite, lots passés couche par couche (forward_tranches) ; au bit d'un seul tenant sous les mêmes chemins (morceau ≥ 128 "
+             "lignes et > seuil de fusion gate/up pour une invite qui le dépasse, sinon ignoré et dit) ; hors récurrence linéaire"),
     Variable("PREFILL_FILE", "0", ("acvram.engine.runner", "_PREFILL_FILE"), None,
              "pièce 276 k (OPT-IN) : 1 = dans le pas groupé, un forward par séquence dans l'ordre d'admission, jeton rapatrié "
              "après le lancement du forward suivant (copie épinglée + événement) et émis aussitôt (Engine.emettre) : le premier "
