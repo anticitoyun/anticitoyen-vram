@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sys
+import time
 from typing import Any, Optional
 
 import torch
@@ -2147,6 +2148,55 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     return True
 
 
+def dossier_chauffe() -> str:
+    """Où la chauffe dépose la mesure du pic de préfill (un fichier par modèle) ; `ACVRAM_CHAUFFE_CACHE` pour un test."""
+    return os.environ.get("ACVRAM_CHAUFFE_CACHE") or os.path.expanduser("~/.cache/acvram/chauffe")
+
+
+def lire_chauffe(nom: str) -> Optional[dict]:
+    """La dernière mesure de chauffe de ce modèle (`enregistrer_chauffe`), ou None."""
+    try:
+        with open(os.path.join(dossier_chauffe(), f"{nom}.json"), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) and int(d.get("jetons", 0)) > 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def enregistrer_chauffe(nom: str, jetons: int, pic_octets: int, formule_octets: int, **infos: Any) -> dict:
+    """kv31b (preuve carte 30/09, ordre chef) : la chauffe MESURE le pic transitoire d'un préfill de ``jetons`` (comme le
+    `profile_run` de vLLM) — la formule `activations_prefill_bytes` s'y compare et la réserve du prochain chargement s'y
+    cale : ``exces_par_jeton`` = max(0, pic − formule) / jetons est ajouté à la réserve pour toute longueur. gemma-4-31B à
+    20 480 : ≈ 4,9 Gio mesurés contre 2,7 de formule (+111 Kio/jeton) — la chauffe clampait à 20 480 ce que le plan
+    promettait à 31 744."""
+    d = {"nom": nom, "jetons": int(jetons), "pic_octets": int(pic_octets), "formule_octets": int(formule_octets),
+         "exces_par_jeton": max(0, int(pic_octets) - int(formule_octets)) // max(1, int(jetons)),
+         "date": time.strftime("%Y-%m-%dT%H:%M:%S"), **infos}
+    os.makedirs(dossier_chauffe(), exist_ok=True)
+    with open(os.path.join(dossier_chauffe(), f"{nom}.json"), "w", encoding="utf-8") as fh:
+        json.dump(d, fh, indent=1, ensure_ascii=False)
+    return d
+
+
+def _exces_mesure(spec, max_model_len: int, manifest: dict) -> int:
+    """Octets à AJOUTER à la réserve d'un préfill de ``max_model_len`` d'après la dernière chauffe mesurée de ce
+    modèle (0 sans mesure). Dit une fois par processus ce qu'il applique."""
+    nom = (manifest.get("model") or {}).get("name") or getattr(spec, "name", "")
+    m = lire_chauffe(nom) if nom else None
+    if not m or not m.get("exces_par_jeton"):
+        return 0
+    sup = int(m["exces_par_jeton"]) * int(max_model_len)
+    if not _exces_mesure.dits.get(nom):
+        _exces_mesure.dits[nom] = True
+        print(f"[acvram] réserve de préfill calée sur la chauffe du {m.get('date', '?')} ({m['jetons']} jetons : pic "
+              f"{m['pic_octets'] / 2**30:.2f} Gio, formule {m['formule_octets'] / 2**30:.2f}) : +{m['exces_par_jeton'] // 1024} Kio/jeton"
+              f" → +{sup / 2**30:.2f} Gio à {max_model_len}", flush=True)
+    return sup
+
+
+_exces_mesure.dits = {}
+
+
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
                      plan: Optional[Plan] = None) -> int:
     """Octets transitoires à retirer des budgets (KV, exil) :
@@ -2164,7 +2214,7 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
         return 0
     ctx = int(max_model_len or 8192)
     reserve = int(spec.activations_prefill_bytes(ctx)) + _octets_marlin(manifest) \
-        + _plus_grosse_nvfp4_marlin_bytes(manifest)
+        + _plus_grosse_nvfp4_marlin_bytes(manifest) + _exces_mesure(spec, ctx, manifest)
     if plan is not None and plan.layers:
         reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
         # P1 disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile

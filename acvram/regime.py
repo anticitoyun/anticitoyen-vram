@@ -444,6 +444,7 @@ HORS_REGIME = frozenset({
     # tests/test_regime_noyaux.py::test_hors_regime_ne_cache_aucun_regime le garde.
     "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
     "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
+    "ACVRAM_CHAUFFE_CACHE",                                                     # dossier des mesures de chauffe (loader) : un chemin de fichier
     "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
     "ACVRAM_JOURNAL_ARRETS",                                                      # journal des arrêts de moteurs (5xw) : observation
     "ACVRAM_KERNELS_PRECOMPILES",                                                # 240 : dossier d'un .so précompilé — un chemin ; le .so servi est nommé par son empreinte

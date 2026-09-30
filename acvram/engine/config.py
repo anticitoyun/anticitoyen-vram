@@ -14,6 +14,10 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
+# lignes par bloc du masque d attention découpé (layers.py, cqy : PLANCHER_LIGNES) — la formule d activations ne peut pas
+# importer engine.layers (cycle) ; changer l un sans l autre casse tests/test_reserve_attention_kv31b.py
+LIGNES_BLOC_ATTENTION = 1024
+
 __all__ = ["ModelSpec", "LayerSpec", "load_model_spec"]
 
 
@@ -395,6 +399,12 @@ class ModelSpec:
             mlp_jetons = min(T, int(self.mlp_prefill_plafond)) if self.mlp_prefill_plafond else T
             par_jeton += (3 * im * 2 + im * 4) * mlp_jetons // T
             plus_grosse = max(im * H, qkv * H) * 2
+        # kv31b (preuve carte 30/09, gemma-4-31B) : l'attention du préfill coûte, PAR BLOC DE LIGNES du masque (layers.py,
+        # cqy : ≥ LIGNES_BLOC_ATTENTION lignes), scores/masque [têtes × lignes × T] en fp32 — la chauffe a mesuré ≈ 4,9 Gio
+        # à 20 480 jetons contre 2,7 de formule : +111 Kio/jeton ; ce terme en vaut 128 (en bf16 il n'en vaudrait que 64 et
+        # ne couvrirait pas la mesure). Hypothèse nommée : la chauffe compare désormais la formule au pic mesuré (loader
+        # `enregistrer_chauffe`) et le dit. Sans lui, le plan promettait 31 744 et la chauffe clampait à 20 480.
+        par_jeton += self.num_attention_heads * min(T, LIGNES_BLOC_ATTENTION) * 4
         # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
         # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),
         # et non plus un seul à la fois : sur Qwen3.8, 232 Mio contre les 178 de la plus grosse matrice ci-dessus.

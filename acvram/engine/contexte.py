@@ -82,6 +82,12 @@ class ChauffeContexte:
         self._avant_essai_de_chauffe()                                   # (3) chaque pas part d un allocateur vide
         seq = self.sequence_de_chauffe(L - 2)
         en_cache = self.stats.cached_prompt_tokens
+        # kv31b : le pic transitoire de la passe (alloué, pas réservé) — ce que la réserve de préfill doit couvrir
+        dev = self.model.embed_tokens.device
+        mesure = torch.cuda.is_available() and dev.type == "cuda"
+        if mesure:
+            torch.cuda.synchronize(dev); torch.cuda.reset_peak_memory_stats(dev)
+            base = torch.cuda.memory_allocated(dev)
         try:
             if prefixe:
                 for _ in self.generate(seq[:2 * BLOCK_SIZE], SamplingParams(max_tokens=1, temperature=0.0)):
@@ -101,6 +107,8 @@ class ChauffeContexte:
             self.stats.cached_prompt_tokens = en_cache
         libre, total = self._libre_apres_chauffe()
         seuil = max(total * 5 // 100, 64 << 20)
+        if mesure:
+            self.pic_chauffe = (L, int(torch.cuda.max_memory_allocated(dev) - base))
         self._oublier_la_chauffe()
         if libre < seuil:                                                # (b) : tenu sans réserve = non tenu
             if torch.cuda.is_available():
@@ -227,6 +235,7 @@ class ChauffeContexte:
         self.graphs = graphes
         self.ctx_demande = n
         self.ctx_tenu = tenu
+        self._enregistrer_pic_de_chauffe(tenu)
         r = self.reserve_chauffe
         print(f"[acvram] chauffe du contexte : {tenu}/{n} jetons tenus en {time.time() - t0:.1f} s"
               + (f", {r[0] >> 20} Mio libres après la passe (réserve ≥ {r[1] >> 20})" if r else ""), flush=True)
@@ -239,6 +248,22 @@ class ChauffeContexte:
             print(f"[acvram] contexte clampé à {tenu} (demandé {n}) : une invite au-delà reçoit un 400 nommé",
                   flush=True)
         return tenu
+
+    def _enregistrer_pic_de_chauffe(self, tenu: Optional[int]) -> None:
+        """kv31b : compare le pic mesuré de la passe tenue à la formule et le dépose pour le prochain chargement
+        (`loader.enregistrer_chauffe`) — la réserve de préfill se cale sur la mesure, plus seulement sur la formule."""
+        pic = getattr(self, "pic_chauffe", None)
+        if not tenu or not pic or pic[0] != tenu:
+            return
+        from .loader import enregistrer_chauffe
+        spec = self.model.spec
+        formule = int(spec.activations_prefill_bytes(tenu))
+        d = enregistrer_chauffe(getattr(spec, "name", "") or "modele", tenu, pic[1], formule,
+                                kv_format=self.kv_format_servi() if hasattr(self, "kv_format_servi") else "?",
+                                plafond=getattr(spec, "mlp_prefill_plafond", None), max_model_len=int(self.max_model_len))
+        print(f"[acvram] chauffe : pic transitoire du préfill {pic[1] / 2**30:.2f} Gio à {tenu} jetons "
+              f"({pic[1] // tenu // 1024} Kio/jeton ; formule {formule / 2**30:.2f} Gio, {formule // tenu // 1024} Kio/jeton) — "
+              f"excès {d['exces_par_jeton'] // 1024} Kio/jeton enregistré pour le prochain chargement", flush=True)
 
     def _recapturer(self, warm_max_len: int) -> int:
         """Graphes neufs au ``max_model_len`` courant (les captures précédentes sont rendues), puis capture d avance."""
