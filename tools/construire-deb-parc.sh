@@ -10,7 +10,7 @@ rm -rf "$PKG"
 install -d "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/acvram-parc/lib" "$PKG/usr/share/acvram-parc/gabarits" \
            "$PKG/usr/share/acvram-parc/systemd-user" "$PKG/usr/share/applications" \
            "$PKG/usr/share/icons/hicolor/scalable/apps" "$PKG/usr/share/icons/hicolor/256x256/apps" "$PKG/usr/share/doc/acvram-parc"
-for s in claude-modele kimi-modele claude-modeles kimi-modeles modeles-a-jour integrite-modeles telecharger-modele parc-installer openwebui-medias; do
+for s in claude-modele kimi-modele claude-modeles kimi-modeles modeles-a-jour integrite-modeles telecharger-modele parc-installer openwebui-medias kimi-yals kimi-tabby; do
     install -m 755 "parc/bin/$s" "$PKG/usr/bin/$s"
 done
 install -m 644 parc/lib/acvram_parc.py parc/lib/carte_rendue.py "$PKG/usr/share/acvram-parc/lib/"

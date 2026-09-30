@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# kimi-yals — kimi sur un modèle GGUF servi par YALS (llama.cpp) : choix, démarrage du serveur, chargement, puis kimi.
+# Usage : kimi-yals [alias] [arguments kimi...]
+#   kimi-yals                      menu interactif
+#   kimi-yals yals-qwen3-coder     lance directement cet alias
+# Importé dans le parc le 30/09 (zjf) depuis un script personnel : chemins par parc.toml et le config.yml de YALS,
+# clés lues à l'exécution dans l'api_tokens.yml que YALS génère, aucun chemin ni clé dans ce fichier.
+#   dossier YALS : KIMI_YALS_DIR, sinon dossier de [moteurs.yals] chemin (le binaire) ; aucun défaut de machine
+#   port du serveur et dossier des modèles : network.port et model.model_dir de <dossier>/config.yml
+#   port du proxy mémoire (celui que kimi interroge) : [moteurs.yals] port (5011)
+set -uo pipefail
+
+PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
+_ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
+set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
+
+YALS_DIR=${KIMI_YALS_DIR:-${PARC_CHEMIN_YALS:+$(dirname "$PARC_CHEMIN_YALS")}}
+[ -n "$YALS_DIR" ] || { printf 'dossier de YALS inconnu : [moteurs.yals] chemin = "<dossier>/YALS" dans parc.toml, ou KIMI_YALS_DIR\n' >&2; exit 1; }
+lire_conf() { awk -v k="$1" '$1 == k":" {print $2; exit}' "$YALS_DIR/config.yml" 2>/dev/null; }
+YALS_PORT=$(lire_conf port); YALS_PORT=${YALS_PORT:-5010}
+API="http://127.0.0.1:$YALS_PORT"
+PROXY_PORT=${PARC_PORT_YALS:-5011}
+MODELES_GGUF=$(lire_conf model_dir)
+ATTENTE_CHARGEMENT=${KIMI_YALS_ATTENTE_CHARGEMENT:-120}   # un /load parti en arrière-plan (200 sans modèle)
+REPONSE=$(mktemp); trap 'rm -f "$REPONSE"' EXIT      # corps de la réponse de /load (était /tmp/kimi-yals-load.json)
+
+c_t=$'\e[1;36m'; c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_t=''; c_d=''; c_v=''; c_r=''; c_0=''; }
+
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+
+# --- liste des alias yals : 7 colonnes tabulées --------------------------------
+lister_alias() {
+  python3 - "$PARC_CONFIG" "$PARC_NOTES_TSV" <<'PY'
+import sys, tomllib
+NOTES = {}
+try:
+    for ligne in open(sys.argv[2]):
+        c = ligne.rstrip('\n').split('\t')
+        if len(c) == 5:
+            NOTES[c[0]] = (c[1], c[2], c[3], c[4])
+except OSError:
+    pass
+
+d = tomllib.load(open(sys.argv[1], 'rb'))
+items = [(a, m) for a, m in d.get('models', {}).items()
+         if m.get('provider') == 'yals']
+items.sort()
+for alias, m in items:
+    # notes partagées avec l'alias jan équivalent si absentes
+    refus, tps, qual, usage = NOTES.get(alias, NOTES.get('jan-' + alias[5:], ('?', '?', '?', '?')))
+    print('\t'.join([alias, m.get('model', '?'), str(m.get('max_context_size', '')), refus, tps, qual, usage]))
+PY
+}
+
+# --- le disque des modèles doit être monté ----------------------------------
+# étiquette du disque = premier dossier sous /mnt (montage par étiquette, comme udisks le fait)
+monter_disque() {
+  [ -n "$MODELES_GGUF" ] || { err "model_dir absent de $YALS_DIR/config.yml."; return 1; }
+  [ -d "$MODELES_GGUF" ] && return 0
+  local etiquette
+  etiquette=$(printf '%s' "$MODELES_GGUF" | awk -F/ '$2 == "mnt" {print $3}')
+  printf '%sDisque des modèles non monté, montage…%s\n' "$c_d" "$c_0"
+  [ -n "$etiquette" ] && udisksctl mount -b "/dev/disk/by-label/$etiquette" >/dev/null 2>&1
+  [ -d "$MODELES_GGUF" ] && return 0
+  err "Dossier des modèles introuvable : $MODELES_GGUF (disque non monté ?)"
+  return 1
+}
+
+# --- clés d'API générées par YALS au premier démarrage ------------------------
+cle_api()   { awk '/^api_key:/{print $2}'   "$YALS_DIR/api_tokens.yml" 2>/dev/null; }
+cle_admin() { awk '/^admin_key:/{print $2}' "$YALS_DIR/api_tokens.yml" 2>/dev/null; }
+
+# PID qui écoute un port : le serveur visé, pas un homonyme (`pgrep -x YALS` tuait n'importe quel YALS du poste)
+pid_port() { ss -tlnp 2>/dev/null | grep "127.0.0.1:$1 " | grep -oP 'pid=\K[0-9]+' | head -1; }
+
+# yals 30/09 : lancer par `( cd … && setsid nohup X >> log & )` laissait le sous-shell de la liste vivant avec le
+# stdout/stderr de l'APPELANT jusqu'à la mort de X ; `kimi -p` capturé (harnais, menus) restait « muet 300 s » alors
+# que kimi avait fini en 3 s. La redirection porte sur le sous-shell, et exec le remplace par le démon.
+detacher() {   # detacher <journal> <commande…>  (cwd = YALS_DIR)
+  local journal=$1; shift
+  ( cd "$YALS_DIR" && exec setsid nohup "$@" ) >> "$journal" 2>&1 < /dev/null &
+}
+
+# --- proxy mémoire + compaction automatique -----------------------------------
+demarrer_proxy() {
+  [ -n "$(pid_port "$PROXY_PORT")" ] && return 0
+  printf '%sDémarrage du proxy mémoire (journal + compaction)…%s\n' "$c_d" "$c_0"
+  PROXY_PORT=$PROXY_PORT PROXY_AMONT="$API" detacher "$YALS_DIR/proxy.log" python3 kimi-memoire-proxy.py
+  for _ in $(seq 1 15); do
+    [ -n "$(pid_port "$PROXY_PORT")" ] && return 0
+    sleep 1
+  done
+  err "Le proxy mémoire n'a pas démarré (voir $YALS_DIR/proxy.log)."
+  return 1
+}
+
+# --- arrêt du YALS en place ------------------------------------------------------
+# puis la garde partagée du parc (kwh) : un serveur tué n'a pas encore rendu sa VRAM
+_carte_rendue=${PARC_CARTE_RENDUE:-$_ici/../lib/carte_rendue.py}
+[ -f "$_carte_rendue" ] || _carte_rendue=/usr/share/acvram-parc/lib/carte_rendue.py
+arreter_yals() {
+  local pid
+  pid=$(pid_port "$YALS_PORT")
+  [ -n "$pid" ] || return 0
+  kill "$pid" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+  kill -9 "$pid" 2>/dev/null
+  if [ -f "$_carte_rendue" ]; then
+    python3 "$_carte_rendue" --nom yals --remplace "$pid" --cartes "${CUDA_VISIBLE_DEVICES:-0}" || return 1
+  fi
+}
+
+# --- démarrage de YALS et attente de son port --------------------------------------
+# un chargement interrompu (timeout, OOM) laisse YALS sans modèle déclaré mais
+# dans un état où /load répond 200/422 sans rien charger (« fantôme »).
+# Un YALS sans modèle n'a rien à préserver : on repart d'un processus neuf.
+fantome_yals() {
+  [ -n "$(pid_port "$YALS_PORT")" ] || return 0
+  [ -n "$(modele_charge)" ] && return 0
+  printf '%sYALS sans modèle déclaré : redémarrage préventif…%s\n' "$c_d" "$c_0"
+  arreter_yals
+}
+
+demarrer_yals() {
+  fantome_yals || return 1
+  if curl -s -m 3 "$API/health" >/dev/null 2>&1 && [ -n "$(pid_port "$YALS_PORT")" ]; then
+    demarrer_proxy || return 1
+    return 0
+  fi
+  arreter_yals || return 1
+  printf '%sDémarrage de YALS…%s\n' "$c_d" "$c_0"
+  LD_LIBRARY_PATH="$YALS_DIR/lib" detacher "$YALS_DIR/yals.log" "$YALS_DIR/YALS"
+  for _ in $(seq 1 30); do
+    [ -n "$(pid_port "$YALS_PORT")" ] && { printf '%sYALS prêt sur 127.0.0.1:%s%s\n' "$c_v" "$YALS_PORT" "$c_0"; demarrer_proxy; return 0; }
+    sleep 2
+  done
+  err "YALS n'a pas démarré (voir $YALS_DIR/yals.log)."
+  return 1
+}
+
+# --- template d'appels d'outils pour la famille ChatML (Qwen et dérivés) ------
+# YALS ne parse les appels d'outils qu'avec un template déclarant tool_start ;
+# chatml_outils.jinja convient aux modèles ChatML. Les Qwen3.5 (M-RoPE) restent
+# exclus : bogue amont YALS (doublement du prompt) qui casse leur cache.
+template_outils() {
+  local m
+  m=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$m" in
+    *qwen3.5*|*qwen35*) echo "" ;;
+    *qwen*|*agents-a1*|*ornith*|*awaxis*|*apex*|*fable*) echo chatml_outils ;;
+    *) echo "" ;;
+  esac
+}
+
+modele_charge() {
+  curl -s -m 3 -H "Authorization: Bearer $(cle_api)" "$API/v1/model" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null
+}
+
+# --- chargement du modèle via l'API admin ------------------------------------
+charger_modele() {
+  local modele="$1" ctx="$2" t0=$SECONDS actuel
+  actuel=$(modele_charge)
+  [ "$actuel" = "$(basename "$modele")" ] && { printf '%sModèle déjà chargé.%s\n' "$c_v" "$c_0"; return 0; }
+  if [ -n "$actuel" ]; then
+    # le déchargement YALS est asynchrone et laisse le moteur instable : un /load
+    # dans cette fenêtre part en chargement fantôme. Changer de modèle = YALS neuf.
+    printf '%sChangement de modèle : redémarrage de YALS…%s\n' "$c_d" "$c_0"
+    arreter_yals || return 1
+    demarrer_yals || return 1
+  fi
+  local code gabarit supplement="" essai ctx_essai="$ctx" debut neuf cause reponse="$REPONSE"
+  gabarit=$(template_outils "$modele")
+  [ -n "$gabarit" ] && supplement=", \"prompt_template\": \"$gabarit\""
+  for essai in 1 2 3; do
+    printf '%sChargement de %s (contexte %s)…%s\n' "$c_d" "$modele" "$ctx_essai" "$c_0"
+    debut=$(stat -c %s "$YALS_DIR/yals.log" 2>/dev/null || echo 0)
+    code=$(curl -s -m 900 -o "$reponse" -w '%{http_code}' \
+      -H "Authorization: Bearer $(cle_admin)" -H 'Content-Type: application/json' \
+      -d "{\"model_name\": \"$modele\", \"max_seq_len\": $ctx_essai, \"num_gpu_layers\": 999, \"cache_mode_k\": \"q8_0\", \"cache_mode_v\": \"q8_0\"$supplement}" \
+      "$API/v1/model/load")
+    if [ "$code" = "200" ] && [ "$(modele_charge)" = "$(basename "$modele")" ]; then
+      echo "$ctx_essai" > "$YALS_DIR/ctx-actuel"   # lu par le proxy pour borner max_tokens
+      printf '%sModèle chargé en %ss (contexte %s)%s\n' "$c_v" "$((SECONDS - t0))" "$ctx_essai" "$c_0"
+      return 0
+    fi
+    # la cause est dans le journal de CE chargement (YALS rend 200 même quand llama.cpp refuse le modèle)
+    neuf=$(tail -c +$(( debut + 1 )) "$YALS_DIR/yals.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+    cause=$(grep -oE "unknown model architecture: '[^']*'" <<< "$neuf" | tail -1)
+    if [ -n "$cause" ]; then
+      # yals 30/09 : gemma4 inconnu de ce YALS — trois essais de 2 min pour rien ; rien à réessayer
+      err "Alias non servable par ce YALS : $cause (HTTP $code)"
+      return 1
+    fi
+    if [ "$code" = "422" ]; then
+      # zjf : le 422 « Model context not initialized » est DÉFINITIF (le cache KV n'a pas tenu) ; attendre
+      # 120 s un chargement « en arrière-plan » qui n'existe pas faisait dépasser 300 s au client (granite41-30b)
+      cause=$(grep -oE 'allocating [0-9.]+ MiB on device [0-9]+: cudaMalloc failed: out of memory' <<< "$neuf" | tail -1)
+      err "Cache KV trop grand au contexte $ctx_essai (HTTP 422${cause:+ : $cause})"
+    else
+      # laisser une chance à un chargement parti en arrière-plan (POST 200 immédiat)
+      for _ in $(seq 1 $(( ATTENTE_CHARGEMENT / 5 ))); do
+        sleep 5
+        if [ "$(modele_charge)" = "$(basename "$modele")" ]; then
+          echo "$ctx_essai" > "$YALS_DIR/ctx-actuel"
+          printf '%sModèle chargé (en arrière-plan) en %ss (contexte %s)%s\n' "$c_v" "$((SECONDS - t0))" "$ctx_essai" "$c_0"
+          return 0
+        fi
+      done
+    fi
+    if [ "$ctx_essai" -le 32768 ]; then
+      break
+    fi
+    ctx_essai=$((ctx_essai / 2)); [ "$ctx_essai" -lt 32768 ] && ctx_essai=32768
+    printf '%sChargement non confirmé (HTTP %s) : contexte réduit à %s, YALS redémarré…%s\n' \
+      "$c_d" "$code" "$ctx_essai" "$c_0"
+    arreter_yals || return 1
+    demarrer_yals || return 1
+  done
+  err "Échec du chargement (HTTP $code) : $(head -c 200 "$reponse" 2>/dev/null)"
+  return 1
+}
+
+# --- le gabarit de chat passe-t-il ? -------------------------------------------
+# nemotron 30/09 : le gabarit du GGUF utilisait le test Jinja `sequence`, inconnu du moteur Jinja de YALS ; YALS
+# rendait 200 et un flux VIDE à chaque requête, kimi réessayait 9 fois (attente doublée) : 300 s de silence. Une
+# complétion d'un jeton, avec un outil comme kimi en envoie, fait rendre le gabarit tout de suite ; l'erreur est
+# lue dans le journal de CETTE requête.
+sonder_gabarit() {
+  local debut rep erreur
+  debut=$(stat -c %s "$YALS_DIR/yals.log" 2>/dev/null || echo 0)
+  rep=$(curl -s -m 120 -H "Authorization: Bearer $(cle_api)" -H 'Content-Type: application/json' \
+    -d "{\"model\": \"$(basename "$1")\", \"max_tokens\": 1, \"stream\": false,
+         \"messages\": [{\"role\": \"system\", \"content\": \"sonde\"}, {\"role\": \"user\", \"content\": \"ok\"}],
+         \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"sonde\", \"description\": \"sonde\",
+                      \"parameters\": {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}}}}]}" \
+    "$API/v1/chat/completions" 2>/dev/null)
+  erreur=$(tail -c +$(( debut + 1 )) "$YALS_DIR/yals.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+    | grep -oE '^Error: .*' | head -1)
+  if [ -n "$erreur" ]; then
+    err "Gabarit de chat refusé par YALS : ${erreur#Error: } (gabarit ${2:-du GGUF})"
+    return 1
+  fi
+  python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.stdin.read())["choices"] else 1)' <<< "$rep" 2>/dev/null \
+    || { err "Complétion d'essai sans réponse (YALS) : $(head -c 160 <<< "$rep")"; return 1; }
+}
+
+# --- programme principal ----------------------------------------------------
+choix=""
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+  choix="$1"; shift
+fi
+
+if [ -z "$choix" ]; then
+  # menu (commun aux lanceurs kimi) : seulement s'il sert
+  _lib="$_ici/../share/kimi-menu.lib.sh"; [ -f "$_lib" ] || _lib="$PARC_LIB"
+  . "$_lib"
+  choix=$(choisir_alias "Modèles YALS (llama.cpp)" "$(modele_charge)") || exit 1
+fi
+
+modele=$(lister_alias | awk -F'\t' -v a="$choix" '$1 == a {print $2}')
+contexte=$(lister_alias | awk -F'\t' -v a="$choix" '$1 == a {print $3}')
+if [ -z "$modele" ]; then
+  err "Alias yals inconnu : $choix"
+  err "Alias disponibles : $(lister_alias | cut -f1 | tr '\n' ' ')"
+  exit 1
+fi
+[ -n "$contexte" ] || contexte=32768
+
+monter_disque || exit 1
+demarrer_yals || exit 1
+charger_modele "$modele" "$contexte" || exit 1
+sonder_gabarit "$modele" "$(template_outils "$modele")" || exit 1
+
+printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
+rm -f "$REPONSE"   # exec ne passe pas par le trap EXIT
+exec "$PARC_KIMI" -m "$choix" "$@"
