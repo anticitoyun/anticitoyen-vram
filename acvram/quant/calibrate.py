@@ -613,9 +613,24 @@ def quantize_with_calibration(
 
     w_eff = w * scaler.scale.to(torch.float32).unsqueeze(0) \
         if scaler.scale is not None else w
+    supplement: dict = {}
+    if fmt == "nvfp4":
+        from .nvfp4 import echelle_courante
+        if echelle_courante() == "balayage-w":
+            # 11e (poste6 30/09) : la WMSE de ScaleSweep pèse chaque entrée j par ≈ E[x'_j²], x' = x/s étant ce que
+            # le poids quantifié w·s voit vraiment. On n'a que E|x_j| (ActStats.mean_abs) : (E|x|/s)² est un proxy
+            # nommé (E[x²] ≥ (E|x|)²), constant par tenseur en facteur — seul le rapport entre entrées compte.
+            if stats is None:
+                raise ValueError("--echelle balayage-w exige des statistiques d'activation (calibration AWQ) : "
+                                 "aucune pour ce tenseur")
+            imp = stats.mean_abs.to(w.device, torch.float32).reshape(-1)
+            if scaler.scale is not None:
+                imp = imp / scaler.scale.to(w.device, torch.float32).reshape(-1)
+            supplement["importance"] = imp ** 2
     qt = formats.quantize(w_eff, fmt, group_size=group_size,
                           **({"table": table} if fmt == "q3n" else {}),
-                          **({"symmetric": symmetric} if fmt == "int8" else {}))
+                          **({"symmetric": symmetric} if fmt == "int8" else {}),
+                          **supplement)
 
     deq = formats.dequantize(qt, torch.float32)
     if scaler.scale is not None:

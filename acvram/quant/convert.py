@@ -1547,12 +1547,20 @@ def _noter_echelle_nvfp4(manifest: dict, entry: dict, qt: Any) -> None:
     if not st or not st.get("blocs"):
         return
     n = st["blocs"]
+    # 11e (30/09) : balayage/balayage-w ajoutent `balayes` (blocs ayant quitté s_base) et toutes les règles
+    # `sous_normales` (échelles E4M3 sous-normales, celles que Marlin peut écraser — refus ya1), même contrat.
     entry["echelle"] = {"regle": st["echelle"], "blocs": n, "part_amax4": round(st["amax4"] / n, 4),
-                        "part_clampes": round(st["clampes"] / n, 4)}
-    tot = manifest.setdefault("echelle_nvfp4", {"regle": st["echelle"], "blocs": 0, "amax4": 0, "clampes": 0})
+                        "part_clampes": round(st["clampes"] / n, 4),
+                        "part_balayes": round(st.get("balayes", 0) / n, 4),
+                        "sous_normales": st.get("sous_normales", 0)}
+    tot = manifest.setdefault("echelle_nvfp4", {"regle": st["echelle"], "blocs": 0, "amax4": 0, "clampes": 0,
+                                                "balayes": 0, "sous_normales": 0})
     tot["blocs"] += n; tot["amax4"] += st["amax4"]; tot["clampes"] += st["clampes"]
+    tot["balayes"] = tot.get("balayes", 0) + st.get("balayes", 0)
+    tot["sous_normales"] = tot.get("sous_normales", 0) + st.get("sous_normales", 0)
     tot["part_amax4"] = round(tot["amax4"] / tot["blocs"], 4)
     tot["part_clampes"] = round(tot["clampes"] / tot["blocs"], 4)
+    tot["part_balayes"] = round(tot["balayes"] / tot["blocs"], 4)
 
 
 def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
