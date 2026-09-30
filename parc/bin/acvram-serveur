@@ -41,72 +41,13 @@ _ici=$(dirname "$(readlink -f "$0")")
 [ -n "$CUDA_VISIBLE_DEVICES" ] || CUDA_VISIBLE_DEVICES=0
 export CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER
 
-# CARTE RENDUE (kwh, edz 30/09 00:48 : 10 OOM en 3 min au changement de modèle). Un serveur mort n'a pas encore
-# rendu sa VRAM : le pilote la libère APRÈS que le PID a quitté compute-apps, et un processus en sortie y figure
-# encore. Démarrer là-dessus = OOM, qui en entraîne d'autres. On attend donc, sur la carte servie : aucun PID de
-# calcul mourant (disparu, zombie, PF_EXITING) ni le PID remplacé ($1) vivant, et au plus ACVRAM_ORPHELINS_MIO de
-# VRAM utilisée sans processus (utilisée − Σ compute-apps). Un autre processus VIVANT (ComfyUI, 8081) ne fait pas
-# attendre : il ne rendra rien. Délai ACVRAM_ATTENTE_VRAM (s, 0 = coupé), puis REFUS nommé plutôt qu'un OOM.
+# CARTE RENDUE (kwh, edz 30/09 00:48 : 10 OOM en 3 min au changement de modèle) : un serveur mort n'a pas encore
+# rendu sa VRAM. Garde partagée des trois lanceurs, parc/lib/carte_rendue.py (le pourquoi y est) ; $1 = PID remplacé.
+_carte_rendue=${PARC_CARTE_RENDUE:-$(dirname "$(readlink -f "$0")")/../lib/carte_rendue.py}
+[ -f "$_carte_rendue" ] || _carte_rendue=/usr/share/acvram-parc/lib/carte_rendue.py
 attendre_carte_rendue() {
-    [ "${ACVRAM_ATTENTE_VRAM:-60}" = 0 ] && return 0
-    local r
-    r=$(REMPLACE="${1:-}" python3 - <<'PYEOF'
-import os, subprocess, time
-gpu = os.environ["CUDA_VISIBLE_DEVICES"].split(",")[0]
-delai = float(os.environ.get("ACVRAM_ATTENTE_VRAM", "60"))
-seuil = int(os.environ.get("ACVRAM_ORPHELINS_MIO", "1024"))
-pas = float(os.environ.get("ACVRAM_ATTENTE_PAS", "1"))
-remplace = os.environ.get("REMPLACE", "")
-
-def smi(q):
-    return subprocess.run(["nvidia-smi", f"--id={gpu}", q, "--format=csv,noheader,nounits"],
-                          capture_output=True, text=True, timeout=20, check=True).stdout
-
-def sortant(pid):
-    """Disparu, zombie, ou en sortie (PF_EXITING = 0x4, champ 9 de /proc/<pid>/stat)."""
-    try:
-        ch = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
-    except OSError:
-        return True
-    return ch[0] in ("Z", "X") or bool(int(ch[6]) & 0x4)
-
-def etat():
-    used = int(smi("--query-gpu=memory.used").split()[0])
-    apps, lisible = [], True
-    for l in smi("--query-compute-apps=pid,used_memory").splitlines():
-        p, _, m = (x.strip() for x in l.partition(","))
-        if p.isdigit():
-            apps.append(int(p))
-            used -= int(m) if m.isdigit() else 0
-            lisible &= m.isdigit()
-    bloquants = [p for p in apps if sortant(p)]
-    if remplace and not sortant(int(remplace)) and int(remplace) not in bloquants:
-        bloquants.append(int(remplace))
-    return (used if lisible else 0), bloquants    # mémoire par PID illisible ([N/A]) : critère des orphelins coupé
-
-t0, attendu = time.monotonic(), False
-while True:
-    try:
-        orph, bloq = etat()
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        print("INFO:nvidia-smi muet — attente de carte inactive"); break
-    dt = time.monotonic() - t0
-    if not bloq and orph <= seuil:
-        if attendu:
-            print(f"INFO:carte rendue en {dt:.0f} s")
-        break
-    if dt >= delai:
-        motif = [f"PID {bloq} en sortie"] if bloq else []
-        motif += [f"{orph} Mio sans processus"] if orph > seuil else []
-        print(f"carte non rendue en {delai:.0f} s : {' ; '.join(motif)}"); break
-    time.sleep(pas); attendu = True
-PYEOF
-) || true
-    case "$r" in
-        "") ;;
-        INFO:*) echo "acvram : ${r#INFO:}" ;;
-        *) err "Alias refusé : $r (un serveur précédent tient encore la carte)"; exit 1 ;;
-    esac
+    [ -f "$_carte_rendue" ] || { err "avertissement : $_carte_rendue introuvable — démarrage sans attendre la carte"; return 0; }
+    python3 "$_carte_rendue" --nom acvram --cartes "$CUDA_VISIBLE_DEVICES" ${1:+--remplace "$1"} || exit 1
 }
 
 # déjà servi ? (avant la garde : le modèle en place occupe la VRAM qu'elle compte)

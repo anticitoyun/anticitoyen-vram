@@ -13,7 +13,7 @@ install -d "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/acvram-parc/lib" "$PKG/u
 for s in claude-modele kimi-modele claude-modeles kimi-modeles modeles-a-jour integrite-modeles telecharger-modele parc-installer openwebui-medias; do
     install -m 755 "parc/bin/$s" "$PKG/usr/bin/$s"
 done
-install -m 644 parc/lib/acvram_parc.py "$PKG/usr/share/acvram-parc/lib/"
+install -m 644 parc/lib/acvram_parc.py parc/lib/carte_rendue.py "$PKG/usr/share/acvram-parc/lib/"
 install -d "$PKG/usr/share/acvram-parc/lib/menu_modeles"
 for f in parc/lib/menu_modeles/*.py; do install -m 644 "$f" "$PKG/usr/share/acvram-parc/lib/menu_modeles/"; done
 install -m 644 parc/share/kimi-menu.lib.sh "$PKG/usr/share/acvram-parc/"
