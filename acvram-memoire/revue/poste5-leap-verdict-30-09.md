@@ -31,9 +31,9 @@ coût non publié sous B=32. Mémoire : Qwen3.8 144 → 61 Mio/séq (LeapQuant) 
   fp32 7,5 ± 1 µs (b=1) et 31,3 ± 3 µs (b=12), sinon l'ancre est fausse et tout se recalcule ; INT8 b=12 ≤ 16 µs.
 * B (pas servi, Qwen3.8 b=12, ABBA ≥ 2 paires, `certifie-b12`) : **GO si gain ≥ 0,75 ms/pas ET ≥ 2 σ du témoin**.
 * Qualité (la sortie change : ni défaut ni « ± 1 ulp » → format d'état opt-in, décision de l'utilisatrice comme pour le KV) : KL
-  contre fp32 ≤ 0,74 à b=1, à 2 048 **et à 8 192 + 512** (l'erreur s'accumule) ; ppl-decode-kv géo dans 2 SE ; FAUX si l'une échoue.
-Issues : **I1** GO (B et qualité tenus) → format d'état INT8 opt-in, étiqueté. **I2** 0 < gain < 0,75 ms : sous M1, écritures déjà
-cachées → non rentable. **I3** gain ≤ 0 : l'ordonnée (5,3 µs/couche) et le bord (itération de puissance) mangent les octets.
+  contre fp32 ≤ 0,74 à b=12, court (2 048) **et long ≥ 16 384** (chef 30/09) ; ppl-decode-kv géo dans 2 SE ; FAUX si l'une échoue.
+Issues : **I1** GO (B et qualité tenus) → format d'état INT8 opt-in, étiqueté. **I2** gain sous le bruit (< 2 σ) ou < 0,75 ms à b ≤ 12
+→ abandonné (chef 30/09). **I3** gain ≤ 0 : l'ordonnée (5,3 µs/couche) et le bord (itération de puissance) mangent les octets.
 **I4** qualité FAUX sur nos poids nvfp4 → abandon. **I5 (celle qui me gêne)** : un noyau fp32 en place mieux réglé, AU BIT, prend
 l'essentiel sans risque — NInfer fait la même récurrence en 18,7 µs contre 22,6 à b=8 (−17 %) ; s'il rend ≥ 0,45 ms/pas à b=12
 (60 % de M1), LeapQuant passe après. **Ordre proposé** : (1) ce noyau réglé (BV, num_warps, portes F1), test d'équivalence au bit
