@@ -48,6 +48,7 @@ def parc(tmp_path):
     # acvram-serveur factice : « acvram-panne » échoue ; « acvram-autre » sert un autre id ; sinon sert l'alias
     (b / "acvram-serveur").write_text(f'''#!/bin/sh
 echo "$1 ctx=$2 graphes=$GRAPHES min=$CTX_CLIENT_MIN" >> {tmp_path}/lanceur.log
+[ "$1" = acvram-intermittent ] && [ ! -e {tmp_path}/deja ] && {{ touch {tmp_path}/deja; echo "OOM au démarrage" >&2; exit 1; }}
 [ "$1" = acvram-panne ] && {{ echo "RuntimeError: cause au journal serveur" >> "$ACVRAM_SERVEUR_LOG"; echo "OOM simulé au chargement" >&2; exit 1; }}
 id="$1"; [ "$1" = acvram-autre ] && id=un-autre-modele
 setsid {sys.executable} {tmp_path}/serveur.py {port} "$id" >/dev/null 2>&1 < /dev/null &
@@ -65,7 +66,7 @@ exit 1
                    f"[moteurs.acvram]\npresent = true\nport = {port}\n")
     env = {**os.environ, "ACVRAM_PARC_CONFIG": str(cfg), "TMR_ETAT": str(tmp_path / "etat"),
            "TMR_RESULTATS": str(tsv / "menus-reels.tsv"),
-           "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log")}
+           "ACVRAM_SERVEUR_LOG": str(tmp_path / "serveur.log"), "TMR_CARTE": ""}
     yield {"env": env, "port": port, "tsv": tsv / "menus-reels.tsv", "tmp": tmp_path}
     # un test rouge ne laisse pas de faux serveur derrière lui (orphelins du 28/09 : arrêt sauté, port lu à None)
     r = subprocess.run(["ss", "-tlnpH"], capture_output=True, text=True)
@@ -167,4 +168,131 @@ def test_service_permanent_jamais_arrete():
     assert not m.a_arreter("rapide") and not m.a_arreter("yals")
     assert m.a_arreter("acvram") and m.a_arreter("llamacpp") and m.a_arreter("vllm")
     source = OUTIL.read_text()
-    assert "elif port is not None and a_arreter(moteur):" in source and 'ligne["arret"] = "service permanent laissé"' in source
+    assert "elif port_moteur is not None and (a_arreter(moteur) or moteur in PORT_MOTEUR):" in source and 'ligne["arret"] = "service permanent laissé"' in source
+
+
+# --- edz définitif (bd cni, 29/09) : hors champ nommé par la liste, PID par client, YALS/Tabby, doublons reportés ---
+
+def _module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tmr_cni", OUTIL)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def test_hors_champ_claude_prechargement_du_repli_kimi_et_pid_par_client(parc):
+    """Claude hors champ (modèle limité sous 29 096) : acvram-serveur refuserait le préchargement de claude ; le bras
+    précharge comme kimi-modele:167 (34 816), ne joue pas claude, le nomme, et relève le PID autour de kimi."""
+    liste = parc["tmp"] / "campagne.tsv"
+    liste.write_text("acvram-bon\thors champ : modèle limité à 16384 < 29096\tdans le champ\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert (parc["tmp"] / "lanceur.log").read_text().splitlines() == ["acvram-bon ctx=34816 graphes= min=34816"]
+    c = _lignes(parc)["acvram-bon"]
+    assert c[3] == "OK" and c[10] == "hors champ" and c[9] == "0", c
+    pid = c[12].split(" ; ")[0].removeprefix("préch ")
+    assert pid.isdigit() and f"kimi {pid}→{pid}" in c[12] and "rechargé" not in c[12], c[12]
+    assert "claude hors champ : modèle limité à 16384" in c[12], c[12]
+
+
+def test_yals_tabby_refuses_hors_prise_carte(parc):
+    """YALS et TabbyAPI chargent la 5090 sans verrou : la passe refuse (rc 65) hors carte.sh, sans rien écrire."""
+    cfg = Path(parc["env"]["ACVRAM_PARC_CONFIG"])
+    kimi = cfg.read_text().split('kimi_dir = "')[1].split('"')[0]
+    with open(Path(kimi) / "config.toml", "a") as f:
+        f.write('[models.yals-x]\nprovider = "yals"\nmodel = "x"\nmax_context_size = 65536\n')
+    env = {k: v for k, v in parc["env"].items() if k != "ACVRAM_CARTE_TENUE"}
+    r = subprocess.run([sys.executable, str(OUTIL), "--pour-de-vrai", "--moteurs", "yals"], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 65 and "REFUS" in r.stderr and not parc["tsv"].exists(), r.stdout + r.stderr
+
+
+def test_yals_moteur_arrete_apres_le_bras(parc, monkeypatch):
+    """Le port du parc de YALS est son proxy : le bras arrête le MOTEUR apparu (PORT_MOTEUR), pas le proxy ; avant
+    cni, a_arreter(« yals ») faux laissait YALS sur la carte après la passe."""
+    m = _module()
+    moteur = _port_libre()
+    monkeypatch.setitem(m.PORT_MOTEUR, "yals", moteur)
+    monkeypatch.setattr(m, "CARTE", "")
+    b = parc["tmp"] / "bin"
+    (b / "kimi-modele").write_text(f'#!/bin/sh\nsetsid {sys.executable} {parc["tmp"]}/serveur.py {moteur} x '
+                                   f'>/dev/null 2>&1 < /dev/null &\nsleep 1\necho Paris\n')
+    cfg = Path(parc["env"]["ACVRAM_PARC_CONFIG"])
+    cfg.write_text(cfg.read_text() + f"\n[moteurs.yals]\npresent = true\nport = {_port_libre()}\n")
+    monkeypatch.setattr(m, "ETAT", parc["tmp"] / "etat")
+    p = m.charger(str(cfg))
+    import argparse
+    a = argparse.Namespace(rapide=False, delai_client=30, attente=30, ctx_client=29096, hors_champ={})
+    l = m.tester(p, {}, "yals-x", "yals", {"model": "x"}, a)
+    assert l["verdict"] == "OK" and l["claude_rc"] == "n/a" and l["arret"] == "ok", l
+    assert not _ecoute(moteur)
+
+
+def test_doublons_reportes_depuis_le_representant(parc):
+    """--reporter : la dernière ligne du représentant recopiée sous le nom du doublon, marquée ; représentant absent
+    nommé (rc 1), aucune ligne inventée."""
+    _lancer(parc, "--pour-de-vrai", "--rapide", "--alias", "acvram-bon", "--attente", "30")
+    d = parc["tmp"] / "doublons.tsv"
+    d.write_text("# alias\treprésentant\nacvram-bon-bis\tacvram-bon\nacvram-orphelin\tacvram-jamais-teste\n")
+    r = _lancer(parc, "--reporter", str(d))
+    assert r.returncode == 1 and "acvram-jamais-teste" in r.stdout, r.stdout + r.stderr
+    l = _lignes(parc)
+    assert l["acvram-bon-bis"][3] == l["acvram-bon"][3] == "OK" and "doublon de acvram-bon" in l["acvram-bon-bis"][12]
+    assert "acvram-orphelin" not in l
+
+
+def test_lanceur_change_pendant_la_passe_arrete_net(parc):
+    """cni 29/09 : acvram-serveur & co. vivent dans l'arbre principal (liens de ~/.local/bin) ; une fusion pendant la
+    campagne changerait le chemin mesuré. Un lanceur modifié entre deux alias arrête la passe (rc 66), nommé."""
+    b = parc["tmp"] / "bin"
+    (b / "kimi-modele").write_text(f'#!/bin/sh\necho "# fusion" >> {b}/claude-modele\necho Paris\n')
+    liste = parc["tmp"] / "deux.tsv"
+    liste.write_text("acvram-bon\nacvram-muet\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 66 and "claude-modele" in r.stderr, r.stdout[-1500:] + r.stderr[-1500:]
+    assert list(_lignes(parc)) == ["acvram-bon"]
+
+
+def test_cli_claude_mis_a_jour_n_arrete_pas_la_passe(parc):
+    """29/09 21:49 : la mise à jour automatique du CLI claude (~/.local/bin/claude) a arrêté la passe — il n'est pas un
+    lanceur du parc ; la garde l'ignore et sa version est écrite sur chaque ligne."""
+    b = parc["tmp"] / "bin"
+    v = parc["tmp"] / "versions"; v.mkdir(); (v / "2.1.284").write_text("a"); (v / "2.1.285").write_text("b")
+    (b / "claude").symlink_to(v / "2.1.284")
+    (b / "kimi-modele").write_text(f'#!/bin/sh\nln -sfn {v}/2.1.285 {b}/claude\necho Paris\n')
+    liste = parc["tmp"] / "deux.tsv"
+    liste.write_text("acvram-bon\nacvram-degenere\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+    l = _lignes(parc)
+    assert "cli claude 2.1.284" in l["acvram-bon"][12] and "cli claude 2.1.285" in l["acvram-degenere"][12], l
+
+
+def test_attend_la_carte_liberee_avant_le_bras(monkeypatch):
+    """cni 30/09 00:48 : un OOM au démarrage en entraînait neuf (le suivant démarrait avant que la VRAM du mourant soit
+    rendue). Le bras attend que la carte soit vide ; au délai, il part et le motif est nommé."""
+    m = _module()
+    etats = iter([([4242], 20000), ([], 9000), ([], 300)])
+    monkeypatch.setattr(m, "carte_occupee", lambda: next(etats))
+    assert m.attendre_carte_libre(delai=30, pas=0.01).startswith("carte libérée en")
+    monkeypatch.setattr(m, "carte_occupee", lambda: ([4242], 20000))
+    assert m.attendre_carte_libre(delai=0.05, pas=0.01) == "carte NON libérée en 0.05 s ([4242], 20000 Mio)"
+    monkeypatch.setattr(m, "carte_occupee", lambda: ([], 0))
+    assert m.attendre_carte_libre(delai=30, pas=0.01) == ""
+
+
+def test_panne_de_prechargement_rejouee_une_fois_hors_rapide(parc):
+    """Hors --rapide, une panne de PRÉCHARGEMENT est rejouée une fois en fin d'étape (les pannes de client, non)."""
+    cfg = Path(parc["env"]["ACVRAM_PARC_CONFIG"])
+    kimi = cfg.read_text().split('kimi_dir = "')[1].split('"')[0]
+    with open(Path(kimi) / "config.toml", "a") as f:
+        f.write('[models.acvram-intermittent]\nprovider = "acvram"\nmodel = "acvram-intermittent"\nmax_context_size = 32768\n')
+    liste = parc["tmp"] / "l.tsv"
+    liste.write_text("acvram-intermittent\nacvram-muet\n")
+    r = _lancer(parc, "--pour-de-vrai", "--liste", str(liste), "--delai-client", "30", "--attente", "30")
+    assert r.returncode == 0 and "rejeu unique de 1 panne" in r.stdout, r.stdout[-1500:] + r.stderr[-1500:]
+    brut = [l.split("\t") for l in parc["tsv"].read_text().splitlines() if l and not l.startswith("#")]
+    assert [(c[0], c[3], c[4]) for c in brut] == [("acvram-intermittent", "PANNE", "préchargement"),
+                                                  ("acvram-muet", "PANNE", "claude"),
+                                                  ("acvram-intermittent", "OK", "")], brut
+    assert "rejeu" in brut[2][12]
