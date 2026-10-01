@@ -78,3 +78,10 @@ l'historique du serveur.
 reproductibilité. Lecture fixée ici : la prédiction reste AU BIT (1 = 0). Si 1 = t et 1 ≠ 0 : la compaction change la
 sortie, c'est un bogue et PILES_COMPACTER ne part pas en défaut. Si 1 ≠ t : l'instrument n'est pas reproductible et la
 comparaison 1 contre 0 ne juge rien. vrm : prédiction inchangée.
+
+## Prise du 01/10 05:36 (`poste1-5v7-bit2`, tenue 32 s, arbre e14f1600c, harnais commun) : PARTIELLE
+Bras 1 servi (sha256 6ecf74463cdd9773, 66 940 o ; spéculation coupée). Bras 0 : refus nommé au chargement
+(`loader.py:1435`, 6,04 Gio libres pour 7,94 Gio de KV planifié à `--max-seqs 8` × 16 384). C'est le défaut 5v7 lui-même
+(petits blocs 7,42/0,14 Gio), qui empêche le témoin de servir. Script arrêté net (rc 1), carte rendue propre.
+Avant le rejeu : `--max-seqs 2` sur les trois bras Coder (environ 2 Gio de KV, requêtes séquentielles). La prédiction et la
+lecture de l'addendum restent inchangées.
