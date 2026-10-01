@@ -13,12 +13,14 @@ import torch
 LOT = 16
 
 
-def nouveau_static(obj, device: torch.device, formes: dict[str, tuple]) -> dict:
-    """``formes`` : {clé: forme d'UN créneau}. Rend {clé: vue, "lot": (n° lot, i)}."""
+def nouveau_static(obj, device: torch.device, formes: dict[str, tuple],
+                   dtypes: dict[str, torch.dtype] | None = None) -> dict:
+    """``formes`` : {clé: forme d'UN créneau} ; ``dtypes`` : {clé: dtype} hors fp32 (état INT8 du GDN).
+    Rend {clé: vue, "lot": (n° lot, i)}."""
     lots = obj.__dict__.setdefault("_lots", [])
     n = obj.__dict__.setdefault("_n_statics", 0)
     if n % LOT == 0:
-        lots.append({k: torch.zeros(LOT, *f, dtype=torch.float32, device=device)
+        lots.append({k: torch.zeros(LOT, *f, dtype=(dtypes or {}).get(k, torch.float32), device=device)
                      for k, f in formes.items()})
     lot, i = lots[n // LOT], n % LOT
     obj.__dict__["_n_statics"] = n + 1
