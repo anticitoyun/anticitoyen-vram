@@ -147,3 +147,39 @@ def test_poids_en_flux_refusent_les_tranches(converted, monkeypatch):
     q = next(m for m in eng.model.modules() if isinstance(m, QuantLinear))
     monkeypatch.setattr(q, "streamed", object())
     assert not eng.model.tranches_possibles(lots, False)
+
+
+@pytest.mark.parametrize("kv_format", [
+    "bf16",
+    # Réfuté le 01/10 (verdict poste6-lic-relire-kv-01-10) : 4,3e-3 sous int8, K/V relus des deux côtés. Mécanisme : le SDPA
+    # réduit les clés par blocs et son découpage dépend de la longueur totale de l'appel (256 contre 400 : 1 ulp bf16 à la ligne
+    # 253 de la couche 0, à entrées égales au bit) ; l'int8 expose la frontière d'arrondi, le bf16 n'y tombe pas ici. « Au bit »
+    # n'est pas atteignable par morceaux. Cliquet strict : le jour où il passe, ce xfail casse et l'on dit pourquoi.
+    pytest.param(None, marks=pytest.mark.xfail(strict=True, reason="lic : réfuté 01/10 — réduction par blocs de clés du SDPA, longueur-dépendante")),
+])
+def test_relire_ses_kv_fait_du_seul_tenant_un_morceaux_au_bit(converted, monkeypatch, kv_format):
+    """lic (chef 01/10) : la différence morceaux/seul tenant sur carte est-elle le FORMAT du cache ou le CHEMIN ?
+    Prédiction écrite avant : sur ce jouet int8, seul tenant (6-9e-3 d'écart aux morceaux, mesuré 30/09) ; un seul tenant
+    qui relit ses propres K/V depuis le cache (ACVRAM_PREFILL_RELIRE_KV=1, témoin) devient AU BIT des morceaux relisant
+    aussi dès le premier (même réglage) — l'attention par lignes est exacte, seule la source des K/V change. FAUX si Δ ≠ 0 :
+    le chemin par morceaux porte alors une différence propre, et c'est lui qu'il faut ouvrir avant tout anneau."""
+    import acvram.engine.attention as A
+    n = 400
+    monkeypatch.setattr(A, "_RELIRE_KV", False)
+    monkeypatch.setattr(R, "_PREFILL_MORCEAU", 0)
+    seul = _logits_invite(_moteur(converted, kv_format, monkeypatch), n)
+    monkeypatch.setattr(R, "_PREFILL_MORCEAU", MORCEAU)
+    morceaux = _logits_invite(_moteur(converted, kv_format, monkeypatch), n)
+    temoin = float((morceaux.float() - seul.float()).abs().max())
+    if kv_format is None:
+        assert temoin > 0.0, "le jouet int8 ne sépare plus morceaux et seul tenant : le test ne peut plus rendre faux"
+    monkeypatch.setattr(A, "_RELIRE_KV", True)
+    monkeypatch.setattr(R, "_PREFILL_MORCEAU", 0)
+    eng = _moteur(converted, kv_format, monkeypatch)
+    assert "(relu)" in eng.regime_ligne()
+    relu = _logits_invite(eng, n)
+    monkeypatch.setattr(R, "_PREFILL_MORCEAU", MORCEAU)
+    morceaux_relu = _logits_invite(_moteur(converted, kv_format, monkeypatch), n)
+    d = float((morceaux_relu.float() - relu.float()).abs().max())
+    print(f"écart morceaux−seul tenant (int8) : {temoin:.3g} ; K/V relus des deux côtés : {d:.3g}")
+    assert d == 0.0, d

@@ -105,6 +105,7 @@ VARIABLES_LUES = {
     "ACVRAM_ADMISSION_GUET",    # server/app.py : 269 b, porte de la fenêtre à 1 requête si une autre est entrée (opt-in, défaut 0)
     "ACVRAM_PREFILL_TRANCHES",  # engine/runner.py : 284 b, préfill par lot coupé à la frontière d'instantané des hybrides (défaut 1)
     "ACVRAM_PREFILL_MORCEAU",   # engine/runner.py : kv31b levier 2 étape 1, préfill de l'attention par morceaux de N jetons (défaut 0 = OFF)
+    "ACVRAM_PREFILL_RELIRE_KV",  # engine/attention.py : lic, témoin — un seul tenant relit ses K/V depuis le cache (défaut 0)
     "ACVRAM_CHAUFFE_CACHE",     # engine/loader.py : dossier des mesures de pic de chauffe (défaut ~/.cache/acvram/chauffe)
     "ACVRAM_DEPAQ_PARTAGE",     # kernels : 172, poids déquantifié partagé par la boucle par séquence (défaut 1, au bit)
     "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (défaut 1, ± ulp)
