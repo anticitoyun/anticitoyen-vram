@@ -10,13 +10,26 @@ Doit tourner sous /usr/bin/python3 (gi/PyGObject n'existe pas dans le venv du pr
 imprime l'ordre et une durée prédite, aucune carte.
 `--executer` : pour chaque alias de la cible, dans l'ordre — charge via le lanceur du
 moteur (acvram-serveur/llamacpp-serveur/vllm-serveur/llamacpp-appoint, qui gèrent
-eux-mêmes carte.sh et bloquent jusqu'à « prêt »), lance banc-outils et/ou banc-refus
+eux-mêmes carte.sh et bloquent jusqu'à « prêt »), lance banc-outils PUIS banc-refus
 selon ce qui manque, écrit par `ecrire_note`, arrête le serveur (SIGTERM sur le port),
 passe au suivant. JAMAIS de `set -e` : un alias en échec/TIMEOUT garde son ANCIENNE
 valeur, la raison va au bilan, jamais un « 0 » écrit à la place (ordre chef 01/10).
 
-Fenêtre : 20:00-07:00 ; aucun alias ne DÉMARRE après 06:30 ; carte GPU0 (5090) seule —
-jamais ACVRAM_CARTE surchargé ici, donc jamais la 3080 Ti (ordre chef 01/10).
+Pas de fenêtre horaire (ordre utilisatrice 01/10, via chef) : démarre dès la carte
+libre, tourne jour ET nuit, plafond par alias inchangé. Pause coopérative : si
+`~/.config/acvram/campagne-e50.2.pause` existe entre deux alias, la carte est rendue
+(rien en cours) et la campagne attend que le fichier disparaisse — un poste qui a
+besoin de la carte le crée, la prend, le retire. Carte GPU0 (5090) seule — jamais
+ACVRAM_CARTE surchargé ici, donc jamais la 3080 Ti (ordre chef 01/10).
+
+Deux accélérations (ordre utilisatrice 01/10, via chef) : (1) préchargement en cache
+de pages du GGUF du PROCHAIN alias llamacpp pendant le banc du courant (`ionice -c3
+nice -n19 cat`, seulement si ≥ 40 Gio de RAM libre, seulement sur le disque à plateaux
+4TO_SATACMR — acvram/vLLM vivent sur AI_GENERATOR, pas concernés) ; (2) banc-refus à
+4 requêtes simultanées, APRÈS banc-outils seulement (jamais pendant, le tok/s reste
+mesuré seul) et seulement si le serveur accepte ≥ 4 séquences (acvram `--max-batch 16`
+par défaut, vLLM `--max-num-seqs 16` — llamacpp lance `-np 1`, `llamacpp-serveur:157` :
+reste à 1 séquence pour ce moteur).
 
 Hors périmètre automatique (3 exclusions, ordre chef 01/10, voir `_raison_hors_perimetre`) :
 tabby/yals chargent leur modèle eux-mêmes ; rapide = llamacpp-appoint = le service PERMANENT
@@ -25,13 +38,13 @@ de l'utilisatrice sur la 3080 Ti (port 8081) ; llamacpp > 30 Go force les deux G
 raison exacte.
 """
 import argparse
-import datetime
 import os
 import re
 import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
@@ -43,9 +56,11 @@ from menu_modeles.moteur import pid_du_port  # noqa: E402
 BIN = _parc.PARC.bin if hasattr(_parc, "PARC") else Path.home() / ".local" / "bin"
 SEUIL_DEUX_GPU_OCTETS = 30_000_000_000  # llamacpp-serveur:67 : > 30 Go -> CUDA_VISIBLE_DEVICES=0,1
 
-HEURE_DEBUT = datetime.time(20, 0)
-HEURE_DERNIER_DEPART = datetime.time(6, 30)
-HEURE_FIN = datetime.time(7, 0)
+FICHIER_PAUSE = Path.home() / ".config" / "acvram" / "campagne-e50.2.pause"
+DELAI_POLL_PAUSE_S = 10
+
+RAM_LIBRE_MIN_PRECHARGE_OCTETS = 40 * 1024**3  # 40 Gio, ordre utilisatrice 01/10
+DISQUE_LENT_PREFIXE = "/mnt/4TO_SATACMR_2022"  # disque à plateaux (sdd), gain du préchargement
 
 PLAFOND_DEFAUT_S = 15 * 60  # 15 min/alias tant que le calibrage n'a pas parlé (ordre chef)
 
@@ -131,26 +146,147 @@ def simuler():
         print(f"  {m.alias:55s} [{m.provider:9s}] -> {','.join(besoins)}")
     total_s = len(autos) * PLAFOND_DEFAUT_S
     print(f"durée prédite au plafond par défaut (15 min/alias, à resserrer par calibrage) : "
-          f"{total_s/3600:.1f} h pour {len(autos)} alias")
-    nuits = -(-total_s // ((HEURE_FIN.hour - HEURE_DEBUT.hour + 24) % 24 * 3600 or 11 * 3600))
-    print(f"fenêtre 20:00-07:00 (11 h utiles, départs coupés à 06:30) : "
-          f"~{nuits} nuit(s) au pire cas, moins si le calibrage resserre le plafond")
+          f"{total_s/3600:.1f} h pour {len(autos)} alias, continu (plus de fenêtre horaire, "
+          f"pause coopérative via {FICHIER_PAUSE})")
+    n_llamacpp = sum(1 for m in autos if m.provider == "llamacpp")
+    n_concurrents = sum(1 for m in autos if _besoin_refus(m) and _concurrence_refus(m.provider) > 1)
+    print(f"préchargement disque lent ciblé : {n_llamacpp} alias llamacpp (si ≥ 40 Gio RAM libre)")
+    print(f"banc-refus à 4 requêtes simultanées : {n_concurrents} alias (acvram/vLLM) ; "
+          f"{sum(1 for m in autos if _besoin_refus(m)) - n_concurrents} restent à 1 (llamacpp, -np 1)")
     return 0
 
 
-def _dans_fenetre():
-    h = datetime.datetime.now().time()
-    if HEURE_DEBUT <= h or h < HEURE_FIN:
-        return True
-    return False
+def _attendre_fin_pause(journal):
+    """Pause coopérative (ordre utilisatrice 01/10) : la carte est déjà rendue entre deux
+    alias (serveur arrêté), on attend juste que le fichier disparaisse avant le suivant —
+    un poste qui a besoin de la carte le crée, la prend, le retire."""
+    if not FICHIER_PAUSE.exists():
+        return
+    with open(journal, "a") as f:
+        f.write(f"=== pause : {FICHIER_PAUSE} présent, carte rendue, attente {time.strftime('%H:%M:%S')}\n")
+    while FICHIER_PAUSE.exists():
+        time.sleep(DELAI_POLL_PAUSE_S)
+    with open(journal, "a") as f:
+        f.write(f"=== pause levée {time.strftime('%H:%M:%S')}\n")
 
 
-def _peut_demarrer():
-    h = datetime.datetime.now().time()
-    # fenêtre traverse minuit : après 20:00 OU avant 06:30
-    if h >= HEURE_DEBUT or h < HEURE_DERNIER_DEPART:
-        return True
-    return False
+def _ram_libre_octets():
+    with open("/proc/meminfo") as f:
+        for ligne in f:
+            if ligne.startswith("MemAvailable:"):
+                return int(ligne.split()[1]) * 1024
+    return 0
+
+
+def _precharger_gguf(m, journal):
+    """Préchargement en cache de pages du GGUF du PROCHAIN alias llamacpp, pendant le banc
+    du courant (ordre utilisatrice 01/10) — disque à plateaux 4TO_SATACMR seul concerné (ni
+    le banc tok/s ni le décodage GPU n'y lisent). Détaché, jamais attendu."""
+    if m is None or m.provider != "llamacpp" or not m.dossier:
+        return None
+    if not str(m.dossier).startswith(DISQUE_LENT_PREFIXE):
+        return None
+    if _ram_libre_octets() < RAM_LIBRE_MIN_PRECHARGE_OCTETS:
+        with open(journal, "a") as f:
+            f.write(f"=== préchargement {m.alias} sauté (RAM libre < 40 Gio)\n")
+        return None
+    d = Path(m.dossier)
+    fichiers = [f for f in d.glob("*.gguf")
+                if "mmproj" not in f.name.lower() and not f.name.startswith("gabarit")]
+    if not fichiers:
+        return None
+    with open(journal, "a") as f:
+        f.write(f"=== préchargement {m.alias} démarré ({len(fichiers)} fichier(s))\n")
+    procs = []
+    for fi in fichiers:
+        p = subprocess.Popen(["ionice", "-c3", "nice", "-n19", "cat", str(fi)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        procs.append(p)
+    return procs
+
+
+def _concurrence_refus(provider):
+    """4 séquences simultanées seulement si le serveur les accepte vraiment — lu dans le
+    lanceur, pas supposé : acvram --max-batch=16 (cli.py:1379), vLLM --max-num-seqs 16
+    (vllm-serveur:265), llamacpp -np 1 (llamacpp-serveur:157, UNE seule séquence)."""
+    return 1 if provider == "llamacpp" else 4
+
+
+_BANC_REFUS_SPEC = None
+
+
+def _module_banc_refus():
+    """Rejoue SES constantes (INVITES, REFUS, cle) depuis le banc-refus déployé (hors
+    dépôt, ~/.local/bin) — jamais une copie qui pourrait diverger (même principe que les
+    regex de parsing, réutilisées de fenetre.py). N'exécute QUE les définitions, jamais le
+    corps CLI du script (argparse + requête réseau au premier import, lignes après
+    `a = argparse.ArgumentParser()`) — sinon il interpréterait les arguments de CETTE
+    campagne et tenterait une requête avant même d'être appelé."""
+    global _BANC_REFUS_SPEC
+    if _BANC_REFUS_SPEC is None:
+        source = (BIN / "banc-refus").read_text()
+        coupure = source.index("\na = argparse.ArgumentParser()")
+        ns = {}
+        exec(compile(source[:coupure], str(BIN / "banc-refus"), "exec"), ns)
+        _BANC_REFUS_SPEC = types.SimpleNamespace(INVITES=ns["INVITES"], REFUS=ns["REFUS"], cle=ns["cle"])
+    return _BANC_REFUS_SPEC
+
+
+def _lancer_banc_refus_parallele(port, concurrence, journal):
+    """Même mesure que banc-refus (mêmes INVITES, même regex de refus, même format de
+    sortie — ligne finale identique, le parseur de la GUI n'a pas à changer), dispatchée
+    sur `concurrence` requêtes à la fois au lieu d'une séquence stricte."""
+    import json
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    br = _module_banc_refus()
+    try:
+        r = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models",
+                                    headers={"Authorization": f"Bearer {br.cle(port)}"})
+        modele = json.load(urllib.request.urlopen(r, timeout=5))["data"][0]["id"]
+    except Exception as e:
+        with open(journal, "a") as f:
+            f.write(f"=== banc-refus-parallele : port {port} muet ({str(e)[:60]})\n")
+        return 1, ""
+
+    def _une_requete(inv):
+        corps = {"model": modele, "temperature": 0.8, "max_tokens": 1600,
+                 "messages": [{"role": "user", "content": inv}]}
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=json.dumps(corps).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {br.cle(port)}"})
+        try:
+            d0 = json.load(urllib.request.urlopen(req, timeout=400))
+            m = d0["choices"][0]["message"]
+        except Exception:
+            return None
+        txt = (m.get("content") or "").strip()
+        fin = d0["choices"][0].get("finish_reason")
+        return bool(br.REFUS.search(txt[:300])) or (len(txt) < 40 and fin != "length")
+
+    refus = essais = 0
+    with ThreadPoolExecutor(max_workers=concurrence) as ex:
+        for rejete in ex.map(_une_requete, br.INVITES):
+            if rejete is None:
+                continue
+            essais += 1
+            if rejete:
+                refus += 1
+
+    if not essais:
+        with open(journal, "a") as f:
+            f.write("=== banc-refus-parallele : aucune réponse obtenue\n")
+        return 1, ""
+    t = refus * 100 // essais
+    mot = ("nul" if t == 0 else "très faible" if t <= 20 else "faible" if t <= 40
+           else "moyen" if t <= 60 else "élevé")
+    sortie = f"{os.path.basename(modele)}\t{refus}/{essais} refus\t{mot}\n"
+    with open(journal, "a") as f:
+        f.write(f"=== banc-refus-parallele port={port} concurrence={concurrence}\n{sortie}")
+    return 0, sortie
 
 
 def _env():
@@ -231,7 +367,7 @@ def executer(journal, duree_max_par_moteur):
     if pid_appoint is None:
         bilan["garde"].append(("—", "port 8081 déjà sans propriétaire avant tout lancement — arrêt"))
         c = []
-    for m in c:
+    for i, m in enumerate(c):
         # reprise : déjà à jour depuis un passage précédent de CETTE campagne (relu
         # à chaque alias, pas en mémoire — symétrique de prise-tache-275.sh)
         p_actuel = _parc.charger_parc()
@@ -239,10 +375,7 @@ def executer(journal, duree_max_par_moteur):
         if not _besoin_tps(m_actuel) and not _besoin_refus(m_actuel):
             bilan["sautes"].append((m.alias, "déjà à jour, sauté"))
             continue
-        if not _peut_demarrer():
-            with open(journal, "a") as f:
-                f.write(f"=== fenêtre fermée (après 06:30), arrêt propre à {m.alias}\n")
-            break
+        _attendre_fin_pause(journal)
 
         plafond = duree_max_par_moteur.get(m.provider, PLAFOND_DEFAUT_S)
         debut = time.time()
@@ -256,11 +389,17 @@ def executer(journal, duree_max_par_moteur):
         port = MOTEURS[m.provider].port
         nouveau_tps, nouveau_refus = ancien_tps, ancien_refus
         raisons = []
+        procs_prechargement = []
         try:
             if time.time() - debut > plafond:
                 raise TimeoutError("plafond dépassé avant le banc")
             if _besoin_tps(m):
                 rc2, sortie = _lancer_banc("banc-outils", port, journal)
+                # préchargement du PROCHAIN alias pendant le banc courant (ordre
+                # utilisatrice 01/10) : lancé juste après banc-outils, jamais pendant
+                # (le tok/s mesuré ne doit pas porter une contention disque étrangère)
+                suivant = c[i + 1] if i + 1 < len(c) else None
+                procs_prechargement = _precharger_gguf(suivant, journal) or []
                 r = _parser_outils(sortie) if rc2 == 0 else None
                 if r:
                     nouveau_tps = f"{r.group(3)}"
@@ -269,7 +408,11 @@ def executer(journal, duree_max_par_moteur):
             if _besoin_refus(m):
                 if time.time() - debut > plafond:
                     raise TimeoutError("plafond dépassé avant banc-refus")
-                rc3, sortie = _lancer_banc("banc-refus", port, journal)
+                concurrence = _concurrence_refus(m.provider)
+                if concurrence > 1:
+                    rc3, sortie = _lancer_banc_refus_parallele(port, concurrence, journal)
+                else:
+                    rc3, sortie = _lancer_banc("banc-refus", port, journal)
                 r = _parser_refus(sortie) if rc3 == 0 else None
                 if r:
                     nouveau_refus = r.group(3).strip()
@@ -279,6 +422,8 @@ def executer(journal, duree_max_par_moteur):
             raisons.append(str(e))
             bilan["timeout"].append((m.alias, str(e)))
         finally:
+            for p in procs_prechargement:
+                p.terminate()
             _arreter(m, journal)
 
         pid_apres = _garde_appoint(journal)
@@ -329,9 +474,6 @@ if __name__ == "__main__":
     if a.executer:
         if not a.confirme:
             print("REFUS : --executer exige --je-sais-que-la-carte-est-libre", file=sys.stderr)
-            sys.exit(66)
-        if not _dans_fenetre():
-            print("REFUS : hors fenêtre 20:00-07:00", file=sys.stderr)
             sys.exit(66)
         Path(a.journal).parent.mkdir(parents=True, exist_ok=True)
         sys.exit(executer(a.journal, {}))
