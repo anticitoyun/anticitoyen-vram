@@ -155,9 +155,7 @@ class ACVRamModel(nn.Module):
         # à la suivante, la somme faite par add_norm de la couche suivante (et
         # par celle de la norme finale) ; réservé aux blocs ordinaires à
         # multiplicateur 1,0, sinon `forward` (le chemin d'avant, au bit).
-        differe = kernels.prefill_compact("residu") and all(
-            type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
-            and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers)
+        differe = self._residu_differe()
         delta = None
         # Deepstack (Qwen3-VL) : n niveaux à ajouter après les couches 0..n−1
         # aux lignes image ; 0 sans image, un entier comparé par couche.
@@ -268,13 +266,15 @@ class ACVRamModel(nn.Module):
         return self._logits_finaux(logits)
 
     @torch.inference_mode()
-    def forward_tranches(self, batches: list) -> list:
+    def forward_tranches(self, batches: list, return_hidden: bool = False) -> list:
         """Pièce 284 b : le préfill de plusieurs tranches (une par séquence ou par morceau de séquence, chacune comme
         `forward` la recevrait seule) COUCHE PAR COUCHE : pour chaque couche, chaque tranche passe seule — mêmes lignes,
         mêmes appels, mêmes chemins que `forward(batch)` —, dans une portée qui partage les poids déquantifiés de la
         couche (seuil GEMV inchangé). Au bit de `[forward(b) for b in batches]` : seul l'ordre d'exécution change, et
         les poids déquantifiés, identiques, ne sont fabriqués qu'une fois par couche au lieu d'une fois par tranche.
-        Réservé aux lots sans image ni deepstack (vérifié par `tranches_possibles`)."""
+        Réservé aux lots sans image ni deepstack (vérifié par `tranches_possibles`).
+        d19 (poste6 01/10) : le résidu différé du préfill compact (`forward_res`, (x, delta) par tranche) est porté ici
+        aussi — il excluait tout dense ordinaire (Devstral, gemma) du chemin couche-majeur, donc des K/V transitoires."""
         xs = []
         for b in batches:
             _moe_mod._EN_PREFILL[0] = bool(b.is_prefill)
@@ -282,17 +282,31 @@ class ACVRamModel(nn.Module):
             if self.spec.embedding_multiplier != 1.0:
                 x = x * self.spec.embedding_multiplier
             xs.append(x)
+        differe = self._residu_differe()
+        deltas = [None] * len(batches)
         current = None
         for i, layer in enumerate(self.layers):
             if layer.device != current:
+                xs = [x if d is None else x + d for x, d in zip(xs, deltas)]
+                deltas = [None] * len(batches)
                 xs = [x.to(layer.device, non_blocking=True) for x in xs]
                 current = layer.device
             if i + 1 < len(self.layers):
                 self.layers[i + 1].prefetch()
             with kernels.depaquetage_partage(seuil_partage=False):
-                xs = [layer(x, b, self.caches.get(i)) for x, b in zip(xs, batches)]
+                if differe:
+                    paires = [layer.forward_res(x, d, b, self.caches.get(i)) for x, d, b in zip(xs, deltas, batches)]
+                    xs, deltas = [p[0] for p in paires], [p[1] for p in paires]
+                else:
+                    xs = [layer(x, b, self.caches.get(i)) for x, b in zip(xs, batches)]
             _trace_couche("forward", i, layer)
-        return [self._sortie(x, None, b) for x, b in zip(xs, batches)]
+        return [self._sortie(x, d, b, return_hidden) for x, d, b in zip(xs, deltas, batches)]    # d19 qualité : états de toutes les lignes
+
+    def _residu_differe(self) -> bool:
+        """C15-prefill : résidu différé (x, delta) d'une couche à la suivante — blocs ordinaires à multiplicateur 1,0 seulement."""
+        return bool(kernels.prefill_compact("residu") and all(
+            type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
+            and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers))
 
     def tranches_possibles(self, batches: list, mtp_lue: bool = True) -> bool:
         """Le chemin par tranches ne couvre que ce que `forward` fait sans détour : ni image, ni deepstack, ni
@@ -309,9 +323,7 @@ class ACVRamModel(nn.Module):
         # `forward`, qui refait le cycle complet prefetch/wait/release à chaque passe (chemin de tout préfill ordinaire).
         if any(isinstance(m, QuantLinear) and m.streamed is not None for m in self.modules()):
             return False
-        return not (kernels.prefill_compact("residu") and all(
-            type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
-            and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers))
+        return True            # d19 : le résidu différé est porté par `forward_tranches` (x, delta par tranche)
 
     def _tete(self, x: torch.Tensor) -> torch.Tensor:
         """L'entrée de ``lm_head`` en fp32 sur l'appareil de la tête — LE MÊME

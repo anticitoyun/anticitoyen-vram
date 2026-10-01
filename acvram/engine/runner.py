@@ -97,6 +97,17 @@ def _lire_morceau() -> int:
 
 
 _PREFILL_MORCEAU = _lire_morceau()          # défini ici au premier niveau : cible `lu_a` de regime.VARIABLES (regime.masquer)
+# d19 (01/10) : au-delà du tenu d'un seul tenant (prouvé par la chauffe, contexte.py), l'attention d'un dense sans récurrence
+# passe par morceaux de _MORCEAU_AU_DELA jetons (0 = jamais) ; le seuil est posé par la chauffe (`definir_seuil_morceaux`),
+# None = aucun. Sous le seuil rien ne change (au bit) ; au-delà, l'invite recevait un 400.
+_MORCEAU_AU_DELA = max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU_AU_DELA", "4096") or 0))
+_MORCEAU_SEUIL: Optional[int] = None
+
+
+def definir_seuil_morceaux(n: Optional[int]) -> None:
+    """Jetons au-delà desquels l'attention passe par morceaux de `_MORCEAU_AU_DELA` (None : jamais) ; posé par la chauffe."""
+    global _MORCEAU_SEUIL
+    _MORCEAU_SEUIL = n
 # Au bit exige que chaque morceau — le dernier compris — prenne les MÊMES chemins qu'un seul tenant : au-dessus du seuil
 # de fusion gate/up (`attention.SEUIL_FUSION`, 256 : en dessous le MLP passe par la projection empilée, 1,8e-4 sur le
 # jouet) et au-dessus des chemins à petit M (jouet CPU : 32-96 lignes ≠ 128-160, mesuré). D'où un plancher de lignes.
@@ -1413,15 +1424,27 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
     def _morceaux_pour(self, seq: Sequence, fin: int) -> bool:
         """Cette invite se découpe-t-elle ? Active, plus longue qu'un morceau, et morceau ≥ `_morceau_min(fin)` (au-delà
         du seuil de fusion pour une invite qui le dépasse — sinon elle passe d'un seul tenant, dit une fois)."""
-        if not self._morceaux_actifs() or fin - seq.prefill_len <= _PREFILL_MORCEAU:
+        m = self._morceau_pour(fin)
+        if m <= 0 or fin - seq.prefill_len <= m:
             return False
-        if _PREFILL_MORCEAU < _morceau_min(fin):
+        if m < _morceau_min(fin):
             if not getattr(self, "_morceau_fusion_dit", False):
                 self._morceau_fusion_dit = True
-                print(f"[acvram] morceaux@{_PREFILL_MORCEAU} ≤ seuil de fusion gate/up : les invites au-delà de "
+                print(f"[acvram] morceaux@{m} ≤ seuil de fusion gate/up : les invites au-delà de "
                       f"{_morceau_min(fin) - 1} jetons passent d'un seul tenant (au bit exige des morceaux > seuil)", flush=True)
             return False
         return True
+
+    def _morceau_pour(self, fin: int) -> int:
+        """Taille de morceau pour une invite qui va jusqu'à ``fin`` : l'opt-in S1 (`ACVRAM_PREFILL_MORCEAU`, toute longueur),
+        sinon `_MORCEAU_AU_DELA` au-delà du seuil posé par la chauffe (d19) ; 0 = un seul tenant. Jamais sur une récurrence."""
+        if getattr(self.spec, "couches_recurrentes", 0):
+            return 0
+        if self._morceaux_actifs():
+            return _PREFILL_MORCEAU
+        if _MORCEAU_SEUIL is not None and _MORCEAU_AU_DELA >= _MORCEAU_LIGNES_MIN and fin > _MORCEAU_SEUIL:
+            return _MORCEAU_AU_DELA
+        return 0
 
     def _morceaux_requis(self, seqs: list) -> bool:
         return any(self._morceaux_pour(s, len(s.prompt_ids)) for s in seqs)
@@ -1456,7 +1479,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         ``seq.prefill_len`` est rendu tel que reçu : l'appelant le porte à ``fin`` comme pour un seul tenant."""
         if not self._morceaux_pour(seq, fin):
             return None
-        limites = self._limites_morceaux(seq, fin, _PREFILL_MORCEAU)
+        limites = self._limites_morceaux(seq, fin, self._morceau_pour(fin))
         if len(limites) < 2:
             return None
         debut, n = seq.prefill_len, len(seq.prompt_ids)
@@ -1468,7 +1491,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         finally:
             seq.prefill_len = debut
         mtp_lue = getattr(self.speculator, "name", None) == "mtp"
-        if self.model.tranches_possibles(lots, mtp_lue):
+        tranches = self.model.tranches_possibles(lots, mtp_lue)
+        for j, lot in enumerate(lots):
+            lot.morceau = (j, len(lots), fin, tranches)       # d19 : K/V transitoires par couche seulement en couche-majeur
+        if tranches:
             logits = self.model.forward_tranches(lots)[-1]
         else:
             logits = None

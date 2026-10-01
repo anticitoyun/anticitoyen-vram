@@ -58,6 +58,13 @@ __all__ = ["Attention", "MLP", "MLP2", "SEUIL_FUSION", "_ROPE_KV", "_multi_proje
 SEUIL_FUSION = int(os.environ.get("ACVRAM_SEUIL_FUSION", "256"))
 # lic (01/10) : 1 = le préfill d'un seul tenant relit ses K/V depuis le cache (témoin, régime `prefill=…(relu)`) ; défaut 0
 _RELIRE_KV = os.environ.get("ACVRAM_PREFILL_RELIRE_KV", "0") == "1"
+# d19 (01/10) : pendant un préfill par morceaux couche-majeur, les K/V des morceaux précédents de la couche sont gardés en
+# bf16 (2 × T × têtes_KV × D × 2 o, libérés au dernier morceau) au lieu d'être relus quantifiés du cache — c'est la
+# différence « chemin » de lic (jouet int8 : 6,3e-3 contre 0 en bf16 ; Devstral S1 bis : 0,041 contre un témoin reprise 0,004).
+# 0 = témoin (relecture du cache, l'ancien chemin). Et le biais bas-droite (layers.attention) pour ces morceaux : sans lui le
+# masque dense + gqa matérialise têtes × 1 024 × T scores fp32 par bloc (8 Gio à 65 536 sur Devstral) ; 0 = masque dense.
+_TRANSITOIRES = os.environ.get("ACVRAM_PREFILL_TRANSITOIRES", "1") == "1"
+_BIAIS_MORCEAUX = os.environ.get("ACVRAM_PREFILL_BIAIS_MORCEAUX", "1") == "1"
 # a5v : tranche de lignes du MLP dense au préfill long ; 0 = jamais (témoin). Engagée SEULEMENT au-delà de `_MLP_SEUIL`.
 _MLP_MORCEAU = int(os.environ.get("ACVRAM_MLP_MORCEAU", "4096"))
 _MLP_SEUIL: Optional[int] = None
@@ -496,13 +503,17 @@ class Attention(nn.Module):
         compact = kernels.prefill_compact("attn")
         une_seq = compact and len(batch.query_lens) == 1
         out = None if une_seq else torch.empty_like(q)
+        morceau = getattr(batch, "morceau", None) if cache is not None and len(batch.query_lens) == 1 else None
+        biais = True if (morceau is not None and _BIAIS_MORCEAUX) else None
         start = 0
         for i, qlen in enumerate(batch.query_lens):
             end = start + qlen
             offset = batch.seq_lens[i] - qlen
+            if morceau is not None and morceau[3] and _TRANSITOIRES:
+                kk, vv = self._kv_transitoires(morceau, k, v, batch, offset, qlen, cache)
             # lic (01/10, ACVRAM_PREFILL_RELIRE_KV=1, témoin hors défaut) : un seul tenant relit aussi ses propres K/V
             # depuis le cache (quantifiés), comme tout morceau après le premier — sépare « format du cache » et « chemin ».
-            if cache is not None and (offset > 0 or _RELIRE_KV):
+            elif cache is not None and (offset > 0 or _RELIRE_KV):
                 # Une partie de cette séquence est déjà en cache : un préfixe
                 # servi, ou un morceau antérieur. On la relit et on masque selon
                 # le décalage absolu de la requête.
@@ -526,12 +537,12 @@ class Attention(nn.Module):
             if compact:
                 a = attention(q[start:end], kk, vv, True, self.scale,
                               q_offset=offset, window=self.window, n_rep=self.n_rep,
-                              images=plages)
+                              images=plages, bas_droite=biais)
             else:
                 kk = repeat_kv(kk, self.n_rep)
                 vv = repeat_kv(vv, self.n_rep)
                 a = attention(q[start:end], kk, vv, True, self.scale,
-                              q_offset=offset, window=self.window, images=plages)
+                              q_offset=offset, window=self.window, images=plages, bas_droite=biais)
             if une_seq:
                 out = a
             else:
@@ -539,6 +550,27 @@ class Attention(nn.Module):
             start = end
         out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
+
+    def _kv_transitoires(self, morceau, k, v, batch: ForwardBatch, offset: int, qlen: int, cache):
+        """d19 : K/V bf16 de toute l'invite jusqu'à ce morceau — les morceaux précédents de CETTE couche viennent du tampon
+        transitoire, pas du cache quantifié ; un préfixe antérieur à la passe (cache de préfixe, coupe d'instantané) est relu
+        du cache une fois, au premier morceau. Le tampon vit le temps de la couche (forward_tranches est couche-majeur) :
+        alloué au premier morceau, rendu après le dernier."""
+        rang, total, fin, _ = morceau
+        end = offset + qlen
+        tr = getattr(self, "_kv_tr", None)
+        if rang == 0 or tr is None or tr[0].shape[0] < fin:
+            tr = (torch.empty(fin, k.shape[1], k.shape[2], dtype=k.dtype, device=k.device),
+                  torch.empty(fin, v.shape[1], v.shape[2], dtype=v.dtype, device=v.device))
+            self._kv_tr = tr
+            if offset > 0:
+                kk0, vv0 = cache.gather(batch.block_tables[0].to(k.device), end, k.dtype)
+                tr[0][:offset].copy_(kk0[:offset]); tr[1][:offset].copy_(vv0[:offset])
+        tr[0][offset:end].copy_(k); tr[1][offset:end].copy_(v)
+        kk, vv = tr[0][:end], tr[1][:end]
+        if rang >= total - 1:
+            self._kv_tr = None                      # les vues kk/vv gardent le tampon vivant jusqu'à la fin de cet appel
+        return kk, vv
 
     def _decode(self, q, k, v, batch: ForwardBatch,
                 cache: Optional[PagedKVCache], t: int,
