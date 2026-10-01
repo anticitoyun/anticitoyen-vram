@@ -121,6 +121,8 @@ def test_chauffe_dense_pose_le_seuil_mlp_au_dela_du_seul_tenant(converted, monke
         assert eng.chauffer_contexte(pas=8) == 64 and A._MLP_SEUIL == 40
         assert " tranches>40" in eng.regime_ligne() + " "
         monkeypatch.setattr(A, "_MLP_MORCEAU", 0)
+        import acvram.engine.runner as _R
+        monkeypatch.setattr(_R, "_MORCEAU_AU_DELA", 0)             # d19 : sans les morceaux d'attention non plus (témoin complet)
         eng2 = _engine_cpu(converted); faux(eng2)
         with pytest.raises(ContexteNonTenu, match="40 jetons tenus"):
             eng2.chauffer_contexte(pas=8)

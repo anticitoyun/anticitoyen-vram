@@ -16,10 +16,17 @@
 # 275 — même règle que `tests/test_qualite_e50_taches_chargent.py`, pour que ce test vérifie le
 # même lm-eval qu'une campagne réelle lancerait.
 #
-# NON EXERCÉ EN CONDITIONS RÉELLES À L'ÉCRITURE DE CETTE PIÈCE : aucun `.venv-panel` sous ce
-# worktree (aucune prise, aucun lm-eval installé ICI) — seul `--simule` est vérifié par les
-# tests de cette pièce. `--executer` est écrit avec le même soin mais À VALIDER au premier
-# essai réel (poste2/poste1, campagne-qualite-e50.py, pièce suivante).
+# e50.3 § 7 (poste4, 01/10) — `--executer` implémenté : harnais `serveur-bras.sh` (déjà
+# éprouvé par tests/test_serveur_bras.py), 2 appels lm-eval (MMLU+GSM8K, puis HumanEval),
+# agrégation (MMLU moyenne des 3 sous-tâches, GSM8K filtre flexible-extract), pas@1 HumanEval
+# via le bac à sable, S composite, étoile, écriture TSV + `ecrire_note`.
+# TESTÉ DE BOUT EN BOUT contre un FAUX serveur (`/v1/chat/completions` maison) ET un FAUX
+# lm-eval (émule `python -m lm_eval run`, produit un `results_*.json`/`samples_*.jsonl` de la
+# même forme) — valide la PLOMBERIE (lancement/arrêt serveur, agrégation, barème, écriture),
+# jamais la qualité d'un vrai modèle ni le comportement réel du paquet lm-eval
+# (`tests/test_qualite_e50_executer_faux_serveur.py`). AUCUN `.venv-panel` sous ce worktree
+# (aucune prise, pas de carte) — à valider contre lm-eval et un `acvram-serveur` réels à la
+# première campagne (poste2/poste1, `campagne-qualite-e50.py`).
 #
 # Usage : outils/qualite-e50.sh <alias> [--executer --je-sais-que-la-carte-est-libre]
 set -euo pipefail
@@ -84,6 +91,9 @@ if python3 -c "import json,sys; sys.exit(0 if 'erreur' in json.loads('''$PLAN_JS
 fi
 DOSSIER=$(python3 -c "import json; print(json.loads('''$PLAN_JSON''')['dossier'])")
 THINKING=$(python3 -c "import json; print(json.loads('''$PLAN_JSON''')['thinking'])")
+REFUS=$(python3 -c "import json; print(json.loads('''$PLAN_JSON''')['refus'])")
+TPS=$(python3 -c "import json; print(json.loads('''$PLAN_JSON''')['tps'])")
+USAGE=$(python3 -c "import json; print(json.loads('''$PLAN_JSON''')['usage'])")
 [ -n "$DOSSIER" ] || { echo "REFUS : pas de dossier connu pour $AL (TSV)" >&2; exit 3; }
 
 SANS_RAISONNEMENT=non
@@ -119,5 +129,97 @@ fi
 }
 echo "lm-eval : $PY_PANEL"
 
-echo "ÉCHEC : --executer n'est pas encore exercé en conditions réelles (serveur acvram neuf + lm-eval de bout en bout) — à compléter/valider à la première campagne réelle (poste2/poste1), voir le verdict e50.3 §7." >&2
-exit 67
+# e50.3 § 7 (poste3, serveur+lm-eval, 01/10 ; poste4, 01/10) — harnais commun de lancement/arrêt
+# déjà éprouvé contre un faux serveur (tests/test_serveur_bras.py) : jamais de `& $!` maison.
+. "$ICI/outils/gpu/mesure/serveur-bras.sh"
+
+PORT=${ACVRAM_E50_PORT:-8099}
+NOM_SERVI=${ACVRAM_E50_SERVED_NAME:-$AL}
+SORTIE=${ACVRAM_E50_SCRATCH:-$ICI/scratchpad/qualite-e50-$AL}   # surchargeable par les tests
+rm -rf "$SORTIE"
+mkdir -p "$SORTIE"
+
+if [ -n "${ACVRAM_E50_LANCEUR:-}" ]; then
+  # injection de test (faux serveur, tests/test_qualite_e50_executer_faux_serveur.py) : la
+  # commande de lancement est fournie telle quelle, jamais acvram-serveur réel.
+  # shellcheck disable=SC2086
+  bras_servir "$PORT" "$SORTIE/serveur.log" $ACVRAM_E50_LANCEUR "$PORT" "$NOM_SERVI" \
+    || { echo "REFUS : lancement du serveur (injecté) échoué" >&2; exit 70; }
+else
+  bras_servir "$PORT" "$SORTIE/serveur.log" acvram-serveur "$DOSSIER" 4096 --no-prefix-cache --port "$PORT" \
+    || { echo "REFUS : lancement du serveur échoué" >&2; exit 70; }
+fi
+bras_pret "$PORT" "$NOM_SERVI" "$BRAS_PID" "${ACVRAM_E50_DELAI_S:-480}" \
+  || { bras_arreter "$BRAS_PID" "$PORT" 2>/dev/null || true; exit 71; }
+
+BASE_URL="http://127.0.0.1:$PORT"
+TOK=${ACVRAM_E50_TOKENIZER:-$DOSSIER}
+
+echo "=== MMLU(90)+GSM8K(40), num_concurrent=4, seed 1234"
+"$PY_PANEL" -m lm_eval run --model local-chat-completions --apply_chat_template \
+  --include_path "$ICI/outils/lm_eval_taches" \
+  --model_args "model=${NOM_SERVI},base_url=${BASE_URL}/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=${TOK},num_concurrent=4,max_retries=3" \
+  --tasks "mmlu_e50_hsm,mmlu_e50_law,mmlu_e50_ccs,gsm8k_e50" --seed 1234 \
+  --output_path "$SORTIE/mmlu_gsm8k" --batch_size 1 --log_samples \
+  || { echo "ÉCHEC : lm-eval MMLU+GSM8K" >&2; bras_arreter "$BRAS_PID" "$PORT" 2>/dev/null || true; exit 72; }
+
+echo "=== HumanEval(40), génération seule (pas@1 à part, § 2 bis)"
+"$PY_PANEL" -m lm_eval run --model local-chat-completions --apply_chat_template \
+  --include_path "$ICI/outils/lm_eval_taches" \
+  --model_args "model=${NOM_SERVI},base_url=${BASE_URL}/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=${TOK},num_concurrent=4,max_retries=3" \
+  --tasks "humaneval_e50" --seed 1234 \
+  --output_path "$SORTIE/humaneval" --batch_size 1 --log_samples \
+  || { echo "ÉCHEC : lm-eval HumanEval" >&2; bras_arreter "$BRAS_PID" "$PORT" 2>/dev/null || true; exit 73; }
+
+bras_arreter "$BRAS_PID" "$PORT" || echo "AVERTISSEMENT : arrêt du serveur incertain" >&2
+
+R_MG=$(find "$SORTIE/mmlu_gsm8k" -name "results_*.json" | head -1)
+SAMPLES_HE=$(find "$SORTIE/humaneval" -name "samples_humaneval_e50_*.jsonl" | head -1)
+[ -n "$R_MG" ] || { echo "REFUS : aucun results_*.json pour MMLU+GSM8K" >&2; exit 74; }
+[ -n "$SAMPLES_HE" ] || { echo "REFUS : aucun samples_humaneval_e50_*.jsonl" >&2; exit 74; }
+
+# Agrégation MMLU (3 sous-tâches, moyenne simple : 30 items chacune) + GSM8K flexible-extract
+# (méthode § 2 : le filtre strict punit le format, pas le calcul — on garde flexible).
+read -r ACC_MMLU ACC_GSM8K <<EOF
+$(python3 - "$R_MG" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r = d["results"]
+mmlu = [r[t]["exact_match,get-answer-v275"] for t in ("mmlu_e50_hsm", "mmlu_e50_law", "mmlu_e50_ccs")]
+print(sum(mmlu) / len(mmlu), r["gsm8k_e50"]["exact_match,flexible-extract"])
+PYEOF
+)
+EOF
+
+HE_JSON=$("$PY_GI" "$ICI/outils/qualite-e50-humaneval-score.py" "$SAMPLES_HE")
+PASS_HE=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['pass_at_1'])" "$HE_JSON")
+S_COMPOSITE=$(python3 -c "print(($ACC_MMLU+$ACC_GSM8K+$PASS_HE)/3)")
+ETOILE=$("$PY" "$ICI/outils/qualite-e50-bareme.py" "$S_COMPOSITE" "$ACC_MMLU" "$ACC_GSM8K" "$PASS_HE")
+
+echo "S=$S_COMPOSITE mmlu=$ACC_MMLU gsm8k=$ACC_GSM8K humaneval=$PASS_HE -> $ETOILE"
+
+HEAD=$(git -C "$ICI" rev-parse --short HEAD)
+DATE_J=$(date +%d/%m)
+TSV_E50=${ACVRAM_E50_TSV:-$ICI/outils/qualite-e50.tsv}   # surchargeable par les tests (faux serveur)
+# python3, pas `printf %f` : LC_NUMERIC peut être fr_FR (virgule décimale), printf refuserait
+# alors un nombre à point — trouvé en écrivant cette pièce (test faux serveur, locale du poste).
+LC_NUMERIC=C python3 -c "
+import sys
+al, head, date_j, etoile, s, mmlu, gsm8k, he, sans = sys.argv[1:10]
+print(f'{al}\t{head}\t{date_j}\t{etoile}\t{float(s):.4f}\t{float(mmlu):.4f}\t{float(gsm8k):.4f}\t{float(he):.4f}\t{sans}')
+" "$AL" "$HEAD" "$DATE_J" "$ETOILE" "$S_COMPOSITE" "$ACC_MMLU" "$ACC_GSM8K" "$PASS_HE" "$SANS_RAISONNEMENT" \
+  >> "$TSV_E50"
+
+SUFFIXE=""
+[ "$SANS_RAISONNEMENT" = oui ] && SUFFIXE=" sans raisonnement"
+QUAL_TXT=$(python3 -c "print(f'$ETOILE S {$S_COMPOSITE:.2f}$SUFFIXE ($DATE_J, $HEAD)')")
+
+"$PY_GI" - "$AL" "$REFUS" "$TPS" "$QUAL_TXT" "$USAGE" <<'PYEOF'
+import sys
+sys.path.insert(0, "/usr/share/acvram-parc/lib")
+sys.path.insert(0, "parc/lib")
+from menu_modeles.parc import ecrire_note
+alias, refus, tps, qual, usage = sys.argv[1:6]
+ecrire_note(alias, refus, tps, qual, usage)
+PYEOF
+echo "écrit : $TSV_E50, note menu ($QUAL_TXT)"

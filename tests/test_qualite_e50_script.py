@@ -69,8 +69,13 @@ def test_refuse_executer_sans_confirmation():
 
 def test_executer_resout_acvram_lmeval_py_en_priorite():
     """chef (01/10) : même ordre de résolution que le test de chargement réel —
-    $ACVRAM_LMEVAL_PY prime sur tout, y compris sur un .venv-panel qui existerait."""
-    env = {**os.environ, "ACVRAM_LMEVAL_PY": "/usr/bin/python3"}
+    $ACVRAM_LMEVAL_PY prime sur tout, y compris sur un .venv-panel qui existerait.
+    poste4 (01/10, implémentation du corps --executer) : ACVRAM_E50_LANCEUR=/bin/false
+    EXIGÉ ici — sans ce garde-fou, --executer lancerait pour de vrai `acvram-serveur`
+    (carte GPU réelle, hors de tout verrou carte.sh) juste pour vérifier une ligne
+    d'impression ; /bin/false fait échouer bras_servir immédiatement, après que la ligne
+    attendue a déjà été imprimée."""
+    env = {**os.environ, "ACVRAM_LMEVAL_PY": "/usr/bin/python3", "ACVRAM_E50_LANCEUR": "/bin/false"}
     r = subprocess.run(["bash", SCRIPT, _un_alias_reel(True), "--executer",
                        "--je-sais-que-la-carte-est-libre"], env=env,
                        capture_output=True, text=True, timeout=30)

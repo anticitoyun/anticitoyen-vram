@@ -62,7 +62,8 @@ def test_a_28_gio_le_refus_reste_mais_la_fenetre_annoncee_monte(monkeypatch, cap
     spec, man, planifier = _preparer(monkeypatch, libre=int(28.1 * G))
     assert not LD._plafonner_mlp_prefill(spec, ctx, planifier(), planifier, man) and spec.mlp_prefill_plafond is None
     msg = _refuse(spec, man, planifier(), ctx)
-    assert msg and "fenêtre qui tient : 25600 jetons" in msg, msg     # 31 744 avant le terme d'attention (démenti par la chauffe)
+    # 25 600 avant d19 (31 744 avant le terme d'attention, démenti par la chauffe) : les morceaux bornent le résiduel à 4 096 lignes
+    assert msg and "fenêtre qui tient : 27648 jetons" in msg, msg
 
 
 def test_a_33_gio_le_plafond_fait_tenir_le_plancher_kv(monkeypatch, capsys):
@@ -75,11 +76,11 @@ def test_a_33_gio_le_plafond_fait_tenir_le_plancher_kv(monkeypatch, capsys):
     c = spec.mlp_prefill_plafond
     assert c == 4096, c                                               # le plus grand qui tient SANS exiler plus
     plafonnee = LD._reserve_prefill(spec, ctx, man, planifier())
-    assert 8.5 * G <= plafonnee <= 9.5 * G and pleine >= 14 * G, (plafonnee / G, pleine / G)   # terme d'attention compris
+    assert 7.0 * G <= plafonnee <= 8.0 * G and pleine >= 14 * G, (plafonnee / G, pleine / G)   # 8,5-9,5 avant d19 (résiduel borné)
     assert _refuse(spec, man, planifier(), ctx) is None, "le refus devait disparaître"
-    assert 50 <= LD._mlp_exiles(planifier()) <= 58                    # 55 : le KV et l'attention occupent la place
+    assert 45 <= LD._mlp_exiles(planifier()) <= 58                    # 55 avant d19, 49 avec le résiduel borné
     spec.mlp_prefill_plafond = c
-    assert f"MLP dense par tranches au-delà de {c} jetons" in capsys.readouterr().out
+    assert f"MLP dense par tranches et attention par morceaux au-delà de {c} jetons" in capsys.readouterr().out   # d19
 
 
 def test_sans_gain_ni_besoin_rien_ne_change(monkeypatch):
@@ -98,7 +99,7 @@ def test_a_29_5_gio_plus_d_oscillation_exil_remontee(monkeypatch):
         LD._plafonner_mlp_prefill(spec, 26624, planifier(), planifier, man)
     p = planifier()
     assert _refuse(spec, man, p, 26624) is None
-    assert 50 <= LD._mlp_exiles(p) <= 60
+    assert 45 <= LD._mlp_exiles(p) <= 60                              # d19 : résiduel borné, moins d'exil
 
 
 def test_la_relance_a_la_fenetre_annoncee_sert_grace_a_la_branche_plancher_tenu(monkeypatch):

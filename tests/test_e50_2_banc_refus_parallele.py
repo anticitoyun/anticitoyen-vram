@@ -59,6 +59,35 @@ def test_parser_outils_insensible_aux_couleurs_ansi():
     assert r.stdout.strip() == "('4', '8', '132')", r.stdout
 
 
+def test_arreter_attend_la_mort_et_tue_si_sigterm_ignore(tmp_path):
+    """Trouvé par chef (01/10 14h15) : `_arreter` envoyait SIGTERM puis `sleep(2)` fixe et
+    repartait — un serveur qui ignore SIGTERM (ou met plus de 2 s à mourir) restait vivant,
+    tenant la VRAM, pendant que la campagne annonçait « carte rendue ». Ce test lance un VRAI
+    processus qui ignore SIGTERM : avec l'ancien `sleep(2)` seul il resterait vivant après
+    l'appel (ce test casserait si on revient à cette forme) ; avec `_attendre_mort_ou_tuer`,
+    il doit être mort (SIGKILL) avant le retour."""
+    script = tmp_path / "essai_sigkill.py"
+    script.write_text(
+        f"import sys; sys.path.insert(0, {str(ICI / 'outils')!r})\n"
+        "import importlib.util, os, signal, subprocess, time\n"
+        f"spec = importlib.util.spec_from_file_location('c', {str(CAMPAGNE)!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "p = subprocess.Popen(['python3', '-c',\n"
+        "    'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+        "time.sleep(0.3)\n"  # laisse le temps au handler SIG_IGN de se poser
+        "os.kill(p.pid, signal.SIGTERM)\n"
+        "tue = m._attendre_mort_ou_tuer(p.pid, 2, None, 'test')\n"
+        "print('tue=', tue)\n"
+        # zombie (SIGKILL pas encore réap é par le kernel) compte comme mort — os.kill(pid, 0)
+        # réussirait encore sur un zombie, _sortant lit le vrai état (comme carte_rendue.py)
+        "print('etat=vivant' if not m._sortant(p.pid) else 'etat=mort')\n"
+    )
+    r = subprocess.run([PY, str(script)], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert "tue= True" in r.stdout, f"SIGKILL non déclenché : {r.stdout!r}"
+    assert "etat=mort" in r.stdout, f"processus encore vivant après _attendre_mort_ou_tuer : {r.stdout!r}"
+
+
 def test_coupure_marqueur_present_cassant():
     """(a) Si le banc-refus déployé change et que le marqueur de coupe disparaît ou bouge,
     ce test casse AVANT que la campagne ne tourne en aveugle dessus cette nuit."""

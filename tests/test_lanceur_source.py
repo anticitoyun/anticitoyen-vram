@@ -187,3 +187,12 @@ def test_mort_introuvable_nommee_pps(poste, tmp_path):
                                          "echo 'chargement de /m ...'\nexit 1\n")
     r = subprocess.run(["bash", str(poste["lanceur"]), "acvram-essai"], capture_output=True, text=True, env=env, timeout=30)
     assert r.returncode == 1 and "acvram mort au démarrage : introuvable : [Errno 2]" in r.stderr, r.stderr
+
+
+def test_paquet_libere_la_garde_arbre(poste, tmp_path):
+    """Rafale e50.2 du 01/10 : carte.sh exporte ACVRAM_ARBRE au service ; le paquet doit partir avec la garde levée."""
+    sonde = tmp_path / "sonde"; sonde.write_text("#!/bin/sh\necho \"LIBRE=$ACVRAM_ARBRE_LIBRE\"\n"); sonde.chmod(0o755)
+    r = _run(poste, ACVRAM_SERVEUR_A_SEC="0", ACVRAM_EXEC=str(sonde))
+    assert "LIBRE=1" in r.stdout, r.stdout + r.stderr
+    r2 = _run(poste, ACVRAM_SERVEUR_A_SEC="0", ACVRAM_EXEC=str(sonde), ACVRAM_ARBRE=str(poste["arbre"]))
+    assert "LIBRE=" in r2.stdout and "LIBRE=1" not in r2.stdout, r2.stdout + r2.stderr

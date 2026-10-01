@@ -1392,12 +1392,14 @@ def _fenetre_qui_tient(plan: Plan, spec: ModelSpec, manifest: dict, dev: str, bo
     # levier 1 (kv31b) : un modèle dense relancé à N verra son MLP passer par tranches (`_plafonner_mlp_prefill`) —
     # la fenêtre annoncée se calcule donc avec la réserve plafonnée (à `_MLP_MORCEAU`), celle que la relance aura.
     from . import attention as _att
-    plafond_avant = spec.mlp_prefill_plafond
+    from . import runner as _r
+    plafond_avant = (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
     m = _att._MLP_MORCEAU
-    tranches = (plafond_avant is None and m > 0 and not spec.num_experts
+    tranches = (plafond_avant[0] is None and m > 0 and not spec.num_experts
                 and not any("linear" in t for t in spec.layer_types))
     if tranches:
         spec.mlp_prefill_plafond = m
+        spec.prefill_morceau_plafond = m if _r._MORCEAU_AU_DELA > 0 else None       # d19 : la relance aura les morceaux aussi
     try:
         while n >= pas:
             if _kv_plancher(plan, spec, n, dev) + _reserve_prefill(spec, n, manifest, plan) <= base:
@@ -1405,7 +1407,7 @@ def _fenetre_qui_tient(plan: Plan, spec: ModelSpec, manifest: dict, dev: str, bo
             n -= pas
         return 0
     finally:
-        spec.mlp_prefill_plafond = plafond_avant
+        spec.mlp_prefill_plafond, spec.prefill_morceau_plafond = plafond_avant
 
 
 def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None,
@@ -2132,6 +2134,14 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     if (m <= 0 or ctx <= m or spec.num_experts or any("linear" in t for t in spec.layer_types)
             or spec.mlp_prefill_plafond is not None):
         return False
+    # d19 (poste6 01/10) : au-delà du même plafond, l'attention passe par morceaux (runner `_MORCEAU_AU_DELA`) — la réserve
+    # borne alors aussi le flux résiduel, q/k/v et les scores à S lignes (config `activations_prefill_bytes`)
+    from . import runner as _r
+    morceaux = _r._MORCEAU_AU_DELA > 0
+
+    def poser(c: Optional[int]) -> None:
+        spec.mlp_prefill_plafond = c
+        spec.prefill_morceau_plafond = c if morceaux else None
     plein = _mlp_exiles(plan)
     if plein == 0:
         return False
@@ -2139,7 +2149,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     def essai(c: Optional[int]) -> tuple[int, bool]:
         """(MLP exilés, le plancher KV d'une séquence tient-il ?) avec le plafond ``c`` — le second est le critère même
         de `_borner_kv_avec_exil` (VRAM libre − poids − marge(réserve) ≥ plancher), vrai quand CUDA est absent."""
-        spec.mlp_prefill_plafond = c
+        poser(c)
         with contextlib.redirect_stdout(io.StringIO()):
             p = planifier()
         if p is None or not torch.cuda.is_available():
@@ -2157,7 +2167,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
         # kv31b (poste6 30/09, gemma-4-31B à 32 768) : quand le KV d'une séquence exile déjà TOUS les MLP, la réserve
         # d'un seul tenant (10,4 Gio) n'exile « pas plus » — a5v la gardait et le plancher KV ne tenait plus (15 refus).
         # Ici : si la réserve plafonnée fait tenir le plancher là où la pleine échoue, elle est prise (branche ci-dessous).
-        spec.mlp_prefill_plafond = None
+        poser(None)
         return False
     if plancher >= plein:
         # kv31b : le plus grand plafond qui TIENT sans exiler plus que le plafond minimal (à 33,6 Gio libres, gemma-4-31B :
@@ -2176,10 +2186,10 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
             bas = milieu
         else:
             haut = milieu
-    spec.mlp_prefill_plafond = None
+    poser(None)
     seul = spec.activations_prefill_bytes(ctx)
-    spec.mlp_prefill_plafond = bas
-    print(f"[acvram] MLP dense par tranches au-delà de {bas} jetons : activations de préfill réservées "
+    poser(bas)
+    print(f"[acvram] MLP dense par tranches{' et attention par morceaux' if morceaux else ''} au-delà de {bas} jetons : activations de préfill réservées "
           f"{spec.activations_prefill_bytes(ctx) / 2**30:.2f} Gio au lieu de {seul / 2**30:.2f} ({motif})", flush=True)
     return True
 
@@ -2319,6 +2329,8 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
         # réserve qui ne la couvre plus — le seuil est posé ici ; la chauffe le remplace par le tenu prouvé. None sinon.
         from . import attention as _att
         _att.definir_seuil(spec.mlp_prefill_plafond)
+        from . import runner as _r
+        _r.definir_seuil_morceaux(spec.prefill_morceau_plafond)      # d19 : même seuil pour l'attention par morceaux
         if neuf is not None:
             _exil_demande(neuf)
             _exil_experts_demande(neuf, manifest)
