@@ -9,6 +9,10 @@
 * régime : Kimi-Linear-35B-kda-nvfp4, NOMINAL (graphes on, 0 exilée), mla_core par défaut (tf32 ≤ 2 048 clés, fp32
   au-delà), 5090 seule. nvidia-smi au début (14:50:01) et à la fin (14:51:12) : seul llama-server 4436, sur la 3080 Ti.
   Pause e50.2 posée à 14:45:37 ; ligne « === pause … attente 14:49:45 » postérieure vérifiée ; retirée à 14:51:33.
+* chevauchement (signalé par chef après la fusion) : la suite pytest complète d'poste6 a tourné de 14:50:01 à 14:50:36,
+  pendant cette prise (charge processeur d'environ 1 cœur, hors verrou carte). Les durées de noyaux au nsys n'en dépendent
+  pas (temps GPU), et la contre-épreuve sur la trace ddw, sans chevauchement, donne les mêmes parts à ± 1,5 %. Le mur et
+  les trous hôte de cette prise ne sont pas utilisés.
 * contre-épreuve : la trace nsys-A de la prise ddw (84123994d, même instrument, 3 h plus tôt) donne 1 394,3 ms, Marlin
   12,0 %, GEMM fp32 50,1 % — à ± 1,5 % de cette prise, classe par classe.
 
