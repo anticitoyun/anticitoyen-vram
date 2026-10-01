@@ -69,13 +69,40 @@ Ni mixte-27B (3/4 manquant sur ce commit, pas rejoué) ni 4B (PPL manquante sur 
 rejouée) n'ont leurs 4 tâches + PPL réunies sur le MÊME commit — aucun verdict modèle complet
 possible ici non plus.
 
+## 01/10 10h32 : complément mixte-27B/4B FINI — les 3 modèles verdictables, sur 2 commits
+
+Rejeu de ce matin (07:08-07:12, `rejeu5.log`) + complément de 09:11-10:32 (`completer2.log`,
+après le TIMEOUT du 08:42 corrigé par `ACVRAM_DUREE_MAX=3600` sur `professional_law` et le
+script sans `set -e`) : mixte-27B et Qwen3-4B ont maintenant chacun leurs 4 tâches + PPL
+réunies sur le MÊME commit `972642262` :
+
+| modèle | tâche | mcnemar_p | tenu | source |
+|---|---|---|---|---|
+| mixte-27B | college_computer_science | 1,0 | 1 | rejeu5.log 07:08 |
+| mixte-27B | professional_law | 1,0 | 1 | completer2.log 09:13-09:57 |
+| mixte-27B | gsm8k | 1,0 | 1 | completer2.log 09:57 |
+| mixte-27B | high_school_mathematics | 1,0 | 1 | completer2.log 10:12 |
+| mixte-27B | PPL | — | 1 (6,5048/6,5048, écart 0,0) | completer2.log 09:11 |
+| 4B | professional_law | 1,0 | 1 | rejeu5.log |
+| 4B | gsm8k | 1,0 | 1 | rejeu5.log |
+| 4B | high_school_mathematics | 1,0 | 1 | rejeu5.log |
+| 4B | college_computer_science | 1,0 | 1 | rejeu5.log 07:47 |
+| 4B | PPL | — | 1 (10,9174/10,9174, écart 0,0) | completer2.log 10:32 |
+
 ## Verdict
 
-**Coder-30B seul est TENU, et seulement sur `79bd73086`** (4/4 + PPL, un seul moteur).
-**mixte-27B et 4B ne sont PAS verdictables** : leurs résultats sont répartis sur deux moteurs
-différents (`79bd73086` / `972642262`, diff non vide sur `acvram/`, voir ci-dessus) — 7/7 et 5/5
-chacun TENU pris séparément, mais aucun des deux modèles n'a ses 4 tâches + PPL sur un seul et
-même commit. Pas de « 12/12 », pas de verdict mixte-27B ni 4B pour l'instant.
+**Coder-30B : TENU sur `79bd73086`** (4/4 + PPL, un seul moteur, le seul commit où il est
+complet).
+**mixte-27B : TENU sur `972642262`** (4/4 + PPL, un seul moteur — complet depuis 10:32).
+**Qwen3-4B : TENU sur `972642262`** (4/4 + PPL, un seul moteur — complet depuis 10:32).
+
+Les 3 modèles sont TENU, mais **sur 2 commits différents** (`79bd73086` pour Coder-30B,
+`972642262` pour mixte-27B et 4B) — toujours PAS « 12/12 sur un seul moteur » au sens strict de
+la règle du 26/09, puisque le diff `acvram/` entre les deux commits n'est pas vide. C'est un
+résultat suffisant pour clore la campagne (chaque modèle a un verdict propre, traçable, sur un
+commit nommé) mais pas la preuve qu'un SEUL moteur passe les 3 — cette preuve demanderait de
+rejouer Coder-30B sur `972642262` (ou les deux autres sur `79bd73086`), hors mandat de ce
+rejeu (décision Coder-30B/revalidation laissée à chef si besoin).
 
 **Isolation du worktree vérifiée (piège trouvé par poste1, 01/10)** : `prise-tache-275.sh:6`
 (`cd "$(dirname "$0")/../.."`) place le cwd sur le worktree AVANT tout `$PY -m acvram.cli` —
@@ -86,7 +113,6 @@ empiriquement : `cd poste2-275-figee && $PY -c "import acvram; print(acvram.__fi
 copie conforme de `prise-tache-275.sh`) et pour le complément en cours (`completer-mixte-4b.sh`,
 PPL copiée verbatim de `qualite.sh:36-41`, même `cd` hérité).
 
-**Reste à faire** (décision chef) : rejouer mixte-27B (3/4 déjà connues sous `79bd73086`,
-college_computer_science sous `972642262` — soit rejouer les 4 sous le MÊME commit, soit accepter
-qu'une revue nomme les 6 commits intermédiaires comme sans effet sur ces 3 modèles avant de les
-additionner) et les 4 tâches de 4B pareillement. Carte rendue propre (verrou vide, vérifié).
+**FAIT** (01/10 10h32) : mixte-27B et 4B rejoués en entier sous `972642262` (voir section
+ci-dessus). Les 3 modèles sont chacun TENU sur un commit unique, propre. Carte rendue propre
+(verrou vide, vérifié). Campagne-275 close de mon côté.
