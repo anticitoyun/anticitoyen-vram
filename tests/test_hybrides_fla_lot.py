@@ -1,7 +1,7 @@
 """KDA et Mamba2 : décodage du LOT en un lancement fla (`forward_batch`,
 `decode_static_batch`) contre b appels de la voie torch séquence par séquence
 (règle 9, poste7-priorite-apres-campagne-17-09 § 2). Bras cassant : l'état KDA
-passé à fla sans la transposition [V, K] → [K, V] doit rendre rouge."""
+(en [K, V] depuis 61w, comme fla) passé à fla transposé doit rendre rouge."""
 import pytest
 import torch
 
