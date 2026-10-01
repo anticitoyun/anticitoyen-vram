@@ -16,6 +16,7 @@ mémoire vive un endroit raisonnable pour garder les 120 autres.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
@@ -121,6 +122,14 @@ class ACVRamModel(nn.Module):
         self._mtp_hidden: Optional[torch.Tensor] = None
         self._mtp_hidden_n: int = 0
         self._mtp_prefill: Optional[torch.Tensor] = None
+        # chef (01/10, pièce mtp) : _mtp_prefill est une AFFECTATION (pas une
+        # concaténation) à chaque préfill — les 4 dernières tailles écrites, pour voir
+        # si un préfill en plusieurs passes (frontière d'instantané, morceaux) l'écrase.
+        self._mtp_prefill_releves: deque = deque(maxlen=4)
+        # chef (01/10, correctif C) : à quelle séquence appartient le _mtp_prefill actuel —
+        # sans ça, étendre à chaque pas simple (runner.py) risquerait de concaténer l'état
+        # caché d'une AUTRE séquence à la suite du préfill d'une précédente.
+        self._mtp_prefill_seq_id: Optional[int] = None
 
     @torch.inference_mode()
     def forward(self, batch: ForwardBatch, return_hidden: bool = False,
@@ -210,7 +219,30 @@ class ACVRamModel(nn.Module):
                 # Le brouillon MTP a besoin du contexte entier pour amorcer son
                 # propre cache : au prefill on garde tous les etats, pas
                 # seulement celui du dernier jeton.
-                self._mtp_prefill = etat.detach()
+                #
+                # chef (01/10, après le bras long refusé par sa garde, proposed_tokens=0) :
+                # un préfill coupé en plusieurs passes (frontière d'instantané, runner.py
+                # ~1930-1948 ; morceaux, _prefill_morceaux) appelle `forward()` une fois PAR
+                # MORCEAU — une AFFECTATION ici écrasait les morceaux précédents, ne gardant
+                # que le dernier (prompt > _pas_insta=256, §9/§12 du scellé mtp). On CONCATÈNE
+                # quand cette passe CONTINUE la même séquence au même point où la précédente
+                # s'est arrêtée (même seq_id, position de départ == taille déjà accumulée) ;
+                # sinon (nouvelle séquence, ou coupe non contiguë) on repart à zéro comme avant.
+                seq_id = (batch.seq_ids[0] if batch.seq_ids
+                         and len(batch.seq_ids) == 1 else None)
+                debut = int(batch.positions[0].item()) if batch.positions.numel() else 0
+                if (seq_id is not None and seq_id == self._mtp_prefill_seq_id
+                        and self._mtp_prefill is not None
+                        and debut == self._mtp_prefill.shape[0]):
+                    self._mtp_prefill = torch.cat([self._mtp_prefill, etat.detach()], dim=0)
+                    evenement = "concatenation"
+                else:
+                    self._mtp_prefill = etat.detach()
+                    evenement = "ecriture"
+                self._mtp_prefill_seq_id = seq_id
+                self._mtp_prefill_releves.append({
+                    "evenement": evenement, "taille": int(self._mtp_prefill.shape[0]),
+                    "seq_ids": list(batch.seq_ids) if batch.seq_ids is not None else None})
             self._garder_hidden(etat[(batch.last_token_indices() if logits_positions
                                       is None else logits_positions).to(etat.device)])
         # La vérification spéculative et la perplexité ont toutes deux besoin

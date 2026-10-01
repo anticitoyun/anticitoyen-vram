@@ -110,6 +110,11 @@ class Proposal:
     tokens: list[int]
     # [k, vocabulaire] probabilités du brouillon, ou None sans modèle
     probs: Optional[torch.Tensor] = None
+    # chef (01/10, pièce mtp) : pourquoi une proposition est vide, nommé par le
+    # proposeur lui-même — distingue "jamais essayé" (h absent, amorçage raté) de
+    # "essayé, rien à proposer" (ngram sans répétition), que proposed_tokens=0 seul
+    # ne distingue pas. "" quand non vide ou sans objet.
+    raison: str = ""
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -190,13 +195,13 @@ class NGramProposer:
     def propose(self, seq: Any, k: int) -> Proposal:
         ids = seq.all_ids
         if len(ids) < self.min_ngram + 1 or k <= 0:
-            return Proposal([])
+            return Proposal([], raison="longueur")
         st = self._st(seq)
         self._indexer(st, ids)
         if self.adaptatif:
             if st["veille"] > 0:
                 st["veille"] -= 1
-                return Proposal([])
+                return Proposal([], raison="veille")
             # le pas est compté ici : un pas sans proposition pèse aussi dans
             # le rendement, et c'est le cas le plus fréquent en prose
             st["pas"] += 1
@@ -211,7 +216,7 @@ class NGramProposer:
             nxt = ids[p:p + k]
             if nxt:
                 return Proposal(list(nxt))
-        return Proposal([])
+        return Proposal([], raison="aucun_match")
 
     def commit(self, seq: Any, accepted: list[int]) -> None:
         if not self.adaptatif:
@@ -476,6 +481,15 @@ class MTPProposer:
                                         enable_prefix_cache=False)
         self.state: dict[int, _DraftState] = {}
         self._ligne = 0            # ligne du dernier lot vérifié à reprendre
+        # chef (01/10, pièce mtp, après l'essai court où "amorcage" domine sans que
+        # sans_hidden apparaisse) : les 4 derniers échecs d'amorçage, avec la cause exacte
+        # et les tailles en jeu — exposés via EngineStats.source_speculateur, pas un print.
+        self._amorcage_echecs: deque = deque(maxlen=4)
+        # chef (01/10, après le faux départ "cache à 50 jetons") : les échecs du relevé
+        # glissant ne sont que les RETENTATIVES d'un amorçage déjà raté (st.length reste à 0).
+        # La vraie question est le PREMIER échec de chaque séquence — gardé à part, une entrée
+        # par seq.id, jamais écrasé par les retentatives suivantes de la même séquence.
+        self._premier_echec_amorcage: dict = {}
 
     def _ensure_blocks(self, st: _DraftState, needed_tokens: int) -> bool:
         need = (needed_tokens + self.block_size - 1) // self.block_size
@@ -518,6 +532,13 @@ class MTPProposer:
         i = min(self._ligne, h.shape[0] - 1)
         return h[i:i + 1]
 
+    def _noter_echec_amorcage(self, seq: Any, cause: str, hs_shape0: Optional[int], len_ids: int) -> None:
+        cle = seq.id if hasattr(seq, "id") else id(seq)
+        entree = {"seq_id": cle, "cause": cause, "hs_shape0": hs_shape0,
+                  "len_ids": len_ids, "len_ids_moins_1": len_ids - 1}
+        self._amorcage_echecs.append(entree)
+        self._premier_echec_amorcage.setdefault(cle, entree)
+
     def _amorcer(self, seq: Any, st: _DraftState) -> bool:
         """Remplit le cache de la tête avec le contexte de l'invite.
 
@@ -528,9 +549,12 @@ class MTPProposer:
         hs = getattr(self.model, "_mtp_prefill", None)
         ids = seq.all_ids
         if hs is None or hs.shape[0] < len(ids) - 1:
+            self._noter_echec_amorcage(seq, "prefill_absent" if hs is None else "prefill_court",
+                                       None if hs is None else int(hs.shape[0]), len(ids))
             return False
         n = len(ids) - 1
         if not self._ensure_blocks(st, n + 8):
+            self._noter_echec_amorcage(seq, "blocs_epuises", int(hs.shape[0]), len(ids))
             return False
         emb = self.model.embed_tokens
         toks = torch.tensor(ids[1:n + 1], dtype=torch.long, device=emb.device)
@@ -542,13 +566,13 @@ class MTPProposer:
     def propose(self, seq: Any, k: int) -> Proposal:
         ids = seq.all_ids
         if len(ids) > self.max_model_len:
-            return Proposal([])
+            return Proposal([], raison="longueur")
         h = self._hidden_cible()
         if h is None:
-            return Proposal([])                        # avant le premier pas
+            return Proposal([], raison="sans_hidden")   # avant le premier pas
         st = self.state.setdefault(seq.id, _DraftState())
         if st.length == 0 and len(ids) > 2 and not self._amorcer(seq, st):
-            return Proposal([])
+            return Proposal([], raison="amorcage")
         st.length = min(st.length, len(ids) - 1)
 
         emb = self.model.embed_tokens
@@ -578,7 +602,7 @@ class MTPProposer:
             cur, pos = tok, pos + 1
             st.length = pos
         if not tokens:
-            return Proposal([])
+            return Proposal([], raison="aucun_jeton")
         return Proposal(tokens, None if glouton else torch.stack(probs))
 
     def commit(self, seq: Any, accepted: list[int]) -> None:
