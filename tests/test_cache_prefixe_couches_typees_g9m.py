@@ -4,6 +4,7 @@ Avant le correctif, `est_hybride = bool(layer_types)` le prenait pour un hybride
 plus grande frontière d'instantané photographiée — `_photographier` ne range rien sans `gdn_states` — donc 0 jeton servi à une
 requête identique (gemma-4-31B, S1 du 01/10 : `cached_prompt_tokens` 0, Devstral 19 %). Reproduit à sec : 288 → 0.
 """
+import pytest
 import torch
 
 import acvram.engine.runner as R
@@ -27,16 +28,26 @@ def _deux_fois(eng, n=300):
     return eng.stats.cached_prompt_tokens
 
 
-def test_couches_typees_sans_recurrence_servent_le_cache_de_prefixe(converted):
+def test_couches_typees_sans_recurrence_servent_le_cache_de_prefixe(converted, monkeypatch):
+    """Les DEUX chemins (chef 01/10 : variable de régime, défaut = ancien comportement) : à 0, gemma-4 est hybride et ne sert
+    rien ; à 1, il reprend comme un dense. Le défaut basculera sur la garde qualité de poste2."""
     temoin = _deux_fois(_moteur(converted, []))                                   # dense sans layer_types : référence
     assert temoin > 0
-    eng = _moteur(converted, ["sliding_attention", "full_attention"] * 2)         # gemma-4 : typé, 0 récurrent
-    assert eng.spec.couches_recurrentes == 0 and not eng.est_hybride
+    types = ["sliding_attention", "full_attention"] * 2                            # gemma-4 : typé, 0 récurrent
+    monkeypatch.setattr(R, "_HYBRIDE_PAR_RECURRENCE", False)                      # défaut : ancien comportement
+    eng = _moteur(converted, types)
+    assert eng.spec.couches_recurrentes == 0 and eng.est_hybride
+    assert _deux_fois(eng) == 0, "défaut : un modèle typé est encore pris pour un hybride, 0 jeton servi (dit, pas un bogue du test)"
+    monkeypatch.setattr(R, "_HYBRIDE_PAR_RECURRENCE", True)                       # ACVRAM_HYBRIDE_PAR_RECURRENCE=1
+    eng = _moteur(converted, types)
+    assert not eng.est_hybride
     assert _deux_fois(eng) == temoin, "un modèle typé sans état récurrent doit reprendre comme un dense"
 
 
-def test_un_vrai_hybride_reste_hybride(converted):
+@pytest.mark.parametrize("par_recurrence", [False, True])
+def test_un_vrai_hybride_reste_hybride(converted, monkeypatch, par_recurrence):
     from acvram.engine.loader import load_model
+    monkeypatch.setattr(R, "_HYBRIDE_PAR_RECURRENCE", par_recurrence)
     loaded = load_model(converted, dtype=torch.bfloat16, device_override="cpu", max_concurrent_seqs=2)
     loaded.spec.layer_types = ["linear_attention", "full_attention"] * 2
     assert loaded.spec.couches_recurrentes == 2
