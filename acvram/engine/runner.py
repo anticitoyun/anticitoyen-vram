@@ -242,6 +242,17 @@ class EngineStats:
     proposed_tokens: int = 0
     spec_longueurs_melees: int = 0   # pas spéculatifs rendus au décodage simple (pièce 86)
     spec_steps: int = 0
+    # chef (01/10, pièce mtp) : proposed_tokens=0 ne distingue pas "jamais essayé"
+    # de "essayé, rien à proposer" — chaque retour précoce du pas spéculatif compte
+    # ici sous son nom (speculative.py Proposal.raison, ou posé directement ici pour
+    # les gardes du moteur). Compteur permanent, pas un print : un jouet où chaque
+    # branche est forcée doit casser si l'on en retire un.
+    spec_hybride_hors_graphe: int = 0   # runner.py _speculative_decode : len(decodable)!=1 ou graphes off
+    spec_k_insuffisant: int = 0         # runner.py _speculative_decode : hyb, prop non vide mais k < spec_k
+    spec_raisons: dict = field(default_factory=dict)   # proposeur : "longueur", "sans_hidden", "amorcage", "aucun_jeton", "veille", "aucun_match"...
+
+    def compter_raison_vide(self, raison: str) -> None:
+        self.spec_raisons[raison or "inconnue"] = self.spec_raisons.get(raison or "inconnue", 0) + 1
     # Séquences terminées par `_finish_budget_epuise` (budget KV épuisé avant
     # `max_tokens`), jamais par un `EOS`/`max_tokens` normal. Compté pour que
     # `certifie-b12` puisse refuser une cellule où le lot réel a été rogné en
@@ -264,6 +275,25 @@ class EngineStats:
     # graphes désactivés, repliés en eager avant toute capture, ou moteur à
     # sec → trois zéros, qui sont la vérité et non une absence de mesure.
     source_graphes: Any = field(default=None, repr=False, compare=False)
+    # chef (01/10, pièce mtp) : même principe que source_graphes — lus en direct sur le
+    # proposeur et le modèle, jamais recopiés ici (les deques vivent là où l'événement se produit).
+    source_speculateur: Any = field(default=None, repr=False, compare=False)
+    source_modele: Any = field(default=None, repr=False, compare=False)
+
+    def releves_amorcage(self) -> list:
+        spec = self.source_speculateur() if callable(self.source_speculateur) else self.source_speculateur
+        return list(getattr(spec, "_amorcage_echecs", None) or [])
+
+    def premiers_echecs_amorcage(self) -> dict:
+        """Un par seq.id, jamais écrasé par les retentatives (chef 01/10) : le relevé
+        glissant ne montre que des retentatives d'un amorçage déjà raté ; la cause réelle
+        est au PREMIER échec de chaque séquence."""
+        spec = self.source_speculateur() if callable(self.source_speculateur) else self.source_speculateur
+        return dict(getattr(spec, "_premier_echec_amorcage", None) or {})
+
+    def releves_mtp_prefill(self) -> list:
+        m = self.source_modele() if callable(self.source_modele) else self.source_modele
+        return list(getattr(m, "_mtp_prefill_releves", None) or [])
 
     def compteurs_graphes(self) -> dict:
         """`graphes_nombre` (graphes vivants), `graphes_captures`, `graphes_replays`."""
@@ -313,6 +343,12 @@ class EngineStats:
             "accepted_tokens": self.accepted_tokens,
             "proposed_tokens": self.proposed_tokens,
             "spec_longueurs_melees": self.spec_longueurs_melees,
+            "spec_hybride_hors_graphe": self.spec_hybride_hors_graphe,
+            "spec_k_insuffisant": self.spec_k_insuffisant,
+            "spec_raisons_non_engage": dict(self.spec_raisons),
+            "spec_amorcage_echecs": self.releves_amorcage(),
+            "spec_premiers_echecs_amorcage": self.premiers_echecs_amorcage(),
+            "mtp_prefill_releves": self.releves_mtp_prefill(),
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),
             "sequences_tronquees_budget": self.sequences_tronquees_budget,
@@ -799,6 +835,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # change encore après ce point (repli, faux runner d'un test), et une
         # référence figée ici aurait rendu les compteurs d'un objet mort.
         self.stats.source_graphes = lambda: self.graphs
+        self.stats.source_speculateur = lambda: self.speculator
+        self.stats.source_modele = lambda: self.model
 
         # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
         # {index_couche: set(experts résidents)} — peuplé depuis les couches
@@ -2144,6 +2182,50 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             return self._plain_decode_pipeline(decodable)
         return self._plain_decode_sync(decodable)
 
+    def _nourrir_mtp_prefill(self, seq: Sequence) -> None:
+        """Correctif chef (01/10, pièce mtp) : `_mtp_prefill` est écrit UNE fois au préfill
+        et jamais revu — tout pas qui fait grandir `seq.all_ids` avant le premier essai
+        spéculatif réussi ouvre un écart que `_amorcer()` (speculative.py) ne rattrape
+        jamais. Posé en `_plain_decode_sync` une 1re fois (01/10), sans effet : le ou les pas
+        qui précèdent le premier essai spéculatif de nos séquences réelles ne passent pas
+        par cette fonction (graphe, repli de la garde, ou autre — pas isolé précisément,
+        chef : « ne cherche plus QUEL chemin »). Déplacé au point commun à TOUT chemin qui
+        émet un jeton : `_consommer`, juste après `seq.output_ids.append`.
+
+        `model._mtp_hidden` est déjà à jour quel que soit le chemin qui vient de tourner —
+        eager (`_garder_hidden` appelée en Python), graphe rejoué (seul le `copy_` capturé
+        tourne, mais il écrit le MÊME tampon, `graphs.py:1188` le préalloue avant capture) ou
+        repli de la garde spéculative (`_plain_decode`, même mécanisme). Étend `_mtp_prefill`
+        de la ligne de hidden de CE pas — seulement si c'est la MÊME séquence que celle du
+        préfill courant (sinon on concaténerait l'état d'une autre séquence, faux silencieux
+        pire que l'échec actuel), et JAMAIS sur le tout premier jeton d'une séquence (celui du
+        préfill lui-même : sa ligne est déjà la dernière de `_mtp_prefill`, l'ajouter une
+        2e fois décalerait tout d'un cran).
+
+        chef (01/10, 2e tour) : SEULEMENT tant que la tête n'est pas amorcée
+        (`MTPProposer.state[seq.id].length == 0`) — un pas spéculatif accepté peut livrer
+        PLUSIEURS jetons pour une seule ligne de hidden de vérification (`_append`, pas
+        `_consommer`, mais la garde sémantique vaut mieux qu'un comptage par appel) ; une fois
+        amorcée, la tête tient son propre cache par `commit()` (speculative.py) — étendre
+        encore ici doublerait les lignes."""
+        m = self.model
+        if m.mtp is None or m._mtp_prefill is None or len(seq.output_ids) <= 1:
+            return
+        if m._mtp_prefill_seq_id != seq.id:
+            return
+        etat_amorce = getattr(self.speculator, "state", None)
+        st = etat_amorce.get(seq.id) if etat_amorce is not None else None
+        if st is not None and st.length != 0:
+            return
+        h = getattr(m, "_mtp_hidden", None)
+        if h is None or h.numel() == 0:
+            return
+        n = getattr(m, "_mtp_hidden_n", 0) or h.shape[0]
+        nouveau = h[:n][-1:].detach().to(m._mtp_prefill.dtype)
+        m._mtp_prefill = torch.cat([m._mtp_prefill, nouveau], dim=0)
+        m._mtp_prefill_releves.append({"evenement": "extension_pas_simple",
+                                       "taille": int(m._mtp_prefill.shape[0]), "seq_ids": [seq.id]})
+
     def _plain_decode_sync(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         trace = os.environ.get("ACVRAM_TRACE_STEPS")
         tg = time.perf_counter()
@@ -2192,15 +2274,20 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # récurrents reviennent en arrière par l'historique des tampons
             # fixes) ; forme fixe k+1 pour ne capturer qu'un graphe de plus
             if len(decodable) != 1 or self.graphs is None or not self.graphs.enabled:
+                self.stats.spec_hybride_hors_graphe += 1
                 return self._plain_decode(decodable)
             self.graphs.max_ql = self.spec_k + 1
         proposals: dict[int, Proposal] = {}
         for seq in decodable:
             budget = max(0, seq.params.max_tokens - len(seq.output_ids) - 1)
             k = min(self.spec_k, budget)
-            prop = self.speculator.propose(seq, k) if k > 0 else Proposal([])
+            prop = self.speculator.propose(seq, k) if k > 0 else Proposal([], raison="budget_epuise")
             if hyb:
-                if not len(prop) or k < self.spec_k:
+                if not len(prop):
+                    self.stats.compter_raison_vide(prop.raison)
+                    return self._plain_decode(decodable)
+                if k < self.spec_k:
+                    self.stats.spec_k_insuffisant += 1
                     return self._plain_decode(decodable)
                 if len(prop) < k:
                     prop = Proposal(list(prop.tokens) + [prop.tokens[-1]] * (k - len(prop)))
@@ -2412,6 +2499,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     logprob=None, top_logprobs=None))
                 continue
             seq.output_ids.append(int(tok))
+            self._nourrir_mtp_prefill(seq)
             seq.cumulative_logprob += float(lp)
             if not seq.first_token_at:
                 seq.first_token_at = time.time()
