@@ -55,3 +55,18 @@ Lecture : si la trace confirme 5-12 % au décodage b=1, recoalescer notre noyau 
    `fused_recurrent_kda*` et `chunk_kda*` dans le temps GPU. Elle tranche les trois prédictions ci-dessus.
 2. Hors fenêtre de mesure : `nvcc -Xptxas -v` de `kda_decode_kernel` (registres, déversement).
 3. CAKE seulement si (1) donne une part ≥ 10 % ET que poste4 rapporte un code publié qui couvre sm_120.
+
+## Addendum 01/10 matin : CAKE vérifié à la source, ptxas du noyau b=1
+* Réponse duck.ai (poste4, `duck-reponses-01-10.md`) : code dans flashinfer #4262 (préfill) et #4279 (décodage) ; ×2,05 = préfill seul
+  contre FlashKDA ; décodage ×1,14 contre FlashInfer amont ; B200. **Vérifié moi-même par l'API GitHub** (ordre chef) : les deux PR
+  existent et sont fusionnées le 30/07/2026 (« add optimized B200 recurrent prefill/decode backend », +8 742 et +20 663 lignes).
+  **Elles sont sm_100a EXACT seulement** : `CheckExactSm100a` (csrc/kda/flashkda_binding_common.cuh et flashkda_decode_binding_common.cuh)
+  refuse tout `major ≠ 10 || minor ≠ 0` ; elles s'appuient sur tcgen05/TMEM, absents de sm_120 ; leurs tests vérifient que compute_120 n'est
+  pas dans les drapeaux. **CAKE est inapplicable sur la 5090** : ni le binaire, ni le portage direct (instructions absentes).
+* `nvcc -Xptxas -v -arch=sm_120` du `kda_decode_kernel<128>` seul (CUDA 13.4, extrait de acvram_kernels.cu:6446-6512, processeur, nice 19,
+  pendant une mesure de qualité de poste2, accord chef) : **255 registres par fil, 48 o de pile, 48 o de déversement**, 1 664 o de smem.
+  Ce qui confirme la lecture : `row[128]` sature les registres et déverse. Avec 32 blocs de 128 fils, 32 SM sur 170 travaillent, 4 warps
+  chacun, sans parallélisme mémoire. La prédiction scellée (5-12 % du pas b=1) reste à trancher par la prise nsys de 10 min.
+* Pièce candidate (après la trace) : `kda_decode_kernel` réécrit avec plusieurs blocs par tête (tranches de lignes i), S en mémoire
+  partagée par tuiles et lectures coalescées, sans tableau `row` en registres. Même ordre de somme par ligne (j croissant), donc au bit
+  exigé, test d'équivalence dans le même commit.
