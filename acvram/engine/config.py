@@ -344,6 +344,11 @@ class ModelSpec:
             from ..memory import kv_k8v4
             return int(kv_k8v4.octets_par_jeton_couche(self.num_key_value_heads, self.head_dim)
                        * self.couches_avec_kv)
+        if fmt in ("bf16", "fp16"):
+            # lic (01/10) : le format décide, pas `kv_bits` des options (8 par défaut). Budgété en int8, un cache bf16
+            # recevait la moitié de ses blocs (`_kv_blocks_per_device` divise par le bloc RÉEL) : 325 blocs = 5 200
+            # jetons à 10 240 planifiés, toute invite de 7 900 jetons refusée (S1, Devstral-24B et gemma-4-31B).
+            kv_bits = 16
         per_layer = 2 * self.num_key_value_heads * self.head_dim * kv_bits / 8
         # échelles groupées du KV quantifié : un fp16 par tête, par jeton, par kv
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2
