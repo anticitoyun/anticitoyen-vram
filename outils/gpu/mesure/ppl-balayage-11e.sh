@@ -68,6 +68,26 @@ print("TÉMOIN max6 = max6-t AU BIT" if ok else "TÉMOIN max6 ≠ max6-t : S2-S4
 sys.exit(0 if ok else 6)
 PYEOF
       [ $? -eq 0 ] || exit 6               # chef 01/10 : témoin ≠ → le bootstrap ne tourne pas, aucun chiffre S2-S4 à citer
+      # Option A (chef 01/10) : la recherche AWQ se fait en max6 pour les quatre bras → les act_scale sont ÉGAUX AU BIT entre
+      # convertis. Sinon ce n'est plus la seule règle de bloc qui change : rc 7, aucun chiffre.
+      "$PY" - "$RACINE" max6 balayage-w 4sur6 balayage <<'PYEOF'
+import glob, hashlib, sys
+from safetensors import safe_open
+racine, bras = sys.argv[1], sys.argv[2:]
+empreintes = {}
+for b in bras:
+    h, n = hashlib.sha256(), 0
+    for f in sorted(glob.glob(f"{racine}/Qwen2.5-Coder-7B-11e-{b}/acvram-*.safetensors")):
+        with safe_open(f, "pt") as s:
+            for k in sorted(k for k in s.keys() if k.endswith(".act_scale")):
+                h.update(k.encode()); h.update(s.get_tensor(k).contiguous().view(-1).view(dtype=__import__("torch").uint8).numpy().tobytes()); n += 1
+    empreintes[b] = (n, h.hexdigest()[:16])
+print("act_scale par bras :", empreintes)
+ok = len({e for e in empreintes.values()}) == 1 and next(iter(empreintes.values()))[0] > 0
+print("SCALERS AWQ ÉGAUX AU BIT entre bras" if ok else "SCALERS AWQ DIFFÉRENTS ou absents : la règle de bloc n'est pas seule en cause, aucun chiffre")
+sys.exit(0 if ok else 7)
+PYEOF
+      [ $? -eq 0 ] || exit 7
       # chef 01/10 (bd8 d'poste6, H1-H4) : balayage-w contre max6 d'abord
       "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-max6.json" "$SORTIE/eval-balayage-w.json" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
       "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-balayage.json" "$SORTIE/eval-balayage-w.json" --tirages 20000
