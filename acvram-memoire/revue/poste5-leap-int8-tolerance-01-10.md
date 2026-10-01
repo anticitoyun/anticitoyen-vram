@@ -25,3 +25,10 @@ Chaque pas part du MÊME état compressé (recopié), et chaque écart a sa born
 Contrôle qui peut rendre faux : une lecture fautive Z/126 casse dès le pas 0, à 123 × la borne. Une variante correcte
 (reconstruction séquentielle, celle du noyau) tient sur 40 pas et 2 gels. À sec : 6 passés, 4 sautés (carte).
 SUITE : prise demain (tests carte + banc) ; nouveau sha quand c'est tenu sur carte.
+## Issues de la prise carte (scellées avant ; script `scratchpad/poste5-int8-01-10/prise.sh`, HEAD dafd99216)
+**C1** resynchro, roue libre, couche et export verts → banc int8, jugé au § 3 du scellé (moyenne b=12 ≤ 30 µs/couche).
+**C2** resynchro ROUGE sur la sortie hors gel → le noyau `_pas_kernel` calcule autre chose que la référence : bogue,
+arrêt, aucun banc. **C3** resynchro rouge au gel seulement → `_bord_kernel` quantifie hors de sa demi-marche (arrondi,
+échelle, lissage) : bogue du gel. **C4** resynchro verte, roue libre rouge ou en dérive → les deux sont exacts pas à pas
+mais le gel du noyau est moins juste que celui de la référence (itération de puissance) : chiffrer ε des deux, ne pas
+élargir TOL_INT8. **C5** export → chargement non au bit → aller-retour faux, bloquant pour le service.
