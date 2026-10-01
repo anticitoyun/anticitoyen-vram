@@ -72,17 +72,14 @@ def test_le_refus_nomme_une_fenetre_exacte(monkeypatch, capsys):
     # d19 (poste6 01/10) : au-delà du plafond l'attention passe par morceaux — le flux résiduel et q/k/v ne sont plus comptés qu'à
     # 4 096 lignes (−2,0 Gio à 32 768 sur gemma) et les K/V bf16 transitoires d'une couche s'ajoutent (+0,5) : la fenêtre annoncée
     # monte ; c'est la chauffe qui la prouve (scellé poste6-d19, C5)
-    # 25 600 avant d19, 27 648 avec d19 ; levier 2 (clés de fenêtre tranchées pour les morceaux) : la réserve plafonnée tombe à
-    # 3,97 Gio et la fenêtre annoncée est la demande entière (32 768) — la relance sert, la chauffe décide du tenu réel
-    assert n == 32768, n
+    assert 26624 <= n <= 28672, n                                   # 25 600 avant d19
     assert f"[acvram] fenêtre qui tient : {n} jetons" in capsys.readouterr().err
     # exactitude : N tient, N + 1 024 ne tient pas — avec le plan tel qu'exilé au refus et la réserve plafonnée
     bornes = LD._borner_kv_par_la_vram(p, man, lambda nom: nom, reserve=0)
     base = int(bornes["cuda:0"])                                    # réserve 0 : libre − poids − marge de base
     spec.mlp_prefill_plafond = spec.prefill_morceau_plafond = 4096          # d19 : la relance aura les deux plafonds
     cout = lambda k: LD._kv_plancher(p, spec, k, "cuda:0") + LD._reserve_prefill(spec, k, man, p)
-    assert cout(n) <= base, (cout(n) / G, base / G)
-    assert n == 32768 or base < cout(n + 1024)                     # exactitude : au-delà de la demande, rien à prouver
+    assert cout(n) <= base < cout(n + 1024), (cout(n) / G, base / G, cout(n + 1024) / G)
     spec.mlp_prefill_plafond = spec.prefill_morceau_plafond = None
     assert n > 23552, "la réserve plafonnée doit faire tenir plus que la pleine"
 

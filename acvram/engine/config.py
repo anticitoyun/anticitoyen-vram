@@ -453,9 +453,11 @@ class ModelSpec:
         # tenant ne matérialise rien (flash is_causal — Devstral : chauffe 1,12 Gio à 10 240 sous ce seul terme de 1,25) sauf à
         # relire un préfixe en cache (masque dense, cqy) : jusqu'à S clés ; au-delà de S les morceaux prennent le biais bas-droite
         # (flash). Pire cas admissible sans fenêtre : min(T, S) clés — T quand aucun plafond n'est posé (l'ancien terme).
-        # levier 2 : les morceaux d'une couche à fenêtre lisent leurs clés TRANCHÉES à [fin − fenêtre − M, fin) (attention.py) — le
-        # pire cas admissible est à nouveau min(T, S) clés, fenêtre ou pas (avant : T pour gemma, 8,0 Gio à 65 536).
-        cles = T if S <= 0 else min(T, S)
+        # levier 2 (carte 01/10 18 h) : les MORCEAUX d'une couche à fenêtre lisent leurs clés tranchées à fenêtre + M, mais un seul
+        # tenant à fenêtre (la chauffe l'essaie jusqu'au tenu, au-delà de S) matérialise toujours [1 024 × T] : à 16 384 la formule
+        # bornée à S réservait 2,07 Gio pour un pic de 3,91 (excès 117 Kio/jeton relevé par la chauffe) — le terme reste en T avec fenêtre.
+        fenetre = self.sliding_window > 0 or any("sliding" in t for t in (self.layer_types or []))
+        cles = T if (fenetre or S <= 0) else min(T, S)
         fixe += self.num_attention_heads * min(T, LIGNES_BLOC_ATTENTION) * 4 * cles
         # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
         # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),
