@@ -14,8 +14,22 @@ import random
 import sys
 
 
+def lire_eval(chemin: str):
+    """Sortie d'`acvram eval --json` telle qu'écrite par un script de prise : l'outil imprime d'abord son en-tête (variables
+    ignorées, cadrage, budget, [acvram], [régime]…) sur la sortie standard, PUIS le JSON. On lit à partir de la première ligne
+    commençant par « [ » ou « { » qui se décode (11e, 01/10 : json.load sur le fichier entier cassait l'analyse, données intactes)."""
+    lignes = open(chemin, encoding="utf-8").read().split("\n")
+    for i, l in enumerate(lignes):
+        if l.lstrip().startswith(("[", "{")):
+            try:
+                return json.loads("\n".join(lignes[i:]))
+            except json.JSONDecodeError:
+                continue                     # « [acvram] … », « [régime] … » : en-tête, pas le JSON
+    raise SystemExit(f"{chemin} : aucun JSON d'acvram eval")
+
+
 def fenetres(chemin: str) -> list[tuple[float, int]]:
-    d = json.load(open(chemin))
+    d = lire_eval(chemin)
     r = d[0] if isinstance(d, list) else d
     return [(float(a), int(b)) for a, b in r["par_fenetre"]]
 
