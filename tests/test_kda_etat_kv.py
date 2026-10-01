@@ -127,8 +127,12 @@ def test_noyau_b1_au_bit_du_temoin(D):
         x = _entrees_b1(NH, D, KER, 1000 * D + pas)
         y = ext.kda_decode(*x, wq, wk, wv, *conv_n, dt, a, nw, S_kv, 1e-6)
         y_t = ext.kda_decode_vk(*x, wq, wk, wv, *conv_t, dt, a, nw, S_vk, 1e-6)
-        assert torch.equal(y, y_t), pas
-        assert torch.equal(S_kv, S_vk.transpose(-1, -2)), pas
+        if not (torch.equal(y, y_t) and torch.equal(S_kv, S_vk.transpose(-1, -2))):
+            ulp_y = ((y.float() - y_t.float()).abs() / (y_t.float().abs() * 2.0 ** -7).clamp(min=2.0 ** -133)).max()
+            dS = (S_kv - S_vk.transpose(-1, -2)).abs()
+            ulp_S = (dS / (S_kv.abs() * 2.0 ** -23).clamp(min=2.0 ** -149)).max()
+            raise AssertionError(f"D={D} pas {pas} : sortie bf16 {int((y != y_t).sum())} éléments ≠, max {float(ulp_y):.1f} "
+                                 f"ulp ; état fp32 {int((dS > 0).sum())} éléments ≠, max {float(ulp_S):.1f} ulp")
         assert all(torch.equal(c, d) for c, d in zip(conv_n, conv_t)), pas
 
 
