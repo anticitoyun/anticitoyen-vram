@@ -48,12 +48,16 @@ def test_conversion_balayage_au_manifeste(tiny_checkpoint, target_rig, tmp_path)
     assert all("part_balayes" in e and "sous_normales" in e for e in par_t)
 
 
-def test_balayage_w_exige_calibration_et_pese_par_les_stats():
+def test_balayage_w_sans_stats_replie_en_balayage_et_pese_par_les_stats(capsys):
     torch.manual_seed(3)
     w = torch.randn(64, 256) * (torch.rand(64, 1) + 0.1)
     nvfp4.regler_echelle("balayage-w")
-    with pytest.raises(ValueError, match="balayage-w"):
-        quantize_with_calibration(w, "nvfp4", None, use_awq=False)
+    # 11e option A (01/10) : un tenseur sans statistiques (tête, hors calibration) passe en balayage (MSE), dit une fois —
+    # lever ici (version du 30/09) perdait toute la conversion AWQ au premier tenseur sans stats (B1, test_balayage_w_awq_11e)
+    import acvram.quant.calibrate as C
+    C._SANS_STATS_DIT = False
+    qt0, _, _ = quantize_with_calibration(w, "nvfp4", None, use_awq=False)
+    assert qt0.echelle_stats["echelle"] == "balayage" and "balayage (MSE)" in capsys.readouterr().out
     stats = ActStats((torch.rand(256) * 3 + 0.01), None, 8)
     qt, scaler, _ = quantize_with_calibration(w, "nvfp4", stats, use_awq=False)
     assert qt.echelle_stats["echelle"] == "balayage-w" and qt.echelle_stats["balayes"] > 0

@@ -1553,8 +1553,14 @@ def _noter_echelle_nvfp4(manifest: dict, entry: dict, qt: Any) -> None:
                         "part_clampes": round(st["clampes"] / n, 4),
                         "part_balayes": round(st.get("balayes", 0) / n, 4),
                         "sous_normales": st.get("sous_normales", 0)}
-    tot = manifest.setdefault("echelle_nvfp4", {"regle": st["echelle"], "blocs": 0, "amax4": 0, "clampes": 0,
-                                                "balayes": 0, "sous_normales": 0})
+    # 11e option A (01/10) : la règle cumulée est celle DEMANDÉE (regler_echelle), pas celle du premier tenseur — un tenseur
+    # sans statistiques passe de balayage-w à balayage (calibrate.quantize_with_calibration) et se compte dans
+    # `tenseurs_replies`, visible au manifeste plutôt que de renommer la conversion.
+    from .nvfp4 import echelle_courante
+    tot = manifest.setdefault("echelle_nvfp4", {"regle": echelle_courante(), "blocs": 0, "amax4": 0, "clampes": 0,
+                                                "balayes": 0, "sous_normales": 0, "tenseurs_replies": 0})
+    if st["echelle"] != tot["regle"]:
+        tot["tenseurs_replies"] = tot.get("tenseurs_replies", 0) + 1
     tot["blocs"] += n; tot["amax4"] += st["amax4"]; tot["clampes"] += st["clampes"]
     tot["balayes"] = tot.get("balayes", 0) + st.get("balayes", 0)
     tot["sous_normales"] = tot.get("sous_normales", 0) + st.get("sous_normales", 0)
