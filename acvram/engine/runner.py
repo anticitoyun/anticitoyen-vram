@@ -2174,11 +2174,22 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         préfill courant (sinon on concaténerait l'état d'une autre séquence, faux silencieux
         pire que l'échec actuel), et JAMAIS sur le tout premier jeton d'une séquence (celui du
         préfill lui-même : sa ligne est déjà la dernière de `_mtp_prefill`, l'ajouter une
-        2e fois décalerait tout d'un cran)."""
+        2e fois décalerait tout d'un cran).
+
+        chef (01/10, 2e tour) : SEULEMENT tant que la tête n'est pas amorcée
+        (`MTPProposer.state[seq.id].length == 0`) — un pas spéculatif accepté peut livrer
+        PLUSIEURS jetons pour une seule ligne de hidden de vérification (`_append`, pas
+        `_consommer`, mais la garde sémantique vaut mieux qu'un comptage par appel) ; une fois
+        amorcée, la tête tient son propre cache par `commit()` (speculative.py) — étendre
+        encore ici doublerait les lignes."""
         m = self.model
         if m.mtp is None or m._mtp_prefill is None or len(seq.output_ids) <= 1:
             return
         if m._mtp_prefill_seq_id != seq.id:
+            return
+        etat_amorce = getattr(self.speculator, "state", None)
+        st = etat_amorce.get(seq.id) if etat_amorce is not None else None
+        if st is not None and st.length != 0:
             return
         h = getattr(m, "_mtp_hidden", None)
         if h is None or h.numel() == 0:

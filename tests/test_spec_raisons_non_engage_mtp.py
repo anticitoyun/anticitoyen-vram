@@ -221,8 +221,8 @@ def _modele_mtp_factice(prefill, prefill_seq_id, hidden, hidden_n):
                                  _mtp_hidden=hidden, _mtp_hidden_n=hidden_n, _mtp_prefill_releves=[])
 
 
-def _engine_nourrir(modele):
-    eng = types.SimpleNamespace(model=modele)
+def _engine_nourrir(modele, speculator=None):
+    eng = types.SimpleNamespace(model=modele, speculator=speculator)
     eng._nourrir_mtp_prefill = types.MethodType(runner_mod.Engine._nourrir_mtp_prefill, eng)
     return eng
 
@@ -250,6 +250,18 @@ def test_nourrir_mtp_prefill_refuse_sequence_differente():
     m = _modele_mtp_factice(torch.zeros(78, 8), 15, torch.ones(1, 8), 1)
     eng = _engine_nourrir(m)
     eng._nourrir_mtp_prefill(_seq(seq_id=16, output_ids=[1, 2]))   # autre séquence que le préfill courant
+    assert m._mtp_prefill.shape[0] == 78 and m._mtp_prefill_releves == []
+
+
+def test_nourrir_mtp_prefill_refuse_tete_deja_amorcee():
+    """chef (01/10, 2e tour) : un pas spéculatif accepté peut livrer plusieurs jetons
+    pour une seule ligne de hidden — une fois amorcée (st.length != 0), la tête tient son
+    propre cache par commit() ; étendre encore ici doublerait les lignes."""
+    m = _modele_mtp_factice(torch.zeros(78, 8), 15, torch.ones(1, 8), 1)
+    speculator = types.SimpleNamespace(state={15: _DraftState()})
+    speculator.state[15].length = 3   # amorcée, 3 jetons spéculatifs acceptés à ce pas
+    eng = _engine_nourrir(m, speculator=speculator)
+    eng._nourrir_mtp_prefill(_seq(seq_id=15, output_ids=[1, 2, 3, 4]))
     assert m._mtp_prefill.shape[0] == 78 and m._mtp_prefill_releves == []
 
 
