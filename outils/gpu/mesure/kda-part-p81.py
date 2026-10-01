@@ -22,6 +22,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 PAS = 64
 PLAGES = ("p81:prefill8k", "p81:decode_b1", "p81:decode_b12")
+# chef 01/10 : « nom contient kda » sous-comptait le préfill. `chunk_kda` de fla 0.5.2 lance aussi des noyaux génériques,
+# relevés par exécution sous TRITON_INTERPRET et par le source (chunk_fwd.py → common/chunk_delta_h, gla/chunk, utils, modules/l2norm).
+# Dans Kimi-Linear, seul chunk_kda appelle fla au préfill : ces noms y sont du KDA. tests/test_kda_part_p81.py vérifie que chacun
+# existe encore dans le fla installé (une mise à jour qui renomme casse le test, pas la mesure en silence).
+NOYAUX_FLA_SANS_KDA = ("l2norm_fwd_kernel", "chunk_local_cumsum_vector_kernel",
+                       "chunk_gated_delta_rule_fwd_kernel_h_blockdim64", "chunk_gla_fwd_kernel_o")
+
+
+def est_kda(nom: str) -> bool:
+    n = nom.lower()
+    return "kda" in n or any(k in n for k in NOYAUX_FLA_SANS_KDA)
 
 
 def piloter() -> int:
@@ -92,13 +103,19 @@ def analyser(chemin: str, sortie_json: str = "") -> dict:
     res = {}
     for plage in PLAGES:
         tot = kda = 0.0
+        par_noyau: dict = {}
         for l in corps:
             if l[c_plage].lstrip(":").strip() != plage:
                 continue
             t = float(l[c_tot]) / 1e6          # ns → ms
             tot += t
-            if "kda" in l[c_nom].lower():
+            par_noyau[l[c_nom]] = par_noyau.get(l[c_nom], 0.0) + t
+            if est_kda(l[c_nom]):
                 kda += t
+        if tot:
+            print(f"--- {plage} : 20 premiers noyaux (ms, classe)")
+            for nom, t in sorted(par_noyau.items(), key=lambda x: -x[1])[:20]:
+                print(f"  {t:9.3f}  {'KDA  ' if est_kda(nom) else 'autre'}  {nom[:110]}")
         n = 1 if plage == PLAGES[0] else PAS
         res[plage] = {"gpu_ms": round(tot, 3), "kda_ms": round(kda, 3), "part_kda": round(kda / tot, 4) if tot else None,
                       "kda_ms_par_pas": round(kda / n, 4), "gpu_ms_par_pas": round(tot / n, 4)}
