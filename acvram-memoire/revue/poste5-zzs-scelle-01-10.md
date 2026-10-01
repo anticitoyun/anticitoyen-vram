@@ -77,3 +77,10 @@ le processeur, A128 = A au bit (mesuré à sec, 300 + 700 jetons). Un témoin nu
 * Déjà constaté à sec : sur le processeur, B n'est PAS au bit de A (|B − A| = 1,0e-7 pour max |A| = 0,28), et
   |B − ref| = |A − ref| = 1,4e-7 : la troncature est aussi juste que le chemin complet. E1 se joue sur la carte, où
   cuBLAS et le softmax de PyTorch décident.
+* Risque nommé (duck.ai via poste4, `poste4-duckai-01-10-c.md`) : vLLM (accumulate_mla_context_chunk) et FlashMLA
+  tronquent déjà causalement par morceau et fusionnent par LSE, sans gain chiffré publié pour la troncature seule.
+  L'issue vLLM #27491 signale des NaN en MLA avec préfill par morceaux. Ici, chaque ligne de scores garde au moins sa
+  diagonale (clé passe + i ≤ passe + d1 − 1), donc aucun softmax tout −inf. Le test de forme et le bras cassant
+  (diagonale perdue) couvrent ce bord ; la prise relèvera tout NaN.
+* Tests liés (71 fichiers : MLA, régime, registre) sans carte, avec TRITON_INTERPRET posé par le conftest : 713 passés,
+  139 sautés, 1 xfail (15:01:15-15:03:22). Chevauchement : la campagne a pris la carte à 15:01:20 (services deepseek-coder).
