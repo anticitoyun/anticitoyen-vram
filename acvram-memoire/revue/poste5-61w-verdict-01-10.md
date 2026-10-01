@@ -28,5 +28,6 @@ Lecture proposée : le chemin servi d'avant 61w n'était pas « régulier » —
 compilation (une itération sur 128) n'a pas de sens ; le nouveau noyau est l'arithmétique homogène. **Décision de chef : homogène accepté**
 (REGLES § 1 : la règle « au bit » porte sur le défaut servi ; ici le défaut servi changerait de ≤ 1 arrondi fp32 sur une
 ligne de l'état, sortie identique au premier pas). Si refusé : reproduire en dur cette itération (repérée dans le SASS du témoin), ou passer en opt-in jugé par KL.
+Précompilé hors dépôt (REGLES : > 1 Mo non commité) : `travail/poste5-kda/scratchpad/poste5-kda-01-10/precompiles/d81e44210bd7866b/acvram_kernels.so`, sha256 e9aea4855cb18d74…, empreinte de source d81e44210bd7866b = le .cu du HEAD ; `_precompile_utilisable` à sec pour 12.0 → « précompilé » (aucun JIT) ; `prise.sh` refuse (rc 66) sinon.
 ## Reste
 Mesure (poste2 ou poste1) : b=12 −14 à −16 % du temps GPU, b=1 −9 à −11 % du mur (prédiction scellée d'poste1).
