@@ -65,6 +65,9 @@ _RELIRE_KV = os.environ.get("ACVRAM_PREFILL_RELIRE_KV", "0") == "1"
 # masque dense + gqa matérialise têtes × 1 024 × T scores fp32 par bloc (8 Gio à 65 536 sur Devstral) ; 0 = masque dense.
 _TRANSITOIRES = os.environ.get("ACVRAM_PREFILL_TRANSITOIRES", "1") == "1"
 _BIAIS_MORCEAUX = os.environ.get("ACVRAM_PREFILL_BIAIS_MORCEAUX", "1") == "1"
+# levier 2 (01/10) : créneaux d'anneau du lot capturé en graphe — tenseur statique de l'entrée (graphs.py `_capture`), posé avant
+# chaque `decode_fixed` ; les couches à fenêtre en dérivent tables et emplacements (kvcache.tables_anneau / slots_anneau)
+_ANNEAU_FIXE: Optional[torch.Tensor] = None
 # a5v : tranche de lignes du MLP dense au préfill long ; 0 = jamais (témoin). Engagée SEULEMENT au-delà de `_MLP_SEUIL`.
 _MLP_MORCEAU = int(os.environ.get("ACVRAM_MLP_MORCEAU", "4096"))
 _MLP_SEUIL: Optional[int] = None
@@ -354,7 +357,8 @@ class Attention(nn.Module):
             q = self._echelle_llama4(q, pos)
 
         if cache is not None:
-            cache.write(batch.slots_on(x.device), k, v, positions=batch.positions_on(x.device))
+            slots = batch.slots_fenetre(x.device) if cache.cfg.anneau else batch.slots_on(x.device)   # levier 2
+            cache.write(slots, k, v, positions=batch.positions_on(x.device))
 
         if batch.is_decode:
             return self._decode(q, k, v, batch, cache, t, gate)
@@ -404,6 +408,14 @@ class Attention(nn.Module):
         repli déquantifier-puis-SDPA ne connaît que q_len = 1).
         """
         b = x.shape[0]
+        if cache is not None and cache.cfg.anneau:
+            # levier 2 : tables et emplacements d'anneau dérivés des créneaux du lot (tenseur statique `_ANNEAU_FIXE`, graphs.py)
+            from ..memory.kvcache import tables_anneau, slots_anneau
+            if _ANNEAU_FIXE is None:
+                raise RuntimeError("anneau KV : créneaux du lot absents sur le chemin à formes fixes (graphs.py doit poser _ANNEAU_FIXE)")
+            cren = _ANNEAU_FIXE[: block_tables.shape[0]]
+            block_tables = tables_anneau(cren, int(block_tables.shape[1]), cache.cfg.anneau)
+            slots = slots_anneau(positions, cren.repeat_interleave(q_len)[: positions.shape[0]], cache.cfg.anneau)
         q, k, v, gate = self._proj(x, b, qkv=qkv)
         # Poste F, fusion (3a) : normes par tête + RoPE + écriture int8 du
         # cache en UN noyau Triton (kernels/rope_kv) — à la place de
@@ -509,6 +521,7 @@ class Attention(nn.Module):
         for i, qlen in enumerate(batch.query_lens):
             end = start + qlen
             offset = batch.seq_lens[i] - qlen
+            lo = 0
             if morceau is not None and morceau[3] and _TRANSITOIRES:
                 kk, vv = self._kv_transitoires(morceau, k, v, batch, offset, qlen, cache)
             # lic (01/10, ACVRAM_PREFILL_RELIRE_KV=1, témoin hors défaut) : un seul tenant relit aussi ses propres K/V
@@ -517,8 +530,7 @@ class Attention(nn.Module):
                 # Une partie de cette séquence est déjà en cache : un préfixe
                 # servi, ou un morceau antérieur. On la relit et on masque selon
                 # le décalage absolu de la requête.
-                kk, vv = cache.gather(batch.block_tables[i].to(q.device),
-                                      batch.seq_lens[i], q.dtype)
+                kk, vv, lo = self._gather_seq(cache, batch, i, q.device, q.dtype, batch.seq_lens[i])
             else:
                 # Rien avant : on utilise les clés qu'on vient de calculer
                 # plutôt que de les relire par le cache. Cela évite un
@@ -534,15 +546,16 @@ class Attention(nn.Module):
                     self._masque_images = masque_images_famille(self.spec)
                 if self._masque_images != "bidir":
                     plages = []
+            kk, vv, lo = self._tranche_fenetre(kk, vv, lo, offset, plages)
             if compact:
                 a = attention(q[start:end], kk, vv, True, self.scale,
-                              q_offset=offset, window=self.window, n_rep=self.n_rep,
+                              q_offset=offset - lo, window=self.window, n_rep=self.n_rep,
                               images=plages, bas_droite=biais)
             else:
                 kk = repeat_kv(kk, self.n_rep)
                 vv = repeat_kv(vv, self.n_rep)
                 a = attention(q[start:end], kk, vv, True, self.scale,
-                              q_offset=offset, window=self.window, images=plages, bas_droite=biais)
+                              q_offset=offset - lo, window=self.window, images=plages, bas_droite=biais)
             if une_seq:
                 out = a
             else:
@@ -550,6 +563,30 @@ class Attention(nn.Module):
             start = end
         out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
+
+    def _gather_seq(self, cache, batch: ForwardBatch, i: int, dev, dtype, longueur: int):
+        """(kk, vv, lo) : K/V de la séquence i jusqu'à ``longueur`` ; sous l'anneau (levier 2), seulement ses R − 1 derniers blocs,
+        lo = leur première position (les blocs d'avant ont été recyclés — jamais relus : fenêtre ≤ (R − 1) × 16)."""
+        if cache.cfg.anneau:
+            R = cache.cfg.anneau
+            nb = (longueur + 15) // 16
+            lo_blk = max(0, nb - (R - 1))
+            table = batch.tables_fenetre(i, dev)[lo_blk:nb]
+            kk, vv = cache.gather(table, longueur - lo_blk * 16, dtype)
+            return kk, vv, lo_blk * 16
+        kk, vv = cache.gather(batch.block_tables[i].to(dev), longueur, dtype)
+        return kk, vv, 0
+
+    def _tranche_fenetre(self, kk, vv, lo: int, offset: int, plages):
+        """Couche à fenêtre, requêtes depuis ``offset`` : les clés avant offset − fenêtre sont masquées de toute façon — retirées
+        (levier 2 : scores d'un masque dense [1 024 × T] → [1 024 × (fenêtre + M)], 8,0 → 0,63 Gio à 65 536 sur gemma). Jamais sous un
+        masque d'images (positions absolues) ; un seul tenant depuis 0 n'a rien à retirer."""
+        if self.window <= 0 or plages or offset <= 0:
+            return kk, vv, lo
+        lo2 = max(lo, offset - self.window)
+        if lo2 > lo:
+            kk, vv, lo = kk[lo2 - lo:], vv[lo2 - lo:], lo2
+        return kk, vv, lo
 
     def _kv_transitoires(self, morceau, k, v, batch: ForwardBatch, offset: int, qlen: int, cache):
         """d19 : K/V bf16 de toute l'invite jusqu'à ce morceau — les morceaux précédents de CETTE couche viennent du tampon
@@ -564,8 +601,8 @@ class Attention(nn.Module):
                   torch.empty(fin, v.shape[1], v.shape[2], dtype=v.dtype, device=v.device))
             self._kv_tr = tr
             if offset > 0:
-                kk0, vv0 = cache.gather(batch.block_tables[0].to(k.device), end, k.dtype)
-                tr[0][:offset].copy_(kk0[:offset]); tr[1][:offset].copy_(vv0[:offset])
+                kk0, vv0, lo0 = self._gather_seq(cache, batch, 0, k.device, k.dtype, offset)
+                tr[0][lo0:offset].copy_(kk0); tr[1][lo0:offset].copy_(vv0)      # sous l'anneau : seulement la fenêtre, le reste n'est jamais lu
         tr[0][offset:end].copy_(k); tr[1][offset:end].copy_(v)
         kk, vv = tr[0][:end], tr[1][:end]
         if rang >= total - 1:
@@ -578,12 +615,13 @@ class Attention(nn.Module):
         """Décodage, et vérification spéculative, pour tout le lot d'un coup."""
         if cache is None:
             return self._prefill(q, k, v, batch, cache, t, gate)
+        vues = batch.fixed_decode_views_fenetre if cache.cfg.anneau else batch.fixed_decode_views     # levier 2
 
         if all(ql == 1 for ql in batch.query_lens):
             # Décodage pur : le chemin à formes fixes, celui-là même que le
             # graphe CUDA capture — un seul gather vectorisé, pas de boucle
             # Python, et une sortie identique au bit près entre eager et rejeu.
-            tables, lens = batch.fixed_decode_views(q.device)
+            tables, lens = vues(q.device)
             out = kernels.paged_attention(q, cache, tables, lens,
                                           self.n_rep, self.scale,
                                           window=self.window)
@@ -601,7 +639,7 @@ class Attention(nn.Module):
         # avec sa longueur causale propre.
         ql = batch.query_lens[0]
         if all(q_ == ql for q_ in batch.query_lens):
-            tables, lens = batch.fixed_decode_views(q.device)
+            tables, lens = vues(q.device)
             out = kernels.paged_attention(q, cache, tables, lens,
                                           self.n_rep, self.scale, q_len=ql,
                                           window=self.window)
@@ -609,12 +647,12 @@ class Attention(nn.Module):
                 out = self._gated(out.to(q.dtype), gate, t)
                 return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
-        keys, values = [], []
+        keys, values, los = [], [], []
         for i in range(batch.batch_size):
-            kk, vv = cache.gather(batch.block_tables[i].to(q.device),
-                                  batch.seq_lens[i], q.dtype)
+            kk, vv, lo = self._gather_seq(cache, batch, i, q.device, q.dtype, batch.seq_lens[i])
             keys.append(kk)
             values.append(vv)
+            los.append(lo)
 
         out = torch.empty_like(q)
         start = 0
@@ -624,7 +662,7 @@ class Attention(nn.Module):
             out[start:end] = attention(
                 q[start:end], repeat_kv(keys[i], self.n_rep),
                 repeat_kv(values[i], self.n_rep), True, self.scale,
-                q_offset=offset, window=self.window)
+                q_offset=offset - los[i], window=self.window)
             start = end
         out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))

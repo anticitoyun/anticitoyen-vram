@@ -351,6 +351,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # besoin de place libre au moment ou elle concatene.
     a_allouer: list = []
     embed_charge = embed.is_cuda                 # pièce 146 (i) : déjà dans `libre`, ne pas le recompter
+    _poser_anneau(spec, plan, manifest, dev, max_model_len, embed_charge)          # levier 2 : avant tout plancher
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
                          reserve=_reserve_prefill(spec, max_model_len, manifest, plan), embed_charge=embed_charge)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
@@ -616,7 +617,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=nkv, head_dim=hd,
-                    num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "muse_glimmer":
@@ -643,7 +645,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "starcoder2":
@@ -667,7 +670,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "falcon_h1":
@@ -695,7 +699,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "nemotron_h":
@@ -754,7 +759,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type in ("lfm2", "lfm2_moe") and spec.layer_types[i] == "conv":
@@ -1315,6 +1321,12 @@ def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev:
     # pas au-dessus de sa cible, quatre tours d'exil rendaient « 3 Mio
     # manquants » et le refus (poste3, essai a803254).
     jetons = int(max_model_len or 2048)
+    R = int(getattr(spec, "kv_anneau", 0) or 0)
+    if R and spec.couches_fenetre:
+        # levier 2 : une couche en anneau ne coûte que R blocs par séquence, quelle que soit sa longueur
+        fen = set(spec.couches_fenetre)
+        fen_ici = sum(1 for lp in plan.layers if lp.index in fen and lp.exec_device == dev and spec.couche_a_kv(lp.index))
+        return int(bpt * ((ici - fen_ici) * jetons + fen_ici * R * 16) // total)
     return bpt * jetons * ici // total
 
 
@@ -1466,6 +1478,49 @@ def _sans_marlin(calcul):
         _k._PROJ_MARLIN = garde
 
 
+# levier 2 (poste6 01/10) : créneaux d'anneau réservés par appareil (séquences simultanées sous l'anneau), posés par
+# `_kv_blocks_per_device`, lus à la création des caches des couches à fenêtre
+ANNEAU_SEQS: dict = {}
+
+
+def _anneau_couche(spec: ModelSpec, i: int) -> int:
+    """R si la couche ``i`` est à fenêtre glissante et que l'anneau est posé (`spec.kv_anneau`), sinon 0."""
+    R = int(getattr(spec, "kv_anneau", 0) or 0)
+    return R if (R and i in set(spec.couches_fenetre)) else 0
+
+
+def _blocs_couche(spec: ModelSpec, i: int, n_blocks: int, dev: str) -> int:
+    """Blocs du cache de la couche ``i`` : les blocs paginés partagés, ou créneaux × R pour une couche en anneau."""
+    R = _anneau_couche(spec, i)
+    return int(ANNEAU_SEQS.get(dev, 1)) * R if R else n_blocks
+
+
+def _poser_anneau(spec: ModelSpec, plan: Plan, manifest: dict, dev, max_model_len: Optional[int],
+                  embed_charge: bool = False) -> int:
+    """Levier 2 : `ACVRAM_KV_ANNEAU` = auto (défaut : l'anneau n'est pris QUE si le KV plein d'une séquence de `max_model_len` ne
+    tient pas — rien ne change pour les contextes qui tenaient), 1 (toujours, bras de mesure), 0 (jamais). Pose `spec.kv_anneau` = R."""
+    mode = (os.environ.get("ACVRAM_KV_ANNEAU") or "auto").strip().lower()
+    R = spec.anneau_R()
+    spec.kv_anneau = 0
+    if not R or mode in ("0", "off", "non"):
+        return 0
+    motif = "ACVRAM_KV_ANNEAU=1"
+    if mode != "1":
+        if not torch.cuda.is_available() or not max_model_len or not plan.kv_budget:
+            return 0
+        bornes = _borner_kv_par_la_vram(plan, manifest, dev, reserve=0, embed_charge=embed_charge) or {}
+        plein = min((_fenetre_qui_tient(plan, spec, manifest, t.name, int(bornes.get(t.name, plan.kv_budget[t.name])), 0, max_model_len)
+                     for t in plan.tiers if t.kind == "gpu" and t.name in plan.kv_budget), default=int(max_model_len))
+        if plein >= int(max_model_len):
+            return 0
+        motif = f"le KV plein ne tient que {plein} jetons pour {max_model_len} demandés"
+    spec.kv_anneau = R
+    print(f"[acvram] KV en anneau : {len(spec.couches_fenetre)} couches à fenêtre glissante ({spec.sliding_window}) gardent R={R} blocs "
+          f"par séquence ({motif}) ; les {spec.couches_avec_kv - len(spec.couches_fenetre)} couches pleines restent paginées ; "
+          f"cache de préfixe coupé", flush=True)
+    return R
+
+
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
                           max_model_len: Optional[int]) -> dict[str, int]:
     """Répartit le budget KV de chaque appareil en blocs, partagés entre ses couches.
@@ -1484,12 +1539,28 @@ def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
     """
     out: dict[str, int] = {}
     layers_on = {}
+    fen_on = {}
+    R = int(getattr(spec, "kv_anneau", 0) or 0)
+    fen = set(spec.couches_fenetre) if R else set()
     for lp in plan.layers:
         if not spec.couche_a_kv(lp.index):
             continue
+        if lp.index in fen:
+            fen_on[lp.exec_device] = fen_on.get(lp.exec_device, 0) + 1
+            continue                                   # levier 2 : une couche en anneau ne prend rien au pool paginé
         layers_on[lp.exec_device] = layers_on.get(lp.exec_device, 0) + 1
+    ANNEAU_SEQS.clear()
     for dev, budget in plan.kv_budget.items():
         n_layers = max(1, layers_on.get(dev, 1))
+        if R and fen_on.get(dev, 0):
+            # anneaux : au plus un quart du budget, au moins un créneau, jamais plus que les séquences planifiées
+            kv_fmt0 = _kv_format(plan, dev)
+            bloc = KVCacheConfig(num_layers=1, num_kv_heads=spec.num_key_value_heads, head_dim=spec.head_dim,
+                                 num_blocks=1, dtype=kv_fmt0).bytes_per_block()
+            par_seq = fen_on[dev] * R * bloc
+            seqs = max(1, min(int(getattr(plan, "kv_planned_seqs", 0) or 1), int(budget // 4 // max(1, par_seq))))
+            ANNEAU_SEQS[dev] = seqs
+            budget = max(0, int(budget) - seqs * par_seq)
         per_layer = budget // n_layers
         # Les octets d'un bloc dépendent du FORMAT du palier (int8 8,125
         # bits, lm4 4,125) : compter en int8 un cache lm4 lui volait la moitié

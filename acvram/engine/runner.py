@@ -133,6 +133,7 @@ class Sequence:
     id: int = field(default_factory=lambda: next(_ids))
     output_ids: list[int] = field(default_factory=list)
     blocks: list[int] = field(default_factory=list)
+    anneau_slot: int = -1               # levier 2 : créneau d'anneau (couches à fenêtre), −1 sans anneau
     finished: bool = False
     finish_reason: str = ""
     arrival: float = field(default_factory=time.time)
@@ -740,8 +741,18 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         self._max_insta = int(os.environ.get("ACVRAM_INSTA_MAX", "3"))
         self._insta: "OrderedDict[int, list]" = OrderedDict()
 
-        if self.model.caches:
-            n_blocks = min(c.cfg.num_blocks for c in self.model.caches.values())
+        # levier 2 (poste6 01/10) : les caches en anneau (couches à fenêtre) ont leur propre pool de créneaux ; ils ne comptent pas
+        # dans les blocs paginés partagés. Le cache de préfixe ne peut pas servir un anneau (blocs recyclés, pas adressables par
+        # hachage — vLLM fait de même hors fenêtre) : coupé, dit au régime.
+        self.R = int(getattr(self.spec, "kv_anneau", 0) or 0)
+        anneaux = [c for c in self.model.caches.values() if getattr(c.cfg, "anneau", 0)]
+        pleins = [c for c in self.model.caches.values() if not getattr(c.cfg, "anneau", 0)]
+        self._anneau_libres: list[int] = list(range(min(c.cfg.num_blocks for c in anneaux) // self.R)) if (self.R and anneaux) else []
+        if self.R and enable_prefix_cache:
+            print(f"[acvram] KV en anneau (R={self.R} blocs par séquence, {len(self._anneau_libres)} créneaux) : cache de préfixe coupé", flush=True)
+            enable_prefix_cache = False
+        if pleins:
+            n_blocks = min(c.cfg.num_blocks for c in pleins)
         else:
             # Modèle sans cache paginé (MLA latent contigu, GLM ; ou
             # récurrence linéaire pure) : `self.model.caches` est vide, le
@@ -1111,7 +1122,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + f"kv_budget={kv_cap}/{kv_seqs} "
                + (f"kv_sous_demande={kv_cap}/{kv_dem} " if kv_dem and kv_cap < kv_dem else "")
                + _falaise_texte(getattr(self.loaded.plan, "falaise", None))
-               + f"kv={self.kv_format_servi()} "
+               + f"kv={self.kv_format_servi()}{f'(anneau R={self.R}, préfixe off)' if getattr(self, 'R', 0) else ''} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "
                + f"etroites={etroites_texte()} "
@@ -1308,6 +1319,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     continue
                 if need > self.allocator.num_free:
                     break
+                if self.R and not self._anneau_libres:          # levier 2 : un créneau d'anneau par séquence vivante
+                    break
                 self.waiting.pop(0)
 
                 # Tour de vision : une passe eager par image, ici, avant le
@@ -1387,6 +1400,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 seq.prefill_len = seq.cached_len
                 seq.hashes = list(hashes[:len(matched)])
                 seq.blocks.extend(self.allocator.allocate(need - len(matched)))
+                if self.R:
+                    seq.anneau_slot = self._anneau_libres.pop()
                 self.stats.cached_prompt_tokens += seq.cached_len
 
                 self.running.append(seq)
@@ -1720,6 +1735,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 self._register_complete_blocks(seq)
             self.allocator.free(seq.blocks)
             seq.blocks = []
+        if seq.anneau_slot >= 0:
+            self._anneau_libres.append(seq.anneau_slot)
+            seq.anneau_slot = -1
         # HORS du bloc ci-dessus : l'état récurrent n'a aucun rapport avec le
         # fait que la séquence détienne encore des blocs KV. Les deux étaient
         # liés, si bien qu'un `_finish` appelé sur une séquence déjà libérée —
@@ -1804,6 +1822,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             block_tables=block_tables,
             slot_mapping=torch.tensor(slots, dtype=torch.long),
             is_prefill=prefill,
+            anneau=[s.anneau_slot for s in seqs] if self.R else None, R=self.R,
             seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states,
             images=images, deepstack=deepstack,
             **self._mrope_du_lot(seqs, prefill, query_lens, seq_lens))
@@ -2302,6 +2321,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             block_tables=block_tables,
             slot_mapping=torch.tensor(slots, dtype=torch.long),
             is_prefill=False,
+            anneau=[s.anneau_slot for s in seqs] if self.R else None, R=self.R,
             seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states)
 
     def _append(self, seq: Sequence, tokens: list[int]) -> GenerationOutput:

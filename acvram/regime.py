@@ -417,6 +417,10 @@ VARIABLES: tuple[Variable, ...] = (
              "kv31b levier 2 étape 1 (30/09, OPT-IN, défaut 0 = un seul tenant) : préfill de l'attention par morceaux de N jetons "
              "d'invite, lots passés couche par couche (forward_tranches) ; au bit d'un seul tenant sous les mêmes chemins (morceau ≥ 128 "
              "lignes et > seuil de fusion gate/up pour une invite qui le dépasse, sinon ignoré et dit) ; hors récurrence linéaire"),
+    Variable("KV_ANNEAU", "auto", ("acvram.engine.loader", "ANNEAU_SEQS"), "1",
+             "levier 2 (01/10) : cache KV en ANNEAU (R blocs par séquence) pour les couches à fenêtre glissante — auto (défaut) : seulement "
+             "si le KV plein ne tient pas la fenêtre demandée ; 1 : toujours (bras de mesure) ; 0 : jamais. Sous l'anneau le cache de "
+             "préfixe est coupé et un lot à images refusé ; régime « kv=int8(anneau R=N, préfixe off) »"),
     Variable("PREFILL_MORCEAU_AU_DELA", "4096", ("acvram.engine.runner", "_MORCEAU_AU_DELA"), None,
              "d19 (01/10) : au-delà du tenu d'un seul tenant (chauffe), l'attention d'un dense sans récurrence passe par morceaux de N "
              "jetons (régime « morceaux>S ») — sous le tenu rien ne change ; 0 = jamais (l'invite au-delà reçoit 400 comme avant)"),

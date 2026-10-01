@@ -37,6 +37,22 @@ __all__ = ["KVCacheConfig", "PagedKVCache", "BlockAllocator"]
 BLOCK_SIZE = 16
 
 
+def tables_anneau(creneaux: torch.Tensor, n_blocs: int, R: int) -> torch.Tensor:
+    """Levier 2 : table de blocs [b, n_blocs] d'un lot sous l'anneau — entrée (i, j) = créneau_i × R + (j mod R) ; une ligne de
+    créneau −1 (séquence sans anneau, rembourrage) rend des blocs 0 jamais lus (positions < slen − fenêtre ou hors du lot)."""
+    j = torch.arange(n_blocs, device=creneaux.device) % R
+    base = creneaux.clamp(min=0).to(torch.long)[:, None] * R
+    return base + j[None, :]
+
+
+def slots_anneau(positions: torch.Tensor, creneau_par_jeton: torch.Tensor, R: int, bs: int = BLOCK_SIZE) -> torch.Tensor:
+    """Emplacement physique de chaque jeton sous l'anneau : (créneau × R + (pos // bs) mod R) × bs + pos mod bs ; −1 pour un
+    créneau < 0 (sentinelle que `write` ignore : « if (slot < 0) return », acvram_kernels.cu:4585)."""
+    pos = positions.to(torch.long); c = creneau_par_jeton.to(torch.long)
+    s = (c.clamp(min=0) * R + (pos // bs) % R) * bs + pos % bs
+    return torch.where(c >= 0, s, torch.full_like(s, -1))
+
+
 def bucket_blocks(n: int) -> int:
     """Arrondit un nombre de blocs au godet supérieur (puissances de deux).
 
@@ -283,6 +299,9 @@ class KVCacheConfig:
     rangs: Optional[int] = None
     # Repli 104 (1) : positions puits gardées en V int8 (kv_k8v4.PUITS), k8v4 seulement ; None = ACVRAM_KV_PUITS.
     puits: Optional[int] = None
+    # levier 2 (poste6 01/10) : R > 0 = cache en ANNEAU — `num_blocks` = séquences × R, le bloc logique j d'une séquence au
+    # créneau s vit au bloc physique s × R + (j mod R) ; les noyaux lisent la table comme une table pleine (positions ≥ slen − fenêtre)
+    anneau: int = 0
 
     def __post_init__(self) -> None:
         if self.puits is None:
