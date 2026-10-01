@@ -20,7 +20,7 @@
 ## 2. Tolérances nommées (écrites avant toute exécution, tests/test_gdn_etat_int8.py)
 TOL_ALGEBRE 1e-5 (fenêtre sans quantification contre la récurrence exacte) · TOL_INT8 3e-2 par pas sur 256 pas et sans
 dérive (derniers 64 ≤ 2 × pas 16-80) · contrôle qui peut rendre faux : la requantification par pas (P = 1) doit faire PIRE
-· carte : TOL_NOYAU 1e-3 (noyaux contre référence, sortie et état, compteurs n égaux), couche entière int8 contre fp32 ≤
+· carte : ~~TOL_NOYAU 1e-3~~ posée à la main, remplacée par des bornes dérivées (poste5-leap-int8-tolerance-01-10), couche entière int8 contre fp32 ≤
 TOL_INT8 sur 40 pas, export → chargement → pas suivant AU BIT.
 ## 3. Prédiction et seuils (banc et tests : poste5 ; garde et service : poste2, REGLES § 3 « l'auteur ne couronne pas »)
 * banc (µs/couche, Qwen3.8, même banc que I5, fla b=12 = 49,25) : int8 b=12 médiane (pas sans gel) 9-15, moyenne amortie
