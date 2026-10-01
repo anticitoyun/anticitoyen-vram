@@ -18,7 +18,8 @@ from ..memory import kv_lm4
 from ..memory.kvcache import PagedKVCache
 from .config import ModelSpec
 from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, add_norm, apply_rope,
-                     attention, decode_attention_fixed, repeat_kv, rope_fusee)
+                     attention, attention_puits, decode_attention_fixed, decode_attention_puits_fixe,
+                     repeat_kv, rope_fusee)
 from .lot import ForwardBatch
 
 __all__ = ["Attention", "MLP", "MLP2", "SEUIL_FUSION", "_ROPE_KV", "_multi_projection", "_multi_utilisable"]
@@ -150,6 +151,9 @@ class Attention(nn.Module):
         self.v_norm_eps = v_norm_eps
         self.k_eq_v = k_eq_v
         self.window = window
+        # evp (gpt-oss) : un logit de « puits » par tête de requête, ajouté au dénominateur du softmax (valeur nulle).
+        # None pour tout autre modèle : aucun chemin ne change (tests/test_gpt_oss_evp.py).
+        self.sinks: Optional[torch.Tensor] = None
         self.rope = rope
         self.spec = spec
         self._masque_images: Optional[str] = None     # 'bidir' | 'causal' (vision.masque_images_famille), posé au premier lot à images
@@ -417,9 +421,7 @@ class Attention(nn.Module):
                 q, k = r
                 if self.llama4 is not None:
                     q = self._echelle_llama4(q, positions)
-                out = kernels.paged_attention(q, cache, block_tables, seq_lens,
-                                              self.n_rep, self.scale, q_len=q_len,
-                                              window=self.window)
+                out = self._attention_fixe(q, cache, block_tables, seq_lens, q_len)
                 if out is None:
                     if q_len != 1:
                         raise RuntimeError("verification speculative a formes fixes "
@@ -446,9 +448,7 @@ class Attention(nn.Module):
         if self.llama4 is not None:
             q = self._echelle_llama4(q, positions)
         cache.write(slots, k, v, positions=positions)
-        out = kernels.paged_attention(q, cache, block_tables, seq_lens,
-                                      self.n_rep, self.scale, q_len=q_len,
-                                      window=self.window)
+        out = self._attention_fixe(q, cache, block_tables, seq_lens, q_len)
         if out is None:                    # cache non int8, ou pas de noyau
             if q_len != 1:
                 raise RuntimeError("verification speculative a formes fixes "
@@ -486,6 +486,18 @@ class Attention(nn.Module):
                     None if self.k_norm is None else self.k_norm.weight,
                     normes[0].eps if normes else 1e-6, cache)
         return q, k
+
+    def _attention_fixe(self, q, cache, block_tables, seq_lens, q_len: int):
+        """Attention du pas à formes fixes : le noyau paginé, ou — evp, puits de gpt-oss — le chemin de référence
+        à formes fixes (`decode_attention_puits_fixe`), seul à connaître le puits ; None = repli de l'appelant."""
+        if self.sinks is None:
+            return kernels.paged_attention(q, cache, block_tables, seq_lens, self.n_rep, self.scale, q_len=q_len,
+                                           window=self.window)
+        if q_len != 1:
+            raise RuntimeError("evp : vérification spéculative à formes fixes avec puits (gpt-oss) non prise en charge")
+        kk, vv = cache.gather_fixed(block_tables, q.dtype)
+        return decode_attention_puits_fixe(q, kk, vv, seq_lens, self.sinks, self.n_rep, self.scale,
+                                           window=self.window)
 
     def _gated(self, out: torch.Tensor, gate, t: int) -> torch.Tensor:
         if gate is not None:
@@ -534,7 +546,11 @@ class Attention(nn.Module):
                     self._masque_images = masque_images_famille(self.spec)
                 if self._masque_images != "bidir":
                     plages = []
-            if compact:
+            if self.sinks is not None:
+                assert not plages, "evp : gpt-oss est un modèle texte, pas d'images"
+                a = attention_puits(q[start:end], kk, vv, self.sinks, self.scale, q_offset=offset,
+                                    window=self.window, n_rep=self.n_rep)
+            elif compact:
                 a = attention(q[start:end], kk, vv, True, self.scale,
                               q_offset=offset, window=self.window, n_rep=self.n_rep,
                               images=plages, bas_droite=biais)
@@ -584,10 +600,14 @@ class Attention(nn.Module):
             # graphe CUDA capture — un seul gather vectorisé, pas de boucle
             # Python, et une sortie identique au bit près entre eager et rejeu.
             tables, lens = batch.fixed_decode_views(q.device)
-            out = kernels.paged_attention(q, cache, tables, lens,
-                                          self.n_rep, self.scale,
-                                          window=self.window)
-            if out is None:                # cache non int8, ou pas de noyau
+            out = None if self.sinks is not None else kernels.paged_attention(q, cache, tables, lens,
+                                                                              self.n_rep, self.scale,
+                                                                              window=self.window)
+            if out is None and self.sinks is not None:
+                kk, vv = cache.gather_fixed(tables, q.dtype)
+                out = decode_attention_puits_fixe(q, kk, vv, lens, self.sinks, self.n_rep, self.scale,
+                                                  window=self.window)
+            elif out is None:                # cache non int8, ou pas de noyau
                 kk, vv = cache.gather_fixed(tables, q.dtype)
                 out = decode_attention_fixed(q, kk, vv, lens, self.n_rep,
                                              self.scale, window=self.window)
@@ -600,7 +620,7 @@ class Attention(nn.Module):
         # le noyau paginé les traite en un lancement, chaque ligne de requête
         # avec sa longueur causale propre.
         ql = batch.query_lens[0]
-        if all(q_ == ql for q_ in batch.query_lens):
+        if self.sinks is None and all(q_ == ql for q_ in batch.query_lens):
             tables, lens = batch.fixed_decode_views(q.device)
             out = kernels.paged_attention(q, cache, tables, lens,
                                           self.n_rep, self.scale, q_len=ql,
@@ -621,6 +641,11 @@ class Attention(nn.Module):
         for i, qlen in enumerate(batch.query_lens):
             end = start + qlen
             offset = batch.seq_lens[i] - qlen
+            if self.sinks is not None:
+                out[start:end] = attention_puits(q[start:end], keys[i], values[i], self.sinks, self.scale,
+                                                 q_offset=offset, window=self.window, n_rep=self.n_rep)
+                start = end
+                continue
             out[start:end] = attention(
                 q[start:end], repeat_kv(keys[i], self.n_rep),
                 repeat_kv(values[i], self.n_rep), True, self.scale,

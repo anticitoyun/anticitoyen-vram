@@ -73,3 +73,54 @@ def test_temoin_le_facteur_d_attention_change_les_tables():
     ca, _ = a(torch.arange(50), torch.device("cpu"), torch.float32, max_pos=50)
     cb, _ = b(torch.arange(50), torch.device("cpu"), torch.float32, max_pos=50)
     assert not torch.equal(ca, cb)
+
+
+def _eager_hf(q, k, v, sinks, scale, window):
+    """Référence : `eager_attention_forward` de transformers (gpt-oss), masque causal (+ fenêtre) additif construit
+    avec la même règle que `decode_attention_fixed` (clé j visible si j ≤ i et j > i − window)."""
+    from types import SimpleNamespace
+    from transformers.models.gpt_oss.modeling_gpt_oss import eager_attention_forward
+    t, hq, _ = q.shape
+    L, hkv, _ = k.shape
+    off = L - t
+    i = off + torch.arange(t)[:, None]
+    j = torch.arange(L)[None, :]
+    ok = (j <= i) & ((j > i - window) if window > 0 else torch.ones_like(j, dtype=torch.bool))
+    m = torch.zeros(t, L).masked_fill(~ok, float("-inf"))[None, None]
+    mod = SimpleNamespace(sinks=sinks, num_key_value_groups=hq // hkv, training=False)
+    out, _ = eager_attention_forward(mod, q.permute(1, 0, 2)[None], k.permute(1, 0, 2)[None],
+                                     v.permute(1, 0, 2)[None], m, scaling=scale, dropout=0.0)
+    return out[0]                                     # [t, hq, d] (transformers rend [b, t, h, d])
+
+
+@pytest.mark.parametrize("window", [0, 8])
+@pytest.mark.parametrize("t,L", [(13, 13), (5, 21), (1, 30)])
+def test_puits_contre_transformers(window, t, L):
+    from acvram.engine.layers import attention_puits
+    torch.manual_seed(0)
+    hq, hkv, d = 8, 2, 64
+    q, k, v = torch.randn(t, hq, d), torch.randn(L, hkv, d), torch.randn(L, hkv, d)
+    sinks = torch.randn(hq) * 2
+    ref = _eager_hf(q, k, v, sinks, d ** -0.5, window)
+    out = attention_puits(q, k, v, sinks, d ** -0.5, q_offset=L - t, window=window, n_rep=hq // hkv, lignes=4)
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+
+
+def test_puits_decodage_fixe_egal_au_chemin_variable():
+    """Le pas à formes fixes (graphe) et le chemin par séquence rendent la même ligne ; témoin : un puits très
+    négatif rend l'attention ordinaire, un puits fini la change (le contrôle qui peut rendre faux)."""
+    from acvram.engine.layers import attention_puits, decode_attention_fixed, decode_attention_puits_fixe
+    torch.manual_seed(1)
+    b, S, hq, hkv, d, w = 3, 24, 8, 2, 64, 8
+    lens = torch.tensor([24, 10, 3])
+    q, k, v = torch.randn(b, hq, d), torch.randn(b, S, hkv, d), torch.randn(b, S, hkv, d)
+    sinks = torch.randn(hq)
+    fixe = decode_attention_puits_fixe(q, k, v, lens, sinks, hq // hkv, d ** -0.5, window=w)
+    for i, n in enumerate(lens.tolist()):
+        var = attention_puits(q[i:i + 1], k[i, :n], v[i, :n], sinks, d ** -0.5, q_offset=n - 1, window=w,
+                              n_rep=hq // hkv)
+        torch.testing.assert_close(fixe[i:i + 1], var, rtol=1e-5, atol=1e-6)
+    sans = decode_attention_fixed(q, k, v, lens, hq // hkv, d ** -0.5, window=w)
+    torch.testing.assert_close(decode_attention_puits_fixe(q, k, v, lens, torch.full((hq,), -1e4), hq // hkv,
+                                                           d ** -0.5, window=w), sans, rtol=1e-5, atol=1e-6)
+    assert (fixe - sans).abs().max() > 1e-2

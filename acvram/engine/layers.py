@@ -1241,6 +1241,63 @@ def decode_attention_fixed(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     return out.squeeze(2)                                     # [b, hq, d]
 
 
+def _avec_cle_puits(k: torch.Tensor, v: torch.Tensor, axe: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """evp : une clé et une valeur NULLES ajoutées en fin d'axe ``axe`` — le logit q·0 vaut 0, le masque flottant y
+    pose le puits de la tête ; la valeur nulle ne contribue qu'au dénominateur, exactement le `sinks` de gpt-oss
+    (transformers modeling_gpt_oss.eager_attention_forward : logits concaténés au puits, softmax, colonne retirée)."""
+    forme = list(k.shape)
+    forme[axe] = 1
+    return torch.cat((k, k.new_zeros(forme)), axe), torch.cat((v, v.new_zeros(forme)), axe)
+
+
+def attention_puits(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sinks: torch.Tensor, scale: float,
+                    q_offset: int = 0, window: int = 0, n_rep: int = 1, lignes: int = 256) -> torch.Tensor:
+    """evp : attention causale à puits (gpt-oss), ``q`` [t, hq, d], ``k``/``v`` [L, hkv, d] (têtes KV diffusées par
+    SDPA si ``n_rep`` > 1), ``sinks`` [hq]. La requête i (position absolue q_offset + i) voit les clés j ≤ i, et
+    j > i − window si ``window`` > 0 — la fenêtre de `decode_attention_fixed`. Par blocs de ``lignes`` requêtes :
+    le masque flottant [hq, lignes, L + 1] reste borné."""
+    t, hq, _ = q.shape
+    n_k = k.shape[0]
+    kz, vz = _avec_cle_puits(k, v, 0)
+    kh, vh = kz.permute(1, 0, 2)[None], vz.permute(1, 0, 2)[None]
+    j = torch.arange(n_k, device=q.device)
+    puits = sinks.to(q.dtype).view(hq, 1, 1)
+    sorties = []
+    for i0 in range(0, t, lignes):
+        qi = q[i0:i0 + lignes]
+        n = qi.shape[0]
+        ipos = q_offset + i0 + torch.arange(n, device=q.device)
+        ok = j[None, :] <= ipos[:, None]
+        if window > 0:
+            ok = ok & (j[None, :] > ipos[:, None] - window)
+        m = torch.zeros(n, n_k, dtype=q.dtype, device=q.device).masked_fill_(~ok, float("-inf"))
+        masque = torch.cat((m.expand(hq, n, n_k), puits.expand(hq, n, 1)), dim=-1)[None]
+        o = F.scaled_dot_product_attention(qi.permute(1, 0, 2)[None], kh, vh, attn_mask=masque, scale=scale,
+                                           enable_gqa=(n_rep > 1))
+        sorties.append(o[0].permute(1, 0, 2))
+    return torch.cat(sorties, dim=0)
+
+
+def decode_attention_puits_fixe(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seq_lens: torch.Tensor,
+                                sinks: torch.Tensor, n_rep: int, scale: float, window: int = 0) -> torch.Tensor:
+    """evp : `decode_attention_fixed` avec puits — formes fixes, frontière sur le GPU (capturable en graphe).
+    ``q`` [b, hq, d], ``k``/``v`` [b, S, hkv, d], ``seq_lens`` [b]."""
+    b, s = k.shape[0], k.shape[1]
+    hq = q.shape[1]
+    kz, vz = _avec_cle_puits(k, v, 1)
+    kh, vh = kz.permute(0, 2, 1, 3), vz.permute(0, 2, 1, 3)
+    pos = torch.arange(s, device=q.device)[None, :]
+    ok = pos < seq_lens[:, None]
+    if window > 0:
+        ok = ok & (pos >= seq_lens[:, None] - window)
+    m = torch.zeros(b, s, dtype=q.dtype, device=q.device).masked_fill_(~ok, float("-inf"))
+    masque = torch.cat((m.view(b, 1, 1, s).expand(b, hq, 1, s),
+                        sinks.to(q.dtype).view(1, hq, 1, 1).expand(b, hq, 1, 1)), dim=-1)
+    out = F.scaled_dot_product_attention(q.unsqueeze(2), kh, vh, attn_mask=masque, scale=scale,
+                                         enable_gqa=(n_rep > 1))
+    return out.squeeze(2)
+
+
 def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """``[lot, s, têtes_kv, d]`` -> ``[lot, s, têtes_kv × n_rep, d]``."""
     if n_rep == 1:
