@@ -5,7 +5,14 @@ tenait la carte via `carte.sh ACVRAM_TYPE=service` — `service_declare` lisait
 n'écrit ; aucun service n'y était donc jamais déclaré. La vraie déclaration
 vit dans le `.qui` de carte.sh (contrat 4 champs `<pid> <epoch> <nom>
 service`, une ligne par service vivant). `nvidia-smi` factice (PATH), un seul
-pid GPU simulé (celui du test lui-même), aucune carte réelle requise."""
+pid GPU simulé (celui du test lui-même), aucune carte réelle requise.
+
+bd cn1 (chef, 01/10) : ces deux tests échouaient dans la suite complète pendant qu'un vrai
+poste compilait des noyaux (nvcc/ninja, typique d'un chargement de modèle) — MOTIF était déjà
+neutralisé ici (voir `_env`), mais le pgrep de DÉTECTION DE COMPILATION de `carte-libre.sh`
+(3e critère, code de sortie 2) n'avait AUCUNE variable d'isolation, contrairement à MOTIF.
+`MOTIF_COMPIL` corrige ça, neutralisé dans `_env()` au même titre.
+`test_isolation_compil_casse_sans_motif_compil` est le contrôle de fuite demandé."""
 import os
 import signal
 import stat
@@ -43,6 +50,7 @@ def _env(tmp_path, pid, qui_carte=None):
     # cours sur le poste (python outils/…) ferait échouer le test sans rapport
     # avec service_declare (non hermétique, même piège que la pièce 73c).
     env = {**os.environ, "RACINE": "1", "MOTIF": "__jamais_aucune_correspondance__",
+           "MOTIF_COMPIL": "__jamais_aucune_correspondance__",
            "PATH": _faux_nvidia_smi(tmp_path, pid)}
     env.pop("ACVRAM_VERROU", None)
     if qui_carte is not None:
@@ -74,8 +82,21 @@ def test_service_non_declare_reste_intrus(tmp_path):
         proc.send_signal(signal.SIGKILL); proc.wait(timeout=5)
 
 
+def _lancer_leurre_compilation(tmp_path):
+    """bd cn1 : nom du binaire « ninja » — motif par défaut de MOTIF_COMPIL. Tourne pendant
+    le test ci-dessous ; sans l'isolation de `_env()`, il fait échouer le test (voir le
+    contrôle `test_isolation_compil_casse_sans_motif_compil`)."""
+    faux_ninja = tmp_path / "ninja"
+    faux_ninja.write_text("#!/bin/sh\nsleep 30\n")
+    faux_ninja.chmod(faux_ninja.stat().st_mode | stat.S_IEXEC)
+    proc = subprocess.Popen([str(faux_ninja)])
+    time.sleep(0.2)
+    return proc
+
+
 def test_service_declare_dans_qui_carte_nest_plus_intrus(tmp_path):
     proc = _faux_serveur()
+    leurre = _lancer_leurre_compilation(tmp_path)
     try:
         qui = tmp_path / "carte.lock.qui"
         qui.write_text(f"{proc.pid} 1234567890 llamacpp-serveur service\n")
@@ -84,4 +105,26 @@ def test_service_declare_dans_qui_carte_nest_plus_intrus(tmp_path):
         assert "Intrus" not in r.stderr, r.stderr
         assert r.returncode == 0, r.stderr
     finally:
+        leurre.send_signal(signal.SIGKILL); leurre.wait(timeout=5)
+        proc.send_signal(signal.SIGKILL); proc.wait(timeout=5)
+
+
+def test_isolation_compil_casse_sans_motif_compil(tmp_path):
+    """Contrôle demandé (chef, bd cn1) : le MÊME leurre « ninja » que ci-dessus, sans
+    MOTIF_COMPIL dans l'env — prouve qu'il matche bien le motif réel de `carte-libre.sh` et
+    ferait échouer `test_service_declare_dans_qui_carte_nest_plus_intrus` si l'isolation
+    disparaissait de `_env()`."""
+    proc = _faux_serveur()
+    leurre = _lancer_leurre_compilation(tmp_path)
+    try:
+        qui = tmp_path / "carte.lock.qui"
+        qui.write_text(f"{proc.pid} 1234567890 llamacpp-serveur service\n")
+        env = _env(tmp_path, proc.pid, qui_carte=qui)
+        env.pop("MOTIF_COMPIL")   # isolation retirée : le leurre doit être vu
+        r = subprocess.run([SCRIPT], cwd=DEPOT, env=env,
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == 2, (r.returncode, r.stderr)
+        assert "processus de compilation en cours" in r.stderr, r.stderr
+    finally:
+        leurre.send_signal(signal.SIGKILL); leurre.wait(timeout=5)
         proc.send_signal(signal.SIGKILL); proc.wait(timeout=5)

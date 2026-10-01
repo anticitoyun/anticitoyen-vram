@@ -12,7 +12,18 @@ sinon ce correctif rouvrirait exactement le trou que ce refus visait.
 
 `nvidia-smi` factice (PATH, aucune allocation nulle part) ; le `.qui` est
 soit absent (cas g2c), soit écrit avec le pid réel (cas protégé). Aucune
-carte réelle requise."""
+carte réelle requise.
+
+bd cn1 (chef, 01/10) : les deux tests ci-dessus échouaient dans la suite complète pendant
+qu'un vrai poste compilait des noyaux (nvcc/ninja, typique d'un chargement de modèle) — le
+troisième pgrep de `carte-libre.sh` (détection de compilation, `exit 2`) n'était isolé par
+AUCUNE variable, contrairement à `MOTIF`. `MOTIF_COMPIL` (paramétrée ci-dessous) corrige ça ;
+`test_isolation_compil_casse_sans_motif_compil` est le contrôle demandé : un leurre nommé
+« ninja » tourne PENDANT les deux tests existants (prouvant qu'ils resteraient verts même si
+MOTIF_COMPIL fuit n'était pas le bon réglage), et ce contrôle prouve DIRECTEMENT que ce même
+leurre, sans l'isolation, fait bien échouer carte-libre.sh (rc 2) — si quelqu'un retire
+MOTIF_COMPIL des env de ce fichier, ce contrôle continue de passer mais
+`test_pause_sans_verrou_ni_gpu_nest_plus_un_refus` échouerait alors (rc 2 au lieu de 0)."""
 import os
 import signal
 import stat
@@ -64,19 +75,55 @@ def _nettoyer(proc, fichier):
         pass
 
 
+# bd cn1 : décor — un leurre dont le NOM DU BINAIRE est « ninja », le motif par défaut de
+# MOTIF_COMPIL (ancré sur `(^|/)(nvcc|cicc|ptxas|cudafe\+\+|ninja)( |$)`). Tourne pendant les
+# deux tests ci-dessous : si MOTIF_COMPIL cesse d'être isolé (retiré de leur env), ce leurre
+# les fait échouer immédiatement — c'est le contrôle de fuite demandé par chef.
+def _lancer_leurre_compilation(tmp_path):
+    faux_ninja = tmp_path / "ninja"
+    faux_ninja.write_text("#!/bin/sh\nsleep 30\n")
+    faux_ninja.chmod(faux_ninja.stat().st_mode | stat.S_IEXEC)
+    proc = subprocess.Popen([str(faux_ninja)])
+    time.sleep(0.2)
+    return proc
+
+
 def test_pause_sans_verrou_ni_gpu_nest_plus_un_refus(tmp_path):
     proc, fichier = _lancer_script_en_pause(tmp_path)
+    leurre = _lancer_leurre_compilation(tmp_path)
     try:
         r = subprocess.run(
             [str(SCRIPT)], cwd=DEPOT,
             env={**os.environ, "RACINE": "1", "PATH": _faux_path(tmp_path),
-                 "QUI_CARTE": str(tmp_path / "aucun.qui")},
+                 "QUI_CARTE": str(tmp_path / "aucun.qui"),
+                 "MOTIF_COMPIL": "__jamais_aucune_correspondance__"},
             capture_output=True, text=True, timeout=30,
         )
         assert r.returncode == 0, r.stderr
         assert "avertissement, pas un refus" in r.stderr, r.stderr
         assert "une mesure demarre sans avoir encore alloue" not in r.stderr, r.stderr
     finally:
+        leurre.send_signal(signal.SIGKILL); leurre.wait(timeout=5)
+        _nettoyer(proc, fichier)
+
+
+def test_isolation_compil_casse_sans_motif_compil(tmp_path):
+    """Contrôle demandé (chef, bd cn1) : le MÊME leurre « ninja » que ci-dessus, sans
+    l'isolation MOTIF_COMPIL — prouve que le leurre matche bien le motif réel et ferait
+    échouer `test_pause_sans_verrou_ni_gpu_nest_plus_un_refus` si l'isolation disparaissait."""
+    proc, fichier = _lancer_script_en_pause(tmp_path)
+    leurre = _lancer_leurre_compilation(tmp_path)
+    try:
+        r = subprocess.run(
+            [str(SCRIPT)], cwd=DEPOT,
+            env={**os.environ, "RACINE": "1", "PATH": _faux_path(tmp_path),
+                 "QUI_CARTE": str(tmp_path / "aucun.qui")},   # pas de MOTIF_COMPIL : non isolé
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode == 2, (r.returncode, r.stderr)
+        assert "processus de compilation en cours" in r.stderr, r.stderr
+    finally:
+        leurre.send_signal(signal.SIGKILL); leurre.wait(timeout=5)
         _nettoyer(proc, fichier)
 
 
