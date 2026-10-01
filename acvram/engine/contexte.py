@@ -45,6 +45,22 @@ def _ctx_texte(engine) -> str:
     return txt + (f" tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
 
 
+def construire_piles_sur_carte(couches) -> int:
+    """Décide les piles d experts (et leur repack Marlin) des blocs MoE encore indécis (``_stack_state == "?"``) des
+    couches qui vivent sur la carte ; rend le nombre de blocs décidés. Partagée par le chargeur (aym : AVANT le KV) et
+    par la chauffe (ya1 : ce qui reste, p. ex. un moteur construit sans passer par le chargeur)."""
+    from .moe import MoEBlock
+    n = 0
+    for couche in couches:
+        if not _sur_carte(couche):
+            continue
+        for mod in couche.modules():
+            if isinstance(mod, MoEBlock) and mod._stack_state == "?":
+                mod._stack_state = "oui" if mod._try_build_stacks() else "non"
+                n += 1
+    return n
+
+
 def _sur_carte(couche) -> bool:
     """La COUCHE vit sur la carte (``couche.device``, comme graphs.py:474). Pas les paramètres du bloc MoE : les poids
     quantifiés sont des attributs ordinaires de QuantLinear (layers.py:438) — un bloc MoE n a souvent AUCUN paramètre,
@@ -311,15 +327,7 @@ class ChauffeContexte:
         `GraphRunner._eligible` (graphs.py:473) les construit AVANT la chauffe ; même construction ici, pour que la
         chauffe mesure le régime servi. Mêmes piles, même sortie : seul le moment change. Rend le nombre de couches
         décidées."""
-        from .moe import MoEBlock
-        n = 0
-        for couche in getattr(self.model, "layers", ()):
-            if not _sur_carte(couche):
-                continue
-            for mod in couche.modules():
-                if isinstance(mod, MoEBlock) and mod._stack_state == "?":
-                    mod._stack_state = "oui" if mod._try_build_stacks() else "non"
-                    n += 1
+        n = construire_piles_sur_carte(getattr(self.model, "layers", ()))
         if n:
             print(f"[acvram] piles d experts construites avant la chauffe : {n} couches", flush=True)
         return n

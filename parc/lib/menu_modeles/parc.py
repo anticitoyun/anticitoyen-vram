@@ -45,6 +45,40 @@ def rang_refus(txt):
     return 9                                        # inconnu : en queue de tri
 
 
+# Lignées vedettes (poste7-menus-vedettes-19-09 § 4), mêmes regex que
+# `scratchpad/notes-modeles-19-09/vedettes.py` — dupliquées à dessein plutôt
+# qu'importées : ce script-là écrit une fois dans notes-modeles.tsv, colonne
+# que `outils/usages-modeles.py` régénère ensuite depuis son vocabulaire fermé
+# et qui perd le préfixe « ≈Opus »/« ≈Fable »/« code android/linux » dès le
+# passage suivant (pièce tri/filtres, 30/09 : 0/266 sur les trois filtres de
+# lignée bien que les alias correspondants existent toujours). La classer ICI,
+# à la lecture, depuis l'ALIAS SEUL (jamais depuis usage), rend le filtre
+# indépendant de cette colonne qui s'efface.
+_VEDETTE_OPUS = re.compile(r"qwen3[-_.]?6[-_]35b[-_]a3b[-_]opus|qwen36[-_]35b[-_]opus", re.I)
+_VEDETTE_FABLE = re.compile(r"fable[-_]distill|qwen38[-_]fable|fable[-_]fusion|fable[-_]27b|"
+                            r"qwen3[-_]6[-_]27b[-_]fable", re.I)
+_VEDETTE_CODE = re.compile(r"coder[-_]next|qwen3[-_]coder(?![-_]?(30b[-_]abl|30b[-_]abliterated))|"
+                           r"qkvo[-_]i8c|devstral|kat[-_]coder|qwen36[-_]27b[-_]code|"
+                           r"glm47[-_]neocode|neo[-_]code", re.I)
+_VEDETTE_CODE_EXTRA = {"vllm-qwen3-coder-awq"}
+_VEDETTE_TEMOINS = re.compile(r"qwen2[-_.]?5[-_]coder|starcoder|deepseek[-_]coder", re.I)
+
+
+def etiquette_vedette(alias):
+    """« ≈Opus », « ≈Fable », « code android/linux » ou None — voir le commentaire
+    au-dessus. Un témoin (Qwen2.5-Coder, StarCoder, DeepSeek-Coder) n'est jamais
+    une vedette même s'il matche par ailleurs un motif de code."""
+    if _VEDETTE_OPUS.search(alias):
+        return "≈Opus"
+    if _VEDETTE_FABLE.search(alias):
+        return "≈Fable"
+    if _VEDETTE_TEMOINS.search(alias):
+        return None
+    if alias in _VEDETTE_CODE_EXTRA or _VEDETTE_CODE.search(alias):
+        return "code android/linux"
+    return None
+
+
 class Modele(GObject.Object):
     """Une ligne du parc. Les champs de fiche sont modifiables depuis le panneau."""
 
@@ -108,6 +142,10 @@ class Modele(GObject.Object):
     @property
     def outils_ok(self):
         return self.outils_etat == "ok"
+
+    @property
+    def vedette(self):
+        return etiquette_vedette(self.alias)
 
     def texte_recherche(self):
         # synonymes lisibles des capacités techniques. « vision » et « voit images »
