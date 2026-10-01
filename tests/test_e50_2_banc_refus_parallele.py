@@ -36,6 +36,29 @@ pytestmark = pytest.mark.skipif(not BANC_REFUS.exists() or not _gi_ok(),
                                  reason="banc-refus absent ou GTK4/libadwaita absent (/usr/bin/python3)")
 
 
+def test_parser_outils_insensible_aux_couleurs_ansi():
+    """Trouvé en mesure réelle (01/10, campagne.log 10:35-10:37) : banc-outils colore sa
+    sortie SANS tester isatty (~/.local/bin/banc-outils:163,183-190) — avant le correctif,
+    `_parser_outils` ne matchait jamais sur une sortie de terminal capturée
+    (`\\x1b[1m4/8\\x1b[0m` au lieu de `4/8`), et le tok/s de TOUS les alias acvram restait
+    silencieusement à son ancienne valeur. `_lancer_banc` doit nettoyer les codes ANSI
+    avant de rendre la sortie à `_parser_outils`."""
+    code = (
+        f"import sys; sys.path.insert(0, {str(ICI / 'outils')!r}); "
+        "import importlib.util; "
+        f"spec = importlib.util.spec_from_file_location('c', {str(CAMPAGNE)!r}); "
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+        "brut = '  \\u2192 \\x1b[1m4/8\\x1b[0m appels corrects \\u00b7 132 tok/s\\n'; "
+        "assert m._parser_outils(brut) is None, 'la sortie brute matche déjà — revoir ce test'; "
+        "nettoye = m._ANSI.sub('', brut); "
+        "r = m._parser_outils(nettoye); "
+        "print(r.groups() if r else None)"
+    )
+    r = subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "('4', '8', '132')", r.stdout
+
+
 def test_coupure_marqueur_present_cassant():
     """(a) Si le banc-refus déployé change et que le marqueur de coupe disparaît ou bouge,
     ce test casse AVANT que la campagne ne tourne en aveugle dessus cette nuit."""
