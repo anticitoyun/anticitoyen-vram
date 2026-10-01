@@ -317,7 +317,40 @@ def _charger(m, journal):
     return r.returncode
 
 
+def _sortant(pid):
+    """Disparu, zombie ou en sortie (PF_EXITING = 0x4, champ 9 de /proc/<pid>/stat) — même
+    lecture que parc/lib/carte_rendue.py:sortant, réutilisée telle quelle ici (pas de
+    carte.sh à portée pour ce PID-là, juste le même critère)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            ch = f.read().rsplit(")", 1)[1].split()
+    except OSError:
+        return True
+    return ch[0] in ("Z", "X") or bool(int(ch[6]) & 0x4)
+
+
+def _attendre_mort_ou_tuer(pid, delai, journal=None, alias=""):
+    """Attend la vraie mort du PID (zombie compris, `_sortant`), SIGKILL au-delà de `delai`
+    secondes — jamais un `sleep` fixe qui ne prouve rien (trouvé par chef, 01/10 14h15 :
+    un serveur encore vivant 29 Gio après SIGTERM, la campagne avait déjà écrit « carte
+    rendue » et poste3 a dû refuser la carte). Renvoie True si SIGKILL a été nécessaire."""
+    for _ in range(delai):
+        if _sortant(pid):
+            return False
+        time.sleep(1)
+    if journal:
+        with open(journal, "a") as f:
+            f.write(f"=== arrêt {alias} : SIGTERM sans effet en {delai}s, SIGKILL (pid {pid})\n")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return True
+
+
 def _arreter(m, journal):
+    """SIGTERM, attend la vraie mort (ou SIGKILL), PUIS attend que la VRAM soit réellement
+    rendue (`parc/lib/carte_rendue.py`, l'outil partagé des trois lanceurs du parc)."""
     port = MOTEURS[m.provider].port
     pid = pid_du_port(port)
     if pid is None:
@@ -327,7 +360,19 @@ def _arreter(m, journal):
     os.kill(pid, signal.SIGTERM)
     with open(journal, "a") as f:
         f.write(f"=== arrêt {m.alias} (pid {pid}, SIGTERM)\n")
-    time.sleep(2)
+    delai = int(os.environ.get("ACVRAM_DELAI_TERM", "30"))
+    _attendre_mort_ou_tuer(pid, delai, journal, m.alias)
+    r = subprocess.run(
+        ["python3", str(RACINE / "parc" / "lib" / "carte_rendue.py"),
+         "--nom", "e50.2", "--cartes", os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+         "--remplace", str(pid)],
+        cwd=RACINE, capture_output=True, text=True)
+    with open(journal, "a") as f:
+        if r.returncode == 0:
+            f.write(f"=== carte rendue (vérifiée, carte_rendue.py) {m.alias}\n")
+        else:
+            f.write(f"=== ATTENTION : carte_rendue.py rc={r.returncode} pour {m.alias} — "
+                    f"{r.stdout}{r.stderr}\n")
 
 
 # même motif que fenetre.py (ANSI) : banc-outils colore sa sortie SANS tester isatty
