@@ -1,6 +1,6 @@
 # Journal des changements
 
-## En préparation (0.7.17)
+## 0.7.17 (01/10/2026)
 
 ### Piles d'experts MoE construites au chargement, avant le KV (aym)
 
@@ -14,6 +14,30 @@
   `global_scale`) épinglaient les segments de 2 Mio de l'allocateur — 7,4 Gio réservés non alloués, le KV ne tenait plus.
   Ils sont regroupés par vues (mêmes valeurs) avant de rendre le cache : 6,04 → 13,15 Gio libres après les piles, chauffe
   29 096/29 096. `ACVRAM_PILES_COMPACTER=0` = témoin.
+
+### Réserve de préfill et fenêtre qui tient (poste6)
+
+* **Fenêtre qui tient** (kv31b, `acvram-memoire/revue/poste6-kv31b-verdict-30-09.md`) : un refus « budget KV insuffisant »
+  nomme la fenêtre qui tient ; `acvram-serveur` relance une fois à cette fenêtre si elle reste au-dessus du minimum du
+  client, sinon refuse en le disant. gemma-4-31B : 29 696 jetons sur la 5090 seule, 25 600 avec l'appoint sur la carte.
+* **Réserve de préfill par tranches** et terme d'attention (fp32) dans `activations_prefill_bytes` : la formule couvre le
+  pic mesuré par la chauffe (5,19 Gio contre 4,87 mesurés à 20 480 jetons) ; le pic mesuré est enregistré par modèle
+  (fichier versionné et lié à l'empreinte du converti, `reserve_chauffe=` sur la ligne de régime, `ACVRAM_CHAUFFE_CACHE`).
+  Corrigé en route : une boucle exil/remontée du planificateur à 29,5 Gio libres (deux marges calculées sur des bases
+  différentes).
+* **Préfill par morceaux** (`ACVRAM_PREFILL_MORCEAU`, défaut 0) : opt-in ; le bit est inatteignable par construction
+  (le SDPA découpe ses clés selon la longueur de l'appel) ; il sera jugé par équivalence sous témoin reprise.
+
+### Menus claude-modeles et kimi-modeles (paquet parc 0.1.11)
+
+* **Tri** (poste3) : un tri par colonne laissait une zone vide en haut de la liste (lignes non redessinées) ; la vue
+  revient en tête et se redessine au changement de tri.
+* **Filtres** (poste3) : « ≈ Opus/Fable » et « code Android/Linux » rendaient 0 : `usages-modeles.py` effaçait leurs
+  préfixes à chaque passage ; la lignée se lit désormais depuis l'alias. « Tous » remet les bascules à zéro ; un filtre
+  qui ne peut rien trouver (« Outils OK » tant qu'aucun banc-outils n'a tourné) est grisé et dit pourquoi.
+* Outil de campagne qualité (poste2) : le verdict final se calcule depuis les résultats présents (refus nommé s'il en
+  manque) ; durées maximales par tâche ; références au format v275 exigées.
+* Harnais commun de prise (`outils/gpu/mesure/serveur-bras.sh`, poste1) : lancement, arrêt vérifié par PID, port libre.
 
 ## 0.7.16 (30/09/2026)
 

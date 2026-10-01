@@ -40,6 +40,7 @@
   <supports><control>pointing</control><control>keyboard</control></supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.17" date="2026-10-01"><description><p>MoE expert stacks are built at load time and their small leftover tensors compacted, freeing several GiB on 30B MoE models; prefill memory reserve and the context that fits are computed more accurately; model menus fix column sorting and the Opus/Fable and Android/Linux filters.</p></description></release>
     <release version="0.7.16" date="2026-09-30"><description><p>Model menus hardened after a full real test of 343 aliases: slow-starting servers are no longer cut off, a new server waits for the GPU memory of the previous one, YALS and TabbyAPI launchers join the companion package with named failures, and tool-call arguments sent as JSON strings are decoded before the chat template.</p></description></release>
     <release version="0.7.15" date="2026-09-29"><description><p>Large attention masks are split into row blocks up front (bit-exact), so long Claude Code prompts no longer run out of memory; model menus mark aliases below each client’s minimum context.</p></description></release>
     <release version="0.7.14" date="2026-09-29"><description><p>Model menus fixed for Claude Code and kimi (API keys, vLLM on RTX 5090, prompt order), expert stacks built before warm-up, and recovery after an out-of-memory prefill.</p></description></release>
