@@ -106,4 +106,7 @@ def test_replique_la_fenetre_qui_tient_descend(monkeypatch, tmp_path):
     n = int(str(e.value).split("fenêtre qui tient : ")[1].split()[0])
     # PRÉDIT 24 576-28 672 ; RENDU 29 696 (prédiction réfutée par le haut, dite) — sans le terme : 31 744, que la chauffe
     # (20 480 tenus, KV dimensionné pour 31 744) démentait ; à 29 696 le KV serait dimensionné pour 29 696
-    assert 28672 <= n <= 30720, n
+    # d19 (poste6 01/10) : au-delà du plafond l'attention passe par morceaux — le flux résiduel et q/k/v ne sont plus comptés qu'à
+    # 4 096 lignes (−2,0 Gio à 32 768 sur gemma) et les K/V bf16 transitoires d'une couche s'ajoutent (+0,5) : la fenêtre annoncée
+    # monte ; c'est la chauffe qui la prouve (scellé poste6-d19, C5)
+    assert 30720 <= n <= 31744, n                                   # 29 696 avant d19

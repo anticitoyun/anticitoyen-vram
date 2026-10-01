@@ -1063,7 +1063,8 @@ def _lignes_par_bloc(kv_len: int, octets: int) -> int:
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               causal: bool = True, scale: Optional[float] = None,
               q_offset: int = 0, window: int = 0, n_rep: int = 1,
-              images: Optional[Sequence[tuple[int, int]]] = None, _en_blocs: bool = False) -> torch.Tensor:
+              images: Optional[Sequence[tuple[int, int]]] = None, _en_blocs: bool = False,
+              bas_droite: Optional[bool] = None) -> torch.Tensor:
     """Attention par produit scalaire normalisé sur des tenseurs ``[jetons, têtes, dim]``.
 
     Délègue au SDPA de PyTorch, qui choisit FlashAttention sur tout GPU qui le
@@ -1075,7 +1076,10 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     q_len, kv_len = q.shape[0], k.shape[0]
     # le chemin à masque dense d'en dessous, exactement (un bloc d'images qui ne touche pas les requêtes n'en ouvre pas)
     touche = bool(images and causal and any(int(d) < q_offset + q_len and int(f) > q_offset for d, f in images))
-    bas_droite = bool(_BIAIS_BAS_DROITE and causal and window <= 0 and not touche and q_len > 1
+    # d19 : un préfill par morceaux demande le biais explicitement (`bas_droite=True`, attention.py `_prefill`) — sans lui, le
+    # masque dense [1 024 × T] + enable_gqa prend le noyau math et matérialise têtes × 1 024 × T scores fp32 (8 Gio à 65 536)
+    voulu = _BIAIS_BAS_DROITE if bas_droite is None else bas_droite
+    bas_droite = bool(voulu and causal and window <= 0 and not touche and q_len > 1
                       and q_offset > 0 and kv_len == q_offset + q_len)
     masque = bool(window > 0 or touche
                   or (causal and q_len > 1 and not (q_offset == 0 and q_len == kv_len) and not bas_droite))
@@ -1086,12 +1090,12 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
         def par_blocs():
             return torch.cat([attention(q[i:i + lignes], k, v, causal, scale, q_offset + i, window, n_rep, images,
-                                        _en_blocs=True)
+                                        _en_blocs=True, bas_droite=voulu)
                               for i in range(0, q_len, lignes)], dim=0)
         if 0 < _MASQUE_OCTETS_MAX < q_len * kv_len * q.element_size() and q_len > lignes:
             return par_blocs()
         try:
-            return attention(q, k, v, causal, scale, q_offset, window, n_rep, images, _en_blocs=True)
+            return attention(q, k, v, causal, scale, q_offset, window, n_rep, images, _en_blocs=True, bas_droite=voulu)
         except torch.OutOfMemoryError:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

@@ -42,7 +42,8 @@ def _ctx_texte(engine) -> str:
     demande = getattr(engine, "ctx_demande", v)
     txt = f" ctx_tenu={v}" if demande == v else f" ctx_tenu={v}(demandé {demande})"
     seuil = getattr(engine, "moe_seuil", None)
-    return txt + (f" tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
+    ms = getattr(engine, "morceaux_seuil", None)                     # d19 (poste6) : attention par morceaux au-delà
+    return txt + (f" tranches>{seuil}" if seuil else "") + (f" morceaux>{ms}" if ms else "")   # au-delà : sous témoin, pas au bit
 
 
 def construire_piles_sur_carte(couches) -> int:
@@ -138,7 +139,16 @@ class ChauffeContexte:
         from . import attention as _att, gdn as _gdn, moe as _moe
         return (any((isinstance(m, _moe.MoEBlock) and _moe._MOE_MORCEAU > 0)
                     or (isinstance(m, _gdn.GatedDeltaNet) and _gdn._GDN_MORCEAU > 0) for m in self.model.modules())
-                or (self._dense_pur() and _att._MLP_MORCEAU > 0))
+                or (self._dense_pur() and _att._MLP_MORCEAU > 0) or self._morceaux_au_dela_possibles())
+
+    def _morceaux_au_dela_possibles(self) -> bool:
+        """d19 (poste6 01/10) : l'attention d'un modèle SANS récurrence passe par morceaux au-delà du tenu d'un seul tenant
+        (runner `_MORCEAU_AU_DELA` > 0) — un hybride garde ses instantanés et le d19 d'poste1 tel quel."""
+        from . import attention as _att, gdn as _gdn, runner as _r
+        mods = list(self.model.modules())
+        return (_r._MORCEAU_AU_DELA > 0 and not getattr(self.spec, "couches_recurrentes", 0)
+                and not any(isinstance(m, _gdn.GatedDeltaNet) for m in mods)
+                and any(isinstance(m, _att.Attention) for m in mods))
 
     def _dense_pur(self) -> bool:
         """a5v : ni MoE ni GDN — seul cas où le MLP dense passe par tranches (un MoE ou un hybride garde d19 tel quel)."""
@@ -222,10 +232,15 @@ class ChauffeContexte:
         from . import attention as _att, gdn as _gdn, moe as _moe
         dense = self._dense_pur()
 
+        from . import runner as _r
+        morceaux = self._morceaux_au_dela_possibles()
+
         def seuils(v):
             _moe.definir_seuil(v); _gdn.definir_seuil(v); _att.definir_seuil(v if dense else None)
+            _r.definir_seuil_morceaux(v if morceaux else None)
         seuils(None)
         self.moe_seuil: Optional[int] = None
+        self.morceaux_seuil: Optional[int] = None
         tenu: Optional[int] = n if essai(n) else dichotomie(0, n)
         # d19 : au-delà du tenu d un seul tenant, cœur GDN et bloc MoE par tranches (tampons bornés). Engagés SEULEMENT
         # au-delà : toute invite qui tenait garde sa sortie au bit et son temps ; au-delà, elle recevait un 400. Pas au bit
@@ -235,9 +250,11 @@ class ChauffeContexte:
             tenu2 = n if essai(n) else dichotomie(tenu, n)
             if tenu2 > tenu:
                 print(f"[acvram] préfill par tranches (GDN {_gdn._GDN_MORCEAU}, MoE {_moe._MOE_MORCEAU}"
-                      f"{f', MLP {_att._MLP_MORCEAU}' if dense else ''}) au-delà de "
+                      f"{f', MLP {_att._MLP_MORCEAU}' if dense else ''}"
+                      f"{f', attention par morceaux de {_r._MORCEAU_AU_DELA}' if morceaux else ''}) au-delà de "
                       f"{tenu} jetons : {tenu2} tenus", flush=True)
                 self.moe_seuil, tenu = tenu, tenu2
+                self.morceaux_seuil = self.moe_seuil if morceaux else None
             else:
                 seuils(None)
         # cqy : le tenu doit aussi tenir quand l invite réutilise un préfixe en cache (q_offset > 0) ; sinon on descend.
