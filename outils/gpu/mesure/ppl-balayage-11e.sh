@@ -64,8 +64,10 @@ import json, sys
 a, b = (json.load(open(c)) for c in sys.argv[1:3])
 a, b = (x[0] if isinstance(x, list) else x for x in (a, b))
 ok = a["par_fenetre"] == b["par_fenetre"] and len(a["par_fenetre"]) > 0
-print("TÉMOIN max6 = max6-t AU BIT" if ok else "TÉMOIN max6 ≠ max6-t : S2-S4 INVALIDES (bruit d'instrument)")
+print("TÉMOIN max6 = max6-t AU BIT" if ok else "TÉMOIN max6 ≠ max6-t : S2-S4 INVALIDES (bruit d'instrument), aucun chiffre calculé")
+sys.exit(0 if ok else 6)
 PYEOF
+      [ $? -eq 0 ] || exit 6               # chef 01/10 : témoin ≠ → le bootstrap ne tourne pas, aucun chiffre S2-S4 à citer
       "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-max6.json" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
       "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
       # contrôle gratuit : la conversion max6 neuve contre l'alias Qwen2.5-Coder-7B-nvfp4 existant (mêmes options ?)
