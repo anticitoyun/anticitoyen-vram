@@ -351,6 +351,7 @@ def test_jouet_converti_formats_et_chargement(jouet_oss):
     assert m["model.layers.0.mlp.experts.3.gate_proj.weight"]["format"] == "nvfp4"
     assert m["model.layers.0.mlp.experts.3.gate_proj.weight"].get("passage_direct") is True
     assert "model.layers.1.mlp.gate.bias" in m and "model.layers.1.self_attn.sinks" in m
+    assert m["model.layers.1.self_attn.sinks"]["format"] == "bf16"
     loaded = load_model(out, dtype=torch.float32, device_override="cpu")
     attn = [x for x in loaded.model.modules() if isinstance(x, Attention)]
     assert [a.window for a in attn] == [8, 0] and all(a.sinks is not None for a in attn)
