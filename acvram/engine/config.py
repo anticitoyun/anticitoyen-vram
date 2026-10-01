@@ -115,6 +115,9 @@ class ModelSpec:
     # SEULEMENT quand la réserve d un seul tenant exilerait des MLP) ; le terme MLP de la réserve s arrête là. None = seul
     # tenant jusqu à max_model_len (comme avant).
     mlp_prefill_plafond: Optional[int] = None
+    # d19 (poste6 01/10) : jetons au-delà desquels l'attention passe par morceaux (chauffe / `loader._plafonner_mlp_prefill`) ;
+    # le flux résiduel, q/k/v et les sorties ne vivent alors que pour un morceau, et une couche garde ses K/V bf16 transitoires
+    prefill_morceau_plafond: Optional[int] = None
     rotary_dim: Optional[int] = None      # RoPE partiel (None = tête entière)
     attn_output_gate: bool = False
     # gemma4 : couches locales (fenêtre) / globales (têtes plus larges, RoPE
@@ -390,7 +393,13 @@ class ModelSpec:
         H = self.hidden_size
         D = self.head_dim or (H // max(1, self.num_attention_heads))
         qkv = (self.num_attention_heads + 2 * self.num_key_value_heads) * D
-        par_jeton = 4 * H * 2 + qkv * 2
+        # d19 : au-delà du plafond de morceaux S, une invite passe par morceaux — le pire cas admissible d'un seul tenant est S
+        # lignes (flux résiduel, ligne normée, sorties, q/k/v : ces termes s'arrêtent à S) ; reste linéaire en T le tampon
+        # bf16 des K/V d'une couche (2 × T × têtes_KV × D × 2) — Devstral 65 536 : 256 Mio contre 3,25 Gio de résiduel.
+        S = int(self.prefill_morceau_plafond) if self.prefill_morceau_plafond else 0
+        lignes_res = min(T, S) if S > 0 else T
+        fixe = (4 * H * 2 + qkv * 2) * lignes_res
+        par_jeton = (2 * self.num_key_value_heads * D * 2) if 0 < S < T else 0
         if self.num_experts and self.moe_intermediate_size:
             k = max(1, self.num_experts_per_tok)
             im = self.moe_intermediate_size
@@ -409,7 +418,14 @@ class ModelSpec:
         # à 20 480 jetons contre 2,7 de formule : +111 Kio/jeton ; ce terme en vaut 128 (en bf16 il n'en vaudrait que 64 et
         # ne couvrirait pas la mesure). Hypothèse nommée : la chauffe compare désormais la formule au pic mesuré (loader
         # `enregistrer_chauffe`) et le dit. Sans lui, le plan promettait 31 744 et la chauffe clampait à 20 480.
-        par_jeton += self.num_attention_heads * min(T, LIGNES_BLOC_ATTENTION) * 4
+        # d19 : ces scores sont [têtes × 1 024 lignes × T CLÉS] fp32 par bloc — linéaires en T par les clés, pas par les lignes.
+        # Une couche à fenêtre glissante (gemma) passe TOUJOURS par le masque dense : le terme reste en T. Sans fenêtre, un seul
+        # tenant ne matérialise rien (flash is_causal — Devstral : chauffe 1,12 Gio à 10 240 sous ce seul terme de 1,25) sauf à
+        # relire un préfixe en cache (masque dense, cqy) : jusqu'à S clés ; au-delà de S les morceaux prennent le biais bas-droite
+        # (flash). Pire cas admissible sans fenêtre : min(T, S) clés — T quand aucun plafond n'est posé (l'ancien terme).
+        fenetre = self.sliding_window > 0 or any("sliding" in t for t in (self.layer_types or []))
+        cles = T if (fenetre or S <= 0) else min(T, S)
+        fixe += self.num_attention_heads * min(T, LIGNES_BLOC_ATTENTION) * 4 * cles
         # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
         # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),
         # et non plus un seul à la fois : sur Qwen3.8, 232 Mio contre les 178 de la plus grosse matrice ci-dessus.
@@ -418,8 +434,8 @@ class ModelSpec:
         # depuis le manifeste par `loader._reserve_prefill` (qui, lui, sait si la fusion a eu lieu),
         # pas ici : blanchir ce terme à toute architecture dense aurait sur-réservé le 70B de poste3
         # (verdict-palier1-bloc6-17-09, jamais fusionné) de +448 Mio pour rien.
-        return T * par_jeton + max(plus_grosse, self.poids_bf16_couche_lineaire_bytes(),
-                                   self.octets_transitoires_i8c_bytes())
+        return fixe + T * par_jeton + max(plus_grosse, self.poids_bf16_couche_lineaire_bytes(),
+                                          self.octets_transitoires_i8c_bytes())
 
     def octets_transitoires_i8c_bytes(self) -> int:
         """Pic transitoire du chemin i8c partagé (pièce 153, `kernels.int8_matmul_partage` →

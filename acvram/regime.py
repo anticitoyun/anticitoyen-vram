@@ -419,6 +419,15 @@ VARIABLES: tuple[Variable, ...] = (
              "kv31b levier 2 étape 1 (30/09, OPT-IN, défaut 0 = un seul tenant) : préfill de l'attention par morceaux de N jetons "
              "d'invite, lots passés couche par couche (forward_tranches) ; au bit d'un seul tenant sous les mêmes chemins (morceau ≥ 128 "
              "lignes et > seuil de fusion gate/up pour une invite qui le dépasse, sinon ignoré et dit) ; hors récurrence linéaire"),
+    Variable("PREFILL_MORCEAU_AU_DELA", "4096", ("acvram.engine.runner", "_MORCEAU_AU_DELA"), None,
+             "d19 (01/10) : au-delà du tenu d'un seul tenant (chauffe), l'attention d'un dense sans récurrence passe par morceaux de N "
+             "jetons (régime « morceaux>S ») — sous le tenu rien ne change ; 0 = jamais (l'invite au-delà reçoit 400 comme avant)"),
+    Variable("PREFILL_TRANSITOIRES", "1", ("acvram.engine.attention", "_TRANSITOIRES"), "0",
+             "d19 : 1 = pendant un préfill par morceaux couche-majeur, les K/V des morceaux précédents de la couche sont gardés en bf16 "
+             "(2 × T × têtes_KV × D × 2 o, libérés au dernier morceau) au lieu d'être relus quantifiés du cache ; 0 = témoin (relecture)"),
+    Variable("PREFILL_BIAIS_MORCEAUX", "1", ("acvram.engine.attention", "_BIAIS_MORCEAUX"), "0",
+             "d19 : 1 = les morceaux d'attention prennent le biais causal bas-droite (flash, aucun score matérialisé) ; 0 = masque "
+             "dense par blocs de 1 024 lignes (têtes × 1 024 × T scores fp32 : 8 Gio à 65 536 sur Devstral)"),
     Variable("CHAUFFE_CACHE", "~/.cache/acvram/chauffe", None, None,
              "kv31b (30/09) : dossier des mesures de pic de chauffe (un fichier par modèle : version, empreinte du converti, excès par "
              "jeton) relues au chargement — la réserve de préfill en dépend, la ligne de régime nomme l'excès appliqué et sa source "

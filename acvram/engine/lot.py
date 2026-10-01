@@ -54,6 +54,9 @@ class ForwardBatch:
     # hidden]) ; le niveau k est AJOUTÉ après la couche k du LM aux seules lignes
     # image. None pour tout le lot = aucun tenseur touché. Prefill seulement.
     deepstack: Optional[list] = None
+    # d19 (poste6 01/10) : lot d'un préfill par morceaux — (rang, total, fin, transitoires) ; `transitoires` vrai quand la passe
+    # est couche-majeure (forward_tranches) : l'attention garde alors en bf16 les K/V des morceaux précédents de la couche
+    morceau: Optional[tuple] = None
 
     def images_de(self, i: int) -> list:
         """Plages (debut, fin) de la séquence i, [] sans image."""
