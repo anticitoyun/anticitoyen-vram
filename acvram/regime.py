@@ -245,6 +245,10 @@ VARIABLES: tuple[Variable, ...] = (
              "cqy (29/09, 0.7.15) : un masque d attention dense [q × kv] (préfixe en cache, fenêtre, images) au-delà de N octets est découpé d emblée par blocs de lignes, au bit du seul tenant sur carte (≥ 1 024 lignes) ; 0 = témoin (seul tenant, découpage après OOM seulement)"),
     Variable("MASQUE_LIGNES_MIN", "1024", ("acvram.engine.layers", "_MASQUE_LIGNES_MIN"), None,
              "cqy (29/09) : lignes par bloc au moins, pour un masque découpé ; refus sous 1 024 (blocs de 7 lignes : pas au bit sur carte)"),
+    Variable("PILES_AU_CHARGEMENT", "1", None, None,
+             "aym (30/09, 0.7.17) : piles d experts MoE et repack Marlin construits au chargement, AVANT le KV (au bit du témoin paresseux sur carte) ; un OOM du repack garde la pile naturelle, nommé ; 0 = témoin (construction paresseuse, après le KV)"),
+    Variable("PILES_COMPACTER", "1", None, None,
+             "5v7 (30/09, 0.7.17) : les petits survivants des piles d experts (échelles AWQ, global_scale) regroupés par vues avant de rendre le cache — ils épinglaient des segments de 2 Mio (Coder-30B : 7,4 Gio réservés non alloués) ; mêmes valeurs ; 0 = témoin"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",
@@ -335,6 +339,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_ETAT_EN_PLACE", "1", ("acvram.engine.gdn", "_GDN_ETAT_EN_PLACE"), "0",
              "pièce 156 F4 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, la récurrence fla écrit son état final dans le "
              "tampon statique (h0 = ht) au lieu d'une allocation suivie d'une copie de 25 Mo par couche (b=8, Qwen3.8)"),
+    Variable("GDN_TUILES", "0", ("acvram.engine.gdn", "_GDN_TUILES"), "0",
+             "I5 (30/09, opt-in tant que non mesuré) : J = 2 ou 4 tuiles de valeurs par programme dans la récurrence GDN "
+             "du décodage (gdn_tuiles.py, corps de fla recopié, PTX sm_120 = fla × J) ; 0 = noyau fla ; au bit (test I5)"),
     Variable("GDN_AB", "auto", ("acvram.engine.gdn", "_GDN_AB"), "separe",
              "pièce 175 (poste6, 25/09 ; DÉFAUT auto depuis 175 b) : portes α et β bf16 des couches GDN (alias mixte) : separe (témoin, deux F.linear) | "
              "concat (un F.linear sur β‖α) | triton (GEMM étroite fp32 déterministe, M ≤ 16) | auto (M = 1 concat, 2-8 triton, "

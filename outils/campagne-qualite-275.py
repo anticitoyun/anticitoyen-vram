@@ -16,9 +16,18 @@ chaque sous-appel (carte.sh, ordre chef 30/09) sauf s'il est déjà dans l'envir
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+# Les 4 tâches que qualite.sh est censé mesurer par candidat (outils/qualite.sh:60-65).
+TACHES_ATTENDUES = (
+    "gsm8k",
+    "mmlu_v275_high_school_mathematics",
+    "mmlu_v275_professional_law",
+    "mmlu_v275_college_computer_science",
+)
 
 RACINE = Path(__file__).resolve().parent.parent
 TSV_ACVRAM = Path.home() / "TSV" / "acvram-chemins.tsv"
@@ -83,7 +92,15 @@ def preparer():
         alias, ref_dossier = c["alias"], c["ref_dossier"]
         present = alias in menu
         ctx = menu.get(alias, 0)
-        ref_ok = (CACHE_275 / ref_dossier / "ppl.json").exists() and (CACHE_275 / ref_dossier / "panel.json").exists()
+        # Délègue à verifier-reference-275.sh (source unique avec qualite.sh) — trouvé le
+        # 30/09 : ppl.json + panel.json présents ne suffit pas, une référence peut être au
+        # format ANCIEN (échantillons sous les noms de tâche d'avant la pièce 275d) et
+        # planter qualite.sh en cours de route. Angle mort d'une première version de
+        # --simule, corrigé.
+        ref_ok = subprocess.run(
+            ["outils/verifier-reference-275.sh", ref_dossier], cwd=RACINE,
+            capture_output=True,
+        ).returncode == 0
         dossier = dossiers.get(alias, "?")
         doublon = vus_dossiers.get(dossier)
         vus_dossiers[dossier] = alias
@@ -142,6 +159,38 @@ def _env():
     return e
 
 
+def _completude(texte):
+    """Pure, testable sans carte : un rc=0 de qualite.sh n'est pas en soi une preuve
+    que les 4 tâches ont tourné (trouvé le 01/10 — un HEAD cassé en plein vol par un
+    `git merge` sur le worktree de travail a laissé un verdict final sans ses
+    résultats). Renvoie (tâches manquantes, PPL tenue)."""
+    manquantes = []
+    for t in TACHES_ATTENDUES:
+        m = re.search(rf"^{re.escape(t)} : mcnemar_p=\S+ tenu=1$", texte, re.MULTILINE)
+        if not m:
+            manquantes.append(t)
+    ppl_ok = re.search(r"^PPL bras=.* tenu=1$", texte, re.MULTILINE) is not None
+    return manquantes, ppl_ok
+
+
+def _executer_qualite(ref_dossier):
+    """Lance qualite.sh en streamant sa sortie (pour la surveillance en direct) tout
+    en la gardant pour vérifier après coup qu'elle contient bien les 4 résultats —
+    jamais confiance au seul code de retour."""
+    proc = subprocess.Popen(
+        ["outils/qualite.sh", ref_dossier, BRAS], cwd=RACINE, env=_env(),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    lignes = []
+    for ligne in proc.stdout:
+        print(ligne, end="")
+        lignes.append(ligne)
+    rc = proc.wait()
+    texte = "".join(lignes)
+    manquantes, ppl_ok = _completude(texte)
+    return rc, manquantes, ppl_ok
+
+
 def executer():
     if "ATTENDU" not in os.environ:
         print("REFUS : ATTENDU=<HEAD court> requis (même contrôle que qualite.sh)", file=sys.stderr)
@@ -166,12 +215,18 @@ def executer():
             return r.returncode
 
     for c in CANDIDATS:
-        print(f"=== {c['alias']} (bras={BRAS})")
-        r = subprocess.run(["outils/qualite.sh", c["alias"], BRAS], cwd=RACINE, env=_env())
-        if r.returncode != 0:
-            print(f"FAUX sur {c['alias']} (rc={r.returncode}) — arrêt, pas de suite en aveugle", file=sys.stderr)
-            return r.returncode
-    print("TENU sur les 3 modèles")
+        # qualite.sh attend le nom du DOSSIER de référence (et le chemin sous
+        # racine_modeles()), pas l'alias GUI config.toml — les deux diffèrent
+        # (ex. "acvram-qwen3-coder-30b-a3b-qkvo-i8c-nvfp4" vs le dossier
+        # "Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c") ; confondus une première fois, corrigé.
+        print(f"=== {c['ref_dossier']} (bras={BRAS})")
+        rc, manquantes, ppl_ok = _executer_qualite(c["ref_dossier"])
+        if rc != 0 or manquantes or not ppl_ok:
+            detail = f"résultats manquants : {', '.join(manquantes)}" if manquantes else (
+                "PPL non tenue malgré rc=0" if not ppl_ok else f"rc={rc}")
+            print(f"FAUX sur {c['ref_dossier']} ({detail}) — arrêt, pas de suite en aveugle", file=sys.stderr)
+            return rc if rc != 0 else 67
+    print("TENU sur les 3 modèles (12/12 résultats confirmés)")
     return 0
 
 

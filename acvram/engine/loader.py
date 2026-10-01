@@ -944,6 +944,33 @@ def load_model(path: str, plan: Optional[Plan] = None,
             elif hasattr(m, "fuse") and type(m).__name__ == "GatedDeltaNet":
                 m.fuse()
 
+    # aym (30/09, edz définitif : 18 alias qwen3-coder-30b-a3b / qwen3-vl-30b-a3b à 29 096-32 768 morts au démarrage) :
+    # les piles d experts et leur repack Marlin se construisaient APRÈS le KV — dans `GraphRunner._eligible`
+    # (graphs.py:473) ou avant la chauffe (ya1, contexte.py) —, quand le budget KV avait déjà rempli la carte jusqu à la
+    # marge : pile empilée + copie Marlin + concaténation w13 d une couche ne tenaient plus (OOM dans
+    # `_construire_marlin` à 48 Mio libres, ou 11 couches sur 48 en boucle par expert puis chauffe à 0 jeton). Le plan
+    # compte déjà la pile en régime établi (loader `_reserve_prefill` : Σ × 1, la Marlin REMPLACE la naturelle) ; seul le
+    # transitoire manquait. Construites ici, KV encore libre, comme les fusions ci-dessus : mêmes piles, même sortie,
+    # seul le moment change. ACVRAM_PILES_AU_CHARGEMENT=0 : témoin (construction d avant, paresseuse).
+    if a_allouer and os.environ.get("ACVRAM_PILES_AU_CHARGEMENT", "1") != "0":
+        from .contexte import construire_piles_sur_carte
+        libre_avant = {d: torch.cuda.mem_get_info(d)[0] for d in {c.device for c in layers}
+                       if torch.device(d).type == "cuda"} if torch.cuda.is_available() else {}
+        n_piles = construire_piles_sur_carte(layers)
+        if n_piles:
+            # le coût NET des piles en régime établi (la Marlin remplace la naturelle : attendu ≈ 0), dit au journal —
+            # fenêtre du 30/09 : Coder-30B refusé ensuite à 6,04 Gio libres pour 6,90 Gio de KV planifié
+            if libre_avant:
+                torch.cuda.empty_cache()
+            # alloué ET réservé : un coût « net » qui serait du réservé non alloué = segments du bassin des petits blocs
+            # (2 Mio) épinglés par un petit tenseur survivant, pas des piles plus grosses (hypothèse de la pièce qui suit)
+            net = " ; ".join(f"{d} : {v / 2**30:.2f} → {torch.cuda.mem_get_info(d)[0] / 2**30:.2f} Gio libres, "
+                             f"alloué {torch.cuda.memory_allocated(d) / 2**30:.2f}, réservé {torch.cuda.memory_reserved(d) / 2**30:.2f}, "
+                             f"petits blocs {_petits_blocs(d)}"
+                             for d, v in libre_avant.items())
+            print(f"[acvram] piles d experts construites au chargement, avant le KV : {n_piles} couches"
+                  + (f" ({net})" if net else ""), flush=True)
+
     # Chaque empilement alloue son tenseur concatene avant de liberer les deux
     # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent
     # dans le cache de l'allocateur, a des tailles qui ne correspondent plus a
@@ -2033,6 +2060,14 @@ _DENSE_SLOTS = int(os.environ.get("ACVRAM_DENSE_SLOTS", "4"))
 
 _SUFFIXES_DOUBLES = {"mlp.gate_up": (".mlp.gate_proj.weight", ".mlp.up_proj.weight"),
                      "mlp.down": (".mlp.down_proj.weight",), "gdn.out": (".linear_attn.out.weight",)}
+
+
+def _petits_blocs(d) -> str:
+    """« réservé/alloué Gio » du bassin des petits blocs (< 1 Mio, segments de 2 Mio) de l allocateur : un expert de
+    Coder-30B (768 × 2 048 nvfp4 = 0,75 Mio) y vit ; un segment n est rendu que vide."""
+    st = torch.cuda.memory_stats(d)
+    return (f"{st.get('reserved_bytes.small_pool.current', 0) / 2**30:.2f}/"
+            f"{st.get('allocated_bytes.small_pool.current', 0) / 2**30:.2f}")
 
 
 def _octets_marlin(manifest: dict) -> int:

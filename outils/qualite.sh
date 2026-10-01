@@ -19,6 +19,7 @@ cd "$(dirname "$0")/.."
 AL=$1; BRAS=$2
 REF=$HOME/.cache/acvram/qualite-275/$AL
 [ -d "$REF" ] || { echo "REFUS : pas de référence pour $AL sous $REF — générer d'abord (scratchpad/poste2-p275-26-09/generer-reference-v2.sh)"; exit 66; }
+outils/verifier-reference-275.sh "$AL"
 
 SEUIL_PPL=0.01  # ± 1 %, REGLES (convention PPL du dépôt)
 D=$(mktemp -d)

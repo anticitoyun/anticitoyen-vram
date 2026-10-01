@@ -39,6 +39,12 @@ _GDN_VOIE = os.environ.get("ACVRAM_GDN", "fla")
 # final DANS le tampon statique au lieu d'en allouer un puis de le recopier
 # (25 Mo par couche à b=8 sur Qwen3.8). Au bit : voir `_recurrence_en_place`.
 _GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
+# I5 (30/09, opt-in tant que non mesuré) : récurrence en place par `gdn_tuiles` — J tuiles de valeurs par programme au
+# lieu d'une, corps de fla recopié ; même suite d'instructions flottantes que fla (PTX sm_120 comparé à sec), égalité
+# au bit vérifiée sur carte par tests/test_gdn_tuiles_au_bit.py. 0 = fla (défaut) ; 2 ou 4 = J.
+_GDN_TUILES = int(os.environ.get("ACVRAM_GDN_TUILES", "0"))
+if _GDN_TUILES not in (0, 1, 2, 4, 8, 16):
+    raise ValueError(f"ACVRAM_GDN_TUILES={_GDN_TUILES} : 0 (fla), 1, 2, 4, 8 ou 16 (diviseur des 16 tuiles de V=128)")
 # Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
 # bit (`gdn_conv.py`) ; q/k sans répétition des têtes (fla les indexe).
 _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
@@ -122,7 +128,7 @@ def gdn_regime() -> str:
         return "torch(fla absent)"
     if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
         return "torch(sans carte)"
-    return "fla" + _ab_texte()
+    return "fla" + (f" tuiles={_GDN_TUILES}" if _GDN_TUILES else "") + _ab_texte()
 
 
 def _ab_texte() -> str:
@@ -572,7 +578,11 @@ class GatedDeltaNet(nn.Module):
             q, k, v, g, beta, z = self._lot_projete(h, conv_state)
         # F4 (156 c) : la récurrence en place est un noyau de carte ; sur processeur (CI publique,
         # machine sans GPU) le chemin fla de référence reste seul valable.
-        if en_place:
+        if en_place and _GDN_TUILES:
+            from .gdn_tuiles import recurrence_tuiles
+            core = (recurrence_tuiles(q, k, v, g, beta, S, self.a_log, self.dt_bias, J=_GDN_TUILES) if brutes
+                    else recurrence_tuiles(q, k, v, g, beta, S, J=_GDN_TUILES))
+        elif en_place:
             core = (_recurrence_en_place(q, k, v, g, beta, S, self.a_log, self.dt_bias) if brutes
                     else _recurrence_en_place(q, k, v, g, beta, S))
         else:

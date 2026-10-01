@@ -166,11 +166,24 @@ def main() -> int:
         dossier = ""
         # dossier depuis le TSV du bon moteur (déjà lu pour ctx via chemins)
         ancienne = par_alias.get(alias, [alias, "", "", "", ""])
-        vedette = len(ancienne) > 4 and ancienne[4].lstrip().startswith("≈")
+        ancien_usage = ancienne[4].lstrip() if len(ancienne) > 4 else ""
+        # pièce tri/filtres (30/09) : la marque vedette ne survit qu'à UN passage si on ne
+        # teste que le préfixe « ≈ » — cette même fonction écrit « vedette » en DERNIER mot
+        # du vocabulaire (ordre VOCAB), jamais en préfixe ; un second passage sur sa propre
+        # sortie perdait donc la marque. Testée aussi comme mot du vocabulaire, elle se
+        # maintient d'un passage à l'autre.
+        vedette = ancien_usage.startswith("≈") or "vedette" in ancien_usage.split(" · ")
         readme = _readme_local(dossier)
         tags, preuves = deriver_usage(alias, model, ctx.get(alias, 0),
                                       vision.get(alias, ""), readme, vedette)
-        nouvelles[alias] = " · ".join(tags)
+        # score banc-outils (« outils N/M », « agent-ok », « agent-non ») : hors du
+        # vocabulaire fermé, donc jamais reconstruit par deriver_usage — un passage qui ne
+        # le recopierait pas l'effacerait silencieusement à la prochaine régénération
+        # automatique (modeles-a-jour), rejouant la même perte que la vedette ci-dessus.
+        score_outils = re.search(r"(?:outils\s+\d+\s*/\s*\d+|\d+\s*/\s*\d+\s+aux outils|"
+                                 r"agent-ok|agent-non)", ancien_usage)
+        suffixe = f" · {score_outils.group(0)}" if score_outils else ""
+        nouvelles[alias] = " · ".join(tags) + suffixe
         for t, src, ext in preuves:
             sources.append(f"{alias}\t{t}\t{src}\t{ext}")
 

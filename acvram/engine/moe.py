@@ -343,15 +343,68 @@ class MoEBlock(nn.Module):
         self._stacks = piles
         self._stacks_awq = awq
         self._raison_marlin = ""
-        self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
+        try:
+            self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
+        except torch.OutOfMemoryError:
+            # aym : le repack (seconde copie + w13) n était pas sous la garde de la pile naturelle ci-dessus — le
+            # serveur mourait (edz 30/09, 15 alias Coder-30B). Refus nommé, pile naturelle gardée : le chemin d avant,
+            # celui d une couche refusée pour ses sous-normales
+            self._stacks_marlin = None
+            self._raison_marlin = "mémoire GPU insuffisante pendant le repack Marlin"
+            # pas d empty_cache ICI : la trace de l exception tient encore les copies partielles ; le rendu au
+            # pilote se fait en sortie (`_rendre_le_cache_apres_la_pile`)
+            if not getattr(MoEBlock, "_marlin_oom_dit", False):
+                MoEBlock._marlin_oom_dit = True
+                print(f"[acvram] disposition Marlin refusée : {self._raison_marlin} — pile naturelle gardée, "
+                      "prefill « groupe », décodage d'avant", flush=True)
         self._tensor_refus = self._raison_tensor()              # pièce 65 : "" = chemin tensor pris en charge
         if self._stacks_marlin is not None:
             if _DOUBLE_DIAG:
                 self.__dict__["experts_layout"] = "double(diag)"
             else:
                 self._liberer_pile_naturelle()
+        self._compacter_survivants()
         self._rendre_le_cache_apres_la_pile()
         return True
+
+    def _compacter_survivants(self, sur_cpu: bool = False) -> int:
+        """5v7 (30/09) : sur Coder-30B, les piles « coûtaient » 4,58 Gio nets (10,62 → 6,04 Gio libres) que le plan
+        ne compte pas — le code ne garde pourtant aucune seconde copie. Un expert (768 × 2 048 nvfp4 : 0,75 Mio) vit
+        dans le bassin des PETITS blocs de l allocateur (segments de 2 Mio, rendus au pilote seulement vides) aux
+        côtés de petits tenseurs qui survivent à la pile : échelles AWQ par expert (`ChannelScaler.scale`) et
+        `global_scale` des couches restées en pile naturelle. Chacun épingle son segment : réservé, non alloué,
+        invisible au plan. On les regroupe ici en UN tampon par (appareil, dtype), par vues — mêmes valeurs, même
+        sortie — AVANT `_rendre_le_cache_apres_la_pile`, qui rend alors les segments vidés. Rend le nombre de
+        tenseurs regroupés. ``ACVRAM_PILES_COMPACTER=0`` : témoin (survivants laissés en place)."""
+        if os.environ.get("ACVRAM_PILES_COMPACTER", "1") == "0":
+            return 0
+        from ..quant.calibrate import ChannelScaler
+        groupes: dict = {}
+        for e in self.experts:
+            for nom in self._noms_experts():
+                lin = getattr(e, nom, None)
+                if lin is None:
+                    continue
+                sc = getattr(lin, "scaler", None)
+                t = getattr(lin, "qweight", None)
+                for obj, attr in ((sc, "scale"), (t, "global_scale"), (t, "global_scale_rows")):
+                    x = getattr(obj, attr, None) if obj is not None else None
+                    if isinstance(x, torch.Tensor) and (x.is_cuda or sur_cpu) and x.numel():
+                        groupes.setdefault((x.device, x.dtype), []).append((obj, attr, x))
+        n = 0
+        for refs in groupes.values():
+            if len(refs) < 2:
+                continue
+            tampon = torch.cat([x.reshape(-1) for _, _, x in refs])
+            debut = 0
+            for obj, attr, x in refs:
+                vue = tampon[debut:debut + x.numel()].view(x.shape)
+                debut += x.numel()
+                if isinstance(obj, ChannelScaler):
+                    obj.__dict__.pop("_cache_dtype", None)      # une conversion en cache garderait l ancienne adresse
+                setattr(obj, attr, vue)
+                n += 1
+        return n
 
     @staticmethod
     def _rendre_le_cache_apres_la_pile() -> None:
