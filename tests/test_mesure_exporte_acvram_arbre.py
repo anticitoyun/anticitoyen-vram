@@ -5,15 +5,24 @@ passer en silence. Le trou réel (poste1, 01/10, `outils/gpu/mesure/ppl-balayage
 venv principal éditable, lancé depuis un worktree dont le cwd n'est pas l'arbre, importe
 l'acvram de l'arbre PRINCIPAL sans qu'aucune garde ne le signale.
 
-Correctif : `outils/carte.sh` (aux six points où il lance la commande) et chaque script de
+Correctif (v1) : `outils/carte.sh` (aux six points où il lance la commande) et chaque script de
 `outils/gpu/mesure/*.sh` qui lance python exportent `ACVRAM_ARBRE="${ACVRAM_ARBRE:-<leur arbre>}"`
 — jamais d'écrasement si la chaîne appelante (ABBA à deux arbres) l'a déjà posée.
 
-Ce test est cassant : il rejoue le VRAI piège (cwd hors de tout arbre, interpréteur d'un AUTRE
-arbre acvram réel sur ce poste) à travers `outils/carte.sh`, et exige le refus (rc ≠ 0,
-« ACVRAM_ARBRE demande » sur stderr). Avant le correctif de cette pièce, `outils/carte.sh`
-n'exportait pas `ACVRAM_ARBRE` et ce même test passait l'import EN SILENCE (vérifié par retrait
-du correctif, voir le verdict)."""
+Correctif (v2, chef après relecture) : `<leur arbre>` fixé au dépôt qui PORTE le script cassait
+un usage réel — des scripts appellent le carte.sh d'un AUTRE arbre depuis leur propre worktree
+(`scratchpad/poste1-p221-25-09/chaine.sh:5`, `~/.config/acvram/chef/fenetre-g2c.sh`) : avec
+`ACVRAM_ARBRE=$DEPOT` fixe, le cwd de l'appelant (son propre worktree) ne correspond plus à
+l'arbre importé, et l'import est refusé À TORT (refus bruyant, jamais un faux positif silencieux,
+mais l'usage casse). `outils/arbre-defaut.sh:_acvram_arbre_defaut` reproduit la remontée de
+`_garde_arbre` : l'arbre qui CONTIENT le cwd prime, `$DEPOT` (l'arbre qui porte le script)
+seulement si le cwd n'est dans aucun arbre.
+
+Deux tests cassants : (1) cwd hors de tout arbre + interpréteur d'un AUTRE arbre réel → refus
+(piège d'origine, toujours valide : repli sur $DEPOT) ; (2) `carte.sh` de CE dépôt appelé avec un
+cwd dans l'arbre PRINCIPAL réel → importe le PRINCIPAL, PAS refusé (piège v2 : l'arbre du cwd
+doit primer sur $DEPOT). Avant le correctif v1, (1) passait l'import EN SILENCE ; avant le
+correctif v2, (2) était refusé À TORT (vérifié par retrait, voir le verdict)."""
 import os
 import re
 import pathlib
@@ -54,6 +63,26 @@ def test_carte_sh_refuse_un_acvram_dune_autre_racine(tmp_path):
     assert r.returncode != 0, f"import accepté en silence : {r.stdout!r} {r.stderr!r}"
     assert "ACVRAM_ARBRE demande" in r.stderr, r.stderr
     assert "IMPORT OK" not in r.stdout
+
+
+@pytest.mark.skipif(not AUTRE_PY.is_file(), reason="venv principal absent sur ce poste")
+def test_carte_sh_dun_arbre_importe_lacvram_du_cwd_dans_un_autre_arbre(tmp_path):
+    """Piège v2 (chef) : `outils/carte.sh` DE CE DÉPÔT, cwd dans l'arbre PRINCIPAL réel —
+    l'arbre du cwd doit primer sur $DEPOT (le dépôt qui porte ce carte.sh) : import accepté,
+    acvram importé depuis l'arbre PRINCIPAL, jamais refusé."""
+    if AUTRE_ARBRE.resolve() == RACINE.resolve():
+        pytest.skip("ce test tourne déjà dans l'arbre principal — rien à opposer")
+    verrou = tmp_path / "acvram-carte-0.lock"
+    env = {k: v for k, v in os.environ.items()
+          if k not in ("ACVRAM_CARTE_TENUE", "ACVRAM_VERROU", "ACVRAM_CARTE", "ACVRAM_CPUS",
+                       "ACVRAM_ARBRE", "PYTHONPATH")}
+    env.update(ACVRAM_VERROU=str(verrou), CUDA_VISIBLE_DEVICES="")
+    r = subprocess.run(
+        ["bash", str(CARTE), str(AUTRE_PY), "-c",
+         "import acvram, os; print('IMPORT', os.path.dirname(os.path.dirname(acvram.__file__)))"],
+        cwd=str(AUTRE_ARBRE), env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"refusé à tort (cwd dans l'arbre principal) : {r.stderr}"
+    assert f"IMPORT {AUTRE_ARBRE}" in r.stdout, r.stdout
 
 
 def test_le_controle_peut_rendre_faux(tmp_path):

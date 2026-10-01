@@ -10,7 +10,8 @@ ARBRE=$(cd "$ICI/../../.." && pwd)
 [ "$(git -C "$ARBRE" rev-parse HEAD)" = "${ATTENDU:?ATTENDU = HEAD figé}" ] || { echo "ÉCHEC : HEAD ≠ ATTENDU"; exit 65; }
 PY=${PY_ACVRAM:-$HOME/Bureau/Claude/anticitoyen-vram/.venv/bin/python}
 export ACVRAM_MODELE_MESURE=${ACVRAM_MODELE_MESURE:-/mnt/AI_GENERATOR/models_acvram/Kimi-Linear-35B-kda-nvfp4}
-export CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$ARBRE" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$ARBRE}"
+. "$ARBRE/outils/arbre-defaut.sh"
+export CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$ARBRE" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$(_acvram_arbre_defaut "$ARBRE")}"
 O=${SORTIE:-$ARBRE/scratchpad/poste1-p81-nsys-$(date +%d-%m)}
 mkdir -p "$O"
 echo "[p81] $ACVRAM_MODELE_MESURE · HEAD $ATTENDU · sortie $O"

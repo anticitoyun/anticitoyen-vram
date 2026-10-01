@@ -9,7 +9,8 @@ ALIAS="${1:-acvram-gemma-4-31b-it-nvfp4-4sur6-vision-nvfp4}"; CTX="${2:-32768}"
 COMMIT_ATTENDU="${COMMIT_ATTENDU:-}"; PORT="${PORT:-8093}"
 PY="${PY:-$HOME/Bureau/Claude/anticitoyen-vram/.venv/bin/python}"
 SORTIE="${SORTIE:-$DEPOT/scratchpad/poste6-kv31b-carte-$(date +%Y%m%d-%H%M)}"; mkdir -p "$SORTIE"
-export ACVRAM_POSTE="${ACVRAM_POSTE:-poste6}" ACVRAM_DUREE_MAX="${ACVRAM_DUREE_MAX:-900}" PYTHONPATH="$DEPOT" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}"
+. "$DEPOT/outils/arbre-defaut.sh"
+export ACVRAM_POSTE="${ACVRAM_POSTE:-poste6}" ACVRAM_DUREE_MAX="${ACVRAM_DUREE_MAX:-900}" PYTHONPATH="$DEPOT" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$(_acvram_arbre_defaut "$DEPOT")}"
 head=$(git -C "$DEPOT" rev-parse --short=9 HEAD)
 if [ -n "$COMMIT_ATTENDU" ] && [[ "$head" != "$COMMIT_ATTENDU"* ]]; then echo "ÉCHEC : HEAD $head ≠ $COMMIT_ATTENDU"; exit 2; fi
 dossier=$(grep "^$ALIAS	" "$HOME/TSV/acvram-chemins.tsv" | cut -f2); [ -d "$dossier" ] || { echo "ÉCHEC : alias $ALIAS inconnu"; exit 3; }

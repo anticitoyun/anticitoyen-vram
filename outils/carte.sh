@@ -26,6 +26,12 @@ set -u
 # ici pour tout ce que ce script lance, sauf si deja posee (ABBA a deux arbres : chaque bras
 # fixe la sienne avant d'appeler carte.sh).
 DEPOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$(dirname "${BASH_SOURCE[0]}")/arbre-defaut.sh"
+# chef (01/10) : PAS $DEPOT en premier — un appelant qui invoque le carte.sh d'un AUTRE arbre
+# depuis son propre worktree (scratchpad/poste1-p221/chaine.sh:5, fenetre-g2c.sh) casserait sinon
+# : son cwd reste dans SON arbre, jamais celui qui porte ce carte.sh. L'arbre du cwd prime,
+# $DEPOT seulement si le cwd n'est dans aucun arbre acvram.
+ACVRAM_ARBRE="${ACVRAM_ARBRE:-$(_acvram_arbre_defaut "$DEPOT")}"
 # anticitoyen-vram-6it (24/09, ordre chef) : file FIFO pour l'attente —
 # `flock` seul ne garantit pas l'ordre d'arrivee entre plusieurs attendeurs
 # (une attente longue affamee par un flux de prises courtes plus recentes).
@@ -295,9 +301,9 @@ if [ "$TYPE" = partage ]; then
   # sans jamais toucher la commande — orphelin (« carte.sh sleep N ») reparente
   # a init/systemd. Meme remede que la classe mesure (setsid + _244_signal).
   if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
-    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="$ACVRAM_ARBRE" taskset -c "$ACVRAM_CPUS" "$@" 8>&- &
   else
-    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}" "$@" 8>&- &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="$ACVRAM_ARBRE" "$@" 8>&- &
   fi
   _fils=$!
   trap '_244_signal 15' TERM
@@ -437,9 +443,9 @@ if [ "$TYPE" = service ]; then
     done < "$INFO"
   fi
   if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
-    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}" taskset -c "$ACVRAM_CPUS" "$@" >> "$_log" 2>&1 < /dev/null 7>&- &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="$ACVRAM_ARBRE" taskset -c "$ACVRAM_CPUS" "$@" >> "$_log" 2>&1 < /dev/null 7>&- &
   else
-    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}" "$@" >> "$_log" 2>&1 < /dev/null 7>&- &
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="$ACVRAM_ARBRE" "$@" >> "$_log" 2>&1 < /dev/null 7>&- &
   fi
   _srv=$!
   # Une ligne par service vivant : on garde celles des services encore en vie,
@@ -548,9 +554,9 @@ _TIMEOUT="$VERROU.timeout.$$"
 # sans dependre de `nvidia-smi` (le reaper c7w ci-dessus ne voit que ce qui
 # touche deja le GPU — un pytest encore sur CPU lui echappe entierement).
 if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
-  setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- 9>&- &
+  setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="$ACVRAM_ARBRE" taskset -c "$ACVRAM_CPUS" "$@" 8>&- 9>&- &
 else
-  setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}" "$@" 8>&- 9>&- &
+  setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" ACVRAM_ARBRE="$ACVRAM_ARBRE" "$@" 8>&- 9>&- &
 fi
 _fils=$!
 # 5e champ, en plus du format 4 champs historique de $INFO (lu par qui_tient()

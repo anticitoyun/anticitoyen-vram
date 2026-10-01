@@ -50,4 +50,28 @@ de `ACVRAM_ARBRE=`.
 16/16 verts (ce fichier + `test_garde_arbre.py`, `test_garde_arbre_276f.py`,
 `test_arbre_outils_mesure.py`, `test_carte_253_qui_absent_sans_bruit.py`, `test_carte_ticket_fifo.py`).
 
+## Correctif v2 (chef, après relecture) : l'arbre du cwd prime sur $DEPOT
+
+Fixer `ACVRAM_ARBRE=$DEPOT` (l'arbre qui PORTE le script) cassait un usage réel : des scripts
+appellent le `carte.sh` d'un AUTRE arbre depuis leur propre worktree
+(`scratchpad/poste1-p221-25-09/chaine.sh:5`, `~/.config/acvram/chef/fenetre-g2c.sh`) — avec
+`$DEPOT` fixe, le cwd de l'appelant (son propre worktree, un arbre acvram VALIDE) ne correspond
+plus à l'arbre imposé, et l'import est refusé À TORT (refus bruyant, jamais un faux positif
+silencieux, mais l'usage légitime casse).
+
+`outils/arbre-defaut.sh` (nouveau, sourcé par `carte.sh` et les 11 scripts) : fonction
+`_acvram_arbre_defaut <repli>` qui reproduit la remontée de `_garde_arbre` (même règle :
+`acvram/__init__.py` + `.git`) — l'arbre qui CONTIENT le cwd prime, `<repli>` (l'arbre qui porte
+le script) seulement si le cwd n'est dans aucun arbre acvram. `carte.sh` calcule
+`ACVRAM_ARBRE` une seule fois (évite de remonter le cwd à chaque site de lancement).
+
+**Tests ajoutés** : `test_carte_sh_dun_arbre_importe_lacvram_du_cwd_dans_un_autre_arbre` — le
+`carte.sh` DE CE DÉPÔT, cwd dans l'arbre PRINCIPAL réel, doit importer le PRINCIPAL (pas de
+refus). **Cassant vérifié** : `ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}"` (v1) remis temporairement
+dans `carte.sh` → ce test échoue EXACTEMENT comme prédit (« acvram importé depuis
+.../anticitoyen-vram alors que ACVRAM_ARBRE demande .../poste3-jdp ») ; v2 restauré, 17/17 verts
+(ce fichier + `test_garde_arbre.py`, `test_garde_arbre_276f.py`, `test_arbre_outils_mesure.py`,
+`test_carte_253_qui_absent_sans_bruit.py`, `test_carte_ticket_fifo.py`). Le test `/tmp` d'origine
+(piège v1) reste vérifié rouge sans aucun correctif, inchangé.
+
 verdict: acvram-memoire/revue/poste3-jdp-acvram-arbre-verdict-01-10.md — cause (précisée par chef) : la garde d'import 276 f existe déjà mais un cwd hors de tout arbre sans ACVRAM_ARBRE passe en silence ; corrigé en exportant ACVRAM_ARBRE dans carte.sh (6 points) et 11 scripts de outils/gpu/mesure/*.sh (serveur-bras.sh exclu, c'est un harnais générique) ; test cassant vérifié par git stash ; 16/16 verts sous CUDA_VISIBLE_DEVICES=""
