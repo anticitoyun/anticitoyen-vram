@@ -66,9 +66,10 @@ def test_le_refus_nomme_une_fenetre_exacte(monkeypatch, capsys):
     msg, p, spec, man, _ = _refus(monkeypatch, libre=int(28.1 * G))
     assert msg and "fenêtre qui tient : " in msg, msg
     n = int(msg.split("fenêtre qui tient : ")[1].split()[0])
-    # levier 1 : la fenêtre annoncée compte la réserve PLAFONNÉE (MLP par tranches de 4 096 à la relance) : 31 744 à
-    # 28,1 Gio libres (23 552 avec la réserve d'un seul tenant, chiffre du verdict kv31b avant le levier)
-    assert 28000 <= n <= 32767, n
+    # levier 1 : la fenêtre annoncée compte la réserve PLAFONNÉE (MLP par tranches de 4 096 à la relance) ; avec le terme
+    # d'attention de la réserve (preuve carte 30/09) : 25 600 à 28,1 Gio libres (31 744 avant le terme — que la chauffe
+    # démentait à 20 480 ; 23 552 avec la réserve d'un seul tenant)
+    assert 24576 <= n <= 26624, n
     assert f"[acvram] fenêtre qui tient : {n} jetons" in capsys.readouterr().err
     # exactitude : N tient, N + 1 024 ne tient pas — avec le plan tel qu'exilé au refus et la réserve plafonnée
     bornes = LD._borner_kv_par_la_vram(p, man, lambda nom: nom, reserve=0)

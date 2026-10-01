@@ -28,7 +28,9 @@ def _spec_70b():
 def test_l_estimation_donne_l_ordre_de_grandeur_du_70b_et_croit_avec_la_longueur():
     s = _spec_70b()
     a2k, a8k = s.activations_prefill_bytes(2048), s.activations_prefill_bytes(8192)
-    assert 0.9 * GIB < a2k < 1.5 * GIB, a2k / GIB
+    # kv31b (30/09) : + terme d'attention par blocs de lignes (64 têtes × 1 024 × 2 048 × 4 o = 0,5 Gio à 2 048, mesuré sur
+    # gemma-4-31B : la chauffe voyait 4,9 Gio là où la formule disait 2,7) → 1,65 Gio ; l'ordre de grandeur reste
+    assert 0.9 * GIB < a2k < 2.0 * GIB, a2k / GIB
     assert a8k > 2.5 * a2k
     assert s.activations_prefill_bytes(1) >= 28672 * 8192 * 2, "la déquant bf16 de la plus grosse projection y est"
     assert _reserve_prefill(s, 2048, {}) == a2k and _reserve_prefill(None, 2048, {}) == 0
