@@ -7,6 +7,7 @@ scellé : `poste6-s1-g9m-bf16-scelle-01-10.md` § (1), D1-D6
 mesuré : 3 prises (A1 avec requête rejouée, A2, B), 29-124 s chacune, 08:00:18-08:03:20 ; carte rendue 08:03:20
 verdict : **D1 TENU** (640 blocs, comme poste1 l'a prédit : lic corrigé) ; **D2 TENU** (A1 = A2 au bit, 352 valeurs) ; **D3 FAUX** : le témoin reprise en bf16 vaut **0,022** à la position 0 et change l'argmax (quasi-égalité −3,19/−3,15), pas ≤ 0,002 — relire des K/V bf16 EXACTS pour une seule ligne déplace déjà les logits de 0,02 : c'est le noyau (paginé pour la reprise, flash pour le seul tenant), pas le format ; **D4 FAUX à la lettre** : B/A1 bf16 = **0,0215** à la position 0 (seuil 0,01 ; alarme > 0,02 → « le noyau GPU domine »), ids 32/32 identiques, Δmax 0,042 sur 32 pas, top-10 10/10 ; **D5** : 0,0215 ≤ 2 × 0,022 = 0,045 → critère REGLES § 4 **TENU** ; **D6 TENU** (3 min 2 s)
 durée : 3 min 2 s de carte
+provenance du code (bd jdp, chef 01/10) : `PYTHONPATH=$DEPOT` = travail/poste6-menus (1ab2fffa0) exporté par le script, non retiré par carte.sh (import vérifié depuis /tmp) ; pas de ligne de chemin dans le journal Devstral, mais `blocs KV : 640` et `kv=bf16` exigent le lic d'poste1 (37f955f84), absent de l'arbre principal 3f10000bd (325 blocs sinon) — code du worktree prouvé
 
 ## Chiffres (Devstral, même invite, int8 du S1 bis contre bf16 d'aujourd'hui)
 | cache KV | témoin reprise (Δ pos 0 ; ids) | B/A1 (Δ pos 0 ; ids ; Δmax préfixe) | critère 2 × | cache servi |
