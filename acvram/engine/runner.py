@@ -700,7 +700,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # Hybrides à récurrence linéaire : l'état GDN vit par séquence, hors
         # du cache paginé ; le cache de préfixe n'aurait pas de sens (les
         # blocs KV ne suffisent pas à restaurer l'état), on le coupe.
-        self.est_hybride = bool(getattr(self.spec, "layer_types", None))
+        # g9m (01/10) : « hybride » = porte un état récurrent (linéaire, SSM, convolution), pas « a des layer_types » — gemma-3/4
+        # (sliding/full) n'en a aucun et, pris pour un hybride, plafonnait l'appariement du cache de préfixe à une frontière
+        # photographiée qui n'existe jamais (0 jeton servi), coupait son préfill à 256 et décodait sans lot spéculatif.
+        self.est_hybride = bool(getattr(self.spec, "couches_recurrentes", 0))
         # Tour de vision (multimodal P1) : None sans tour (manifeste
         # `vision: non`) ; alors toute image est refusée, nommément.
         from .. import regime as _regime
