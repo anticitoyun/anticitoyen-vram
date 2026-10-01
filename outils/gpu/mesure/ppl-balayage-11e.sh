@@ -26,7 +26,7 @@ PY="${PY:-$DEPOT/.venv/bin/python}"
 # poste1 01/10 : depuis un worktree figé, $DEPOT/.venv n'existe pas et le venv principal (éditable) importe acvram depuis
 # l'arbre PRINCIPAL — la conversion tournerait sur un autre commit que celui asserté, sans le dire. PYTHONPATH force
 # l'arbre mesuré, et verifier_tete refuse (rc 3) si l'acvram importé n'en vient pas.
-export PYTHONPATH="$DEPOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$DEPOT${PYTHONPATH:+:$PYTHONPATH}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$DEPOT}"
 export ACVRAM_POSTE="${ACVRAM_POSTE:?poste du mesureur}" ACVRAM_DUREE_MAX="${ACVRAM_DUREE_MAX:-1800}" CUDA_VISIBLE_DEVICES=0
 [ "$ACVRAM_POSTE" != poste6 ] || { echo "ÉCHEC : l'autrice de ScaleSweep ne mesure pas sa méthode (REGLES § 3)"; exit 5; }
 mkdir -p "$SORTIE"

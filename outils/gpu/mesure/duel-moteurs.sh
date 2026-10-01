@@ -14,6 +14,7 @@ G=/mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M/
 A=$("$(dirname "$0")/../../racine_modeles.py")/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
 RACINE=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/../../.." && pwd))
 PY=${ACVRAM_PY:-$RACINE/../../anticitoyen-vram/.venv/bin/python}
+export ACVRAM_ARBRE="${ACVRAM_ARBRE:-$RACINE}"
 CLE=llamacpp-9c1f4c1e6f2a4d0f
 ESSAIS=7
 CONC=${CONC:-1}

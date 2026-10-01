@@ -19,7 +19,7 @@ D=${2:-scratchpad/poste1-p48-ncu}
 [ "$(git rev-parse --short HEAD)" = "$ATTENDU" ] || {
   echo "REFUS : HEAD $(git rev-parse --short HEAD) != $ATTENDU" >&2; exit 65; }
 mkdir -p "$D"
-export PYTHONPATH=$PWD
+export PYTHONPATH=$PWD ACVRAM_ARBRE="${ACVRAM_ARBRE:-$PWD}"
 PY=$HOME/Bureau/Claude/anticitoyen-vram/.venv/bin/python
 # `ncu` n'est pas dans le PATH des sessions (CUDA hors PATH) : le premier jeu
 # de bras a rendu rc=127 quatre fois sans rien mesurer. Chemin explicite, et
