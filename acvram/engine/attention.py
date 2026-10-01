@@ -655,6 +655,12 @@ class Attention(nn.Module):
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
 
+# evp (gpt-oss) : constantes de la SwiGLU bornée, celles de transformers GptOssExperts (alpha 1,702, `swiglu_limit` 7 de
+# la config des deux gpt-oss ; une config qui en déclarerait une autre est refusée au chargement).
+_OSS_ALPHA = 1.702
+_OSS_LIMIT = 7.0
+
+
 class MLP(nn.Module):
     def __init__(self, gate: QuantLinear, up: QuantLinear, down: QuantLinear,
                  act: str = "silu") -> None:
@@ -664,6 +670,8 @@ class MLP(nn.Module):
         self.gate_up = None       # attribut d'instance : voir Attention.fuse
 
     def _act(self, g: torch.Tensor) -> torch.Tensor:
+        if self.act == "swiglu_oss":
+            raise RuntimeError("evp : swiglu_oss se calcule sur (g, u) ensemble — passer par _fusionner")
         if self.act in ("gelu_pytorch_tanh", "gelu_tanh"):
             return F.gelu(g, approximate="tanh")
         if self.act == "gelu":
@@ -678,6 +686,8 @@ class MLP(nn.Module):
         from .layers import (stack_int8_linears, stack_nvfp4_linears,
                              stack_int4_awq_linears, stack_plain_linears)
         paire = [self.gate_proj, self.up_proj]
+        if any(getattr(l, "bias", None) is not None for l in paire):
+            return False             # evp : les piles ne portent pas de biais ; gate et up restent deux projections
         self.gate_up = (stack_int8_linears(paire) or stack_nvfp4_linears(paire)
                         or stack_int4_awq_linears(paire)
                         or stack_plain_linears(paire))
@@ -725,6 +735,12 @@ class MLP(nn.Module):
             ext = kernels.get_extension()
             if ext is not None and hasattr(ext, "swiglu2_bf16"):
                 return ext.swiglu2_bf16(g, u)
+        if self.act == "swiglu_oss":
+            # evp : transformers GptOssExperts._apply_gate, même ordre et même dtype — porte bornée en haut à
+            # `limit`, up dans [−limit, limit], g·σ(α·g), (up + 1)·glu
+            g = g.clamp(max=_OSS_LIMIT)
+            u = u.clamp(min=-_OSS_LIMIT, max=_OSS_LIMIT)
+            return (u + 1) * (g * torch.sigmoid(g * _OSS_ALPHA))
         return self._act(g) * u
 
 

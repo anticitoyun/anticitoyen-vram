@@ -124,3 +124,68 @@ def test_puits_decodage_fixe_egal_au_chemin_variable():
     torch.testing.assert_close(decode_attention_puits_fixe(q, k, v, lens, torch.full((hq,), -1e4), hq // hkv,
                                                            d ** -0.5, window=w), sans, rtol=1e-5, atol=1e-6)
     assert (fixe - sans).abs().max() > 1e-2
+
+
+def _bloc_moe_depuis_hf(mlp_hf, top_k):
+    """MoEBlock acvram construit depuis un GptOssMLP de transformers : gate/up DÉSENTRELACÉS (colonnes paires/impaires
+    de gate_up_proj [E, h, 2I]), biais compris — la même transformation que fera le convertisseur."""
+    from acvram.engine.attention import MLP
+    from acvram.engine.layers import QuantLinear
+    from acvram.engine.moe import MoEBlock
+    from acvram.quant.formats import PlainTensor
+
+    def lin(w, b):
+        w = w.contiguous()
+        return QuantLinear(PlainTensor(w, tuple(w.shape), "bf16"), None if b is None else b.contiguous())
+    ex = mlp_hf.experts
+    experts = []
+    for e in range(ex.gate_up_proj.shape[0]):
+        w, b = ex.gate_up_proj[e].detach(), ex.gate_up_proj_bias[e].detach()
+        experts.append(MLP(lin(w[:, ::2].T, b[::2]), lin(w[:, 1::2].T, b[1::2]),
+                           lin(ex.down_proj[e].detach().T, ex.down_proj_bias[e].detach()), act="swiglu_oss"))
+    r = mlp_hf.router
+    return MoEBlock(lin(r.weight.detach(), r.bias.detach()), experts, top_k, norm_topk_prob=True)
+
+
+def test_moe_gpt_oss_contre_transformers():
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssMLP
+    torch.manual_seed(2)
+    cfg = _config_gpt_oss()
+    hf = GptOssMLP(cfg).float()
+    with torch.no_grad():
+        for p in hf.parameters():
+            p.normal_(0, 0.5)                      # biais et poids assez grands pour que la borne de 7 serve
+    bloc = _bloc_moe_depuis_hf(hf, cfg.num_experts_per_tok)
+    assert bloc.act == "swiglu_oss" and not bloc._try_build_stacks()
+    for t in (1, 7):
+        x = torch.randn(t, cfg.hidden_size)
+        ref = hf(x[None])
+        ref = (ref[0] if isinstance(ref, tuple) else ref)[0]
+        # fp32 des deux côtés ; seul l'ordre des sommes diffère (boucle par expert accumulée en fp32 ici)
+        torch.testing.assert_close(bloc(x), ref, rtol=1e-4, atol=1e-4)
+    # témoin : le biais du routeur compte (sans lui, d'autres experts sont choisis et la sortie s'écarte)
+    bloc.router.bias = torch.zeros_like(bloc.router.bias)
+    bloc.__dict__.pop("_router_w", None)
+    x = torch.randn(7, cfg.hidden_size)
+    ref = hf(x[None])
+    ref = (ref[0] if isinstance(ref, tuple) else ref)[0]
+    assert (bloc(x) - ref).abs().max() > 1e-2
+
+
+def test_swiglu_borne_contre_transformers_et_temoin():
+    """Activation seule, au bit de `GptOssExperts._apply_gate` (même ordre d'opérations) ; témoin : sans la borne
+    (limit infinie) la sortie diffère sur des portes > 7 — le test voit la borne."""
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
+    from acvram.engine import attention as A
+    torch.manual_seed(3)
+    ex = GptOssExperts(_config_gpt_oss())
+    gu = torch.randn(5, 2 * 128) * 6
+    ref = ex._apply_gate(gu)
+    mlp = A.MLP(None, None, None, act="swiglu_oss")
+    assert torch.equal(mlp._fusionner(gu[..., ::2], gu[..., 1::2]), ref)
+    lim = A._OSS_LIMIT
+    try:
+        A._OSS_LIMIT = float("inf")
+        assert not torch.equal(mlp._fusionner(gu[..., ::2], gu[..., 1::2]), ref)
+    finally:
+        A._OSS_LIMIT = lim
