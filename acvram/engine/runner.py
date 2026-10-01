@@ -2156,23 +2156,28 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             return self._plain_decode_pipeline(decodable)
         return self._plain_decode_sync(decodable)
 
-    def _nourrir_mtp_prefill(self, decodable: list[Sequence]) -> None:
+    def _nourrir_mtp_prefill(self, seq: Sequence) -> None:
         """Correctif chef (01/10, pièce mtp) : `_mtp_prefill` est écrit UNE fois au préfill
-        et jamais revu — tout pas simple qui suit avant le premier essai spéculatif fait
-        grandir `seq.all_ids` sans que `_mtp_prefill` suive, et `_amorcer()`
-        (speculative.py) échoue pour toujours dès que l'écart s'ouvre (piège trouvé le 01/10
-        sur acvram-qwen3.8-27b-nvfp4, essai instrumenté : décalage de 2 jamais isolé
-        précisément, mais ce correctif est valable quelle qu'en soit la cause).
+        et jamais revu — tout pas qui fait grandir `seq.all_ids` avant le premier essai
+        spéculatif réussi ouvre un écart que `_amorcer()` (speculative.py) ne rattrape
+        jamais. Posé en `_plain_decode_sync` une 1re fois (01/10), sans effet : le ou les pas
+        qui précèdent le premier essai spéculatif de nos séquences réelles ne passent pas
+        par cette fonction (graphe, repli de la garde, ou autre — pas isolé précisément,
+        chef : « ne cherche plus QUEL chemin »). Déplacé au point commun à TOUT chemin qui
+        émet un jeton : `_consommer`, juste après `seq.output_ids.append`.
 
-        Étend `_mtp_prefill` de la ligne de hidden que CE pas simple vient de produire
-        (`_garder_hidden`, déjà fait pour tout décodage) — seulement si ce pas porte une
-        seule séquence (MTP ne sert qu'une séquence à la fois) et que c'est la MÊME
-        séquence que celle du préfill courant (sinon on concaténerait l'état caché d'une
-        autre séquence à la suite, faux silencieux pire que l'échec actuel)."""
+        `model._mtp_hidden` est déjà à jour quel que soit le chemin qui vient de tourner —
+        eager (`_garder_hidden` appelée en Python), graphe rejoué (seul le `copy_` capturé
+        tourne, mais il écrit le MÊME tampon, `graphs.py:1188` le préalloue avant capture) ou
+        repli de la garde spéculative (`_plain_decode`, même mécanisme). Étend `_mtp_prefill`
+        de la ligne de hidden de CE pas — seulement si c'est la MÊME séquence que celle du
+        préfill courant (sinon on concaténerait l'état d'une autre séquence, faux silencieux
+        pire que l'échec actuel), et JAMAIS sur le tout premier jeton d'une séquence (celui du
+        préfill lui-même : sa ligne est déjà la dernière de `_mtp_prefill`, l'ajouter une
+        2e fois décalerait tout d'un cran)."""
         m = self.model
-        if m.mtp is None or m._mtp_prefill is None or len(decodable) != 1:
+        if m.mtp is None or m._mtp_prefill is None or len(seq.output_ids) <= 1:
             return
-        seq = decodable[0]
         if m._mtp_prefill_seq_id != seq.id:
             return
         h = getattr(m, "_mtp_hidden", None)
@@ -2203,7 +2208,6 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             logits = self.model(batch)
             voie = "eager"
         self.model._mtp_hidden_n = len(decodable)     # un rejeu ne pose rien en Python
-        self._nourrir_mtp_prefill(decodable)
         t2 = time.perf_counter()
         self.stats.decode_tokens += len(decodable)
         outs = self._emit(logits, decodable)
@@ -2458,6 +2462,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     logprob=None, top_logprobs=None))
                 continue
             seq.output_ids.append(int(tok))
+            self._nourrir_mtp_prefill(seq)
             seq.cumulative_logprob += float(lp)
             if not seq.first_token_at:
                 seq.first_token_at = time.time()

@@ -206,7 +206,15 @@ def test_engine_stats_releves_amorcage_et_mtp_prefill():
     assert d["mtp_prefill_releves"] == [{"evenement": "ecriture", "taille": 3}]
 
 
-# -- correctif C (01/10) : un pas simple nourrit _mtp_prefill ---------------
+# -- correctif C (01/10) : un pas qui émet un jeton nourrit _mtp_prefill ----
+# chef, 2e tour : posé d'abord dans _plain_decode_sync, SANS EFFET (ce
+# chemin n'est jamais emprunté avant le 1er essai spéculatif de nos vraies
+# séquences — graphe, repli de la garde, chemin non isolé précisément).
+# Déplacé au point commun à TOUT chemin qui émet un jeton : _consommer, juste
+# après seq.output_ids.append. `model._mtp_hidden` posé directement (sans
+# appeler `_garder_hidden`) simule un pas REJOUÉ SOUS GRAPHE : seul le
+# `copy_` capturé écrit ce tampon, aucun code Python ne tourne — le jouet
+# n'a donc pas besoin de distinguer eager/graphe, exactement le point voulu.
 
 def _modele_mtp_factice(prefill, prefill_seq_id, hidden, hidden_n):
     return types.SimpleNamespace(mtp=object(), _mtp_prefill=prefill, _mtp_prefill_seq_id=prefill_seq_id,
@@ -219,28 +227,30 @@ def _engine_nourrir(modele):
     return eng
 
 
-def test_nourrir_mtp_prefill_etend_meme_sequence():
-    h = torch.ones(1, 8) * 9.0
+def test_nourrir_mtp_prefill_etend_meme_sequence_pas_graphe():
+    h = torch.ones(1, 8) * 9.0   # posé directement : simule le tampon rempli par un rejeu de graphe
     m = _modele_mtp_factice(torch.zeros(78, 8), 15, h, 1)
     eng = _engine_nourrir(m)
-    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=15)])
+    eng._nourrir_mtp_prefill(_seq(seq_id=15, output_ids=[1, 2]))   # 2e jeton ou plus : pas le tout premier
     assert m._mtp_prefill.shape[0] == 79
     assert torch.equal(m._mtp_prefill[-1], h[0])
     assert m._mtp_prefill_releves[-1] == {"evenement": "extension_pas_simple", "taille": 79, "seq_ids": [15]}
 
 
-def test_nourrir_mtp_prefill_refuse_sequence_differente():
+def test_nourrir_mtp_prefill_refuse_premier_jeton_de_la_sequence():
+    """Le tout premier jeton (celui du préfill lui-même) ne doit PAS étendre : sa ligne est
+    déjà la dernière de _mtp_prefill, l'ajouter une 2e fois décalerait tout d'un cran."""
     m = _modele_mtp_factice(torch.zeros(78, 8), 15, torch.ones(1, 8), 1)
     eng = _engine_nourrir(m)
-    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=16)])   # autre séquence que le préfill courant
+    eng._nourrir_mtp_prefill(_seq(seq_id=15, output_ids=[1]))   # un seul jeton : le premier
     assert m._mtp_prefill.shape[0] == 78 and m._mtp_prefill_releves == []
 
 
-def test_nourrir_mtp_prefill_refuse_lot_a_plusieurs_sequences():
-    m = _modele_mtp_factice(torch.zeros(78, 8), 15, torch.ones(2, 8), 2)
+def test_nourrir_mtp_prefill_refuse_sequence_differente():
+    m = _modele_mtp_factice(torch.zeros(78, 8), 15, torch.ones(1, 8), 1)
     eng = _engine_nourrir(m)
-    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=15), types.SimpleNamespace(id=16)])
-    assert m._mtp_prefill.shape[0] == 78   # MTP ne sert qu'une séquence à la fois : rien à étendre à b>1
+    eng._nourrir_mtp_prefill(_seq(seq_id=16, output_ids=[1, 2]))   # autre séquence que le préfill courant
+    assert m._mtp_prefill.shape[0] == 78 and m._mtp_prefill_releves == []
 
 
 class _TeteFactice:
@@ -251,10 +261,10 @@ class _TeteFactice:
         return None
 
 
-def test_amorcage_reussit_apres_extension_dun_pas_simple():
+def test_amorcage_reussit_apres_extension_dun_pas_graphe():
     """Bout en bout (chef, après le décalage de 2 trouvé sur acvram-qwen3.8-27b-nvfp4) :
-    préfill suivi d'un pas simple, amorçage ensuite réussi — casse si _nourrir_mtp_prefill
-    disparaît ou cesse d'étendre."""
+    préfill suivi d'un pas (hidden posé sans _garder_hidden, comme un rejeu de graphe),
+    amorçage ensuite réussi — casse si _nourrir_mtp_prefill disparaît ou cesse d'étendre."""
     H = 8
     cache = types.SimpleNamespace(cfg=types.SimpleNamespace(num_blocks=8))
     modele = types.SimpleNamespace(mtp=_TeteFactice(cache), _mtp_prefill=torch.zeros(3, H),
@@ -262,8 +272,8 @@ def test_amorcage_reussit_apres_extension_dun_pas_simple():
                                    _mtp_prefill_releves=[], embed_tokens=torch.randn(10, H))
     p = MTPProposer(modele, max_model_len=4096)
     eng = _engine_nourrir(modele)
-    seq = _seq(ids=(1, 2, 3, 4, 5), seq_id=1)   # prompt de 3 jetons + 2 déjà générés : len(ids)-1=4 > 3
+    seq = _seq(ids=(1, 2, 3, 4, 5), seq_id=1, output_ids=[1, 2])   # prompt 3 + 2 générés : len(ids)-1=4 > 3
     assert p._amorcer(seq, _DraftState()) is False
-    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=1)])   # un pas simple nourrit le préfill
+    eng._nourrir_mtp_prefill(seq)   # le pas qui vient de produire le 2e jeton nourrit le préfill
     assert modele._mtp_prefill.shape[0] == 4
     assert p._amorcer(seq, _DraftState()) is True
