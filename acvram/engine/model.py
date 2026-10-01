@@ -126,6 +126,10 @@ class ACVRamModel(nn.Module):
         # concaténation) à chaque préfill — les 4 dernières tailles écrites, pour voir
         # si un préfill en plusieurs passes (frontière d'instantané, morceaux) l'écrase.
         self._mtp_prefill_releves: deque = deque(maxlen=4)
+        # chef (01/10, correctif C) : à quelle séquence appartient le _mtp_prefill actuel —
+        # sans ça, étendre à chaque pas simple (runner.py) risquerait de concaténer l'état
+        # caché d'une AUTRE séquence à la suite du préfill d'une précédente.
+        self._mtp_prefill_seq_id: Optional[int] = None
 
     @torch.inference_mode()
     def forward(self, batch: ForwardBatch, return_hidden: bool = False,
@@ -218,6 +222,8 @@ class ACVRamModel(nn.Module):
                 # propre cache : au prefill on garde tous les etats, pas
                 # seulement celui du dernier jeton.
                 self._mtp_prefill = etat.detach()
+                self._mtp_prefill_seq_id = (batch.seq_ids[0] if batch.seq_ids
+                                            and len(batch.seq_ids) == 1 else None)
                 self._mtp_prefill_releves.append({
                     "evenement": "ecriture", "taille": int(etat.shape[0]),
                     "seq_ids": list(batch.seq_ids) if batch.seq_ids is not None else None})

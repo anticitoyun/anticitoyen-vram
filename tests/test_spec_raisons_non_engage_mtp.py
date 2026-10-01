@@ -8,7 +8,7 @@ import types
 import torch
 
 from acvram.engine import runner as runner_mod
-from acvram.engine.speculative import MTPProposer, NGramProposer, Proposal
+from acvram.engine.speculative import MTPProposer, NGramProposer, Proposal, _DraftState
 from test_mla_glue_c15 import _jouet
 
 
@@ -204,3 +204,66 @@ def test_engine_stats_releves_amorcage_et_mtp_prefill():
     d = stats.to_dict()
     assert d["spec_amorcage_echecs"] == [{"cause": "prefill_absent"}]
     assert d["mtp_prefill_releves"] == [{"evenement": "ecriture", "taille": 3}]
+
+
+# -- correctif C (01/10) : un pas simple nourrit _mtp_prefill ---------------
+
+def _modele_mtp_factice(prefill, prefill_seq_id, hidden, hidden_n):
+    return types.SimpleNamespace(mtp=object(), _mtp_prefill=prefill, _mtp_prefill_seq_id=prefill_seq_id,
+                                 _mtp_hidden=hidden, _mtp_hidden_n=hidden_n, _mtp_prefill_releves=[])
+
+
+def _engine_nourrir(modele):
+    eng = types.SimpleNamespace(model=modele)
+    eng._nourrir_mtp_prefill = types.MethodType(runner_mod.Engine._nourrir_mtp_prefill, eng)
+    return eng
+
+
+def test_nourrir_mtp_prefill_etend_meme_sequence():
+    h = torch.ones(1, 8) * 9.0
+    m = _modele_mtp_factice(torch.zeros(78, 8), 15, h, 1)
+    eng = _engine_nourrir(m)
+    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=15)])
+    assert m._mtp_prefill.shape[0] == 79
+    assert torch.equal(m._mtp_prefill[-1], h[0])
+    assert m._mtp_prefill_releves[-1] == {"evenement": "extension_pas_simple", "taille": 79, "seq_ids": [15]}
+
+
+def test_nourrir_mtp_prefill_refuse_sequence_differente():
+    m = _modele_mtp_factice(torch.zeros(78, 8), 15, torch.ones(1, 8), 1)
+    eng = _engine_nourrir(m)
+    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=16)])   # autre séquence que le préfill courant
+    assert m._mtp_prefill.shape[0] == 78 and m._mtp_prefill_releves == []
+
+
+def test_nourrir_mtp_prefill_refuse_lot_a_plusieurs_sequences():
+    m = _modele_mtp_factice(torch.zeros(78, 8), 15, torch.ones(2, 8), 2)
+    eng = _engine_nourrir(m)
+    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=15), types.SimpleNamespace(id=16)])
+    assert m._mtp_prefill.shape[0] == 78   # MTP ne sert qu'une séquence à la fois : rien à étendre à b>1
+
+
+class _TeteFactice:
+    def __init__(self, cache):
+        self.cache = cache
+
+    def __call__(self, *a, **k):
+        return None
+
+
+def test_amorcage_reussit_apres_extension_dun_pas_simple():
+    """Bout en bout (chef, après le décalage de 2 trouvé sur acvram-qwen3.8-27b-nvfp4) :
+    préfill suivi d'un pas simple, amorçage ensuite réussi — casse si _nourrir_mtp_prefill
+    disparaît ou cesse d'étendre."""
+    H = 8
+    cache = types.SimpleNamespace(cfg=types.SimpleNamespace(num_blocks=8))
+    modele = types.SimpleNamespace(mtp=_TeteFactice(cache), _mtp_prefill=torch.zeros(3, H),
+                                   _mtp_prefill_seq_id=1, _mtp_hidden=torch.ones(1, H), _mtp_hidden_n=1,
+                                   _mtp_prefill_releves=[], embed_tokens=torch.randn(10, H))
+    p = MTPProposer(modele, max_model_len=4096)
+    eng = _engine_nourrir(modele)
+    seq = _seq(ids=(1, 2, 3, 4, 5), seq_id=1)   # prompt de 3 jetons + 2 déjà générés : len(ids)-1=4 > 3
+    assert p._amorcer(seq, _DraftState()) is False
+    eng._nourrir_mtp_prefill([types.SimpleNamespace(id=1)])   # un pas simple nourrit le préfill
+    assert modele._mtp_prefill.shape[0] == 4
+    assert p._amorcer(seq, _DraftState()) is True
