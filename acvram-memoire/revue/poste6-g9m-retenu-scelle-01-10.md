@@ -19,14 +19,17 @@ Reconstruit à sec sur les prises existantes (S1 bis coupé contre insta = sans 
 | R3 | témoin reprise APRÈS (reprise/A1) | court 0,10-0,20, ids 32/32 (0,144 ce matin) ; long 0,015-0,05, ids divergents au pas 2 (0,027) | court < 0,05 ou > 0,30 |
 | R4 | APRÈS A1 au bit avec le g9m du matin (158b86530) | court sha `d3449ae4b18ee762`, long `f34d6b5f6a7384b0` | autre sha : le moteur a changé ailleurs entre 158b86530 et 5d9ac10b8 — bissecter AVANT de lire R6 |
 | R5 | AVANT A1 au bit avec le S1 bis coupé | court `3750296adf4a7743`, long `67baf588c4616849` | autre sha |
-| R6 | équivalence APRÈS/AVANT (seul tenant, 1re requête) ≤ 2 × R3 | **court NON TENU** : ≈ 0,74 > ≈ 0,29, ids divergents ; **long tenu de justesse** : 0,031 ≤ 0,054 | court tenu (alors R4/R5 à relire) ; long non tenu si témoin long < 0,016 |
+| R6 | équivalence APRÈS / AVANT SANS COUPE (référence tranchée par chef, § ci-dessous : arbre témoin, ancien prédicat, `ACVRAM_INSTA_PAS=32768` repousse la frontière au-delà de l'invite, seul tenant, 1re requête) ≤ 2 × R3 | **au bit** (Δ 0, ids 32/32) en court comme en long — G6 du matin : g9m = insta au bit ; tenu a fortiori | Δ > 0 : phénomène lic dans le même commit, tenu si ≤ 2 × R3 ; NON TENU au-delà |
+| R6 bis | APRÈS / AVANT COUPÉ (ancienne sortie servie) — publié comme **changement de sortie attendu**, attribué à la référence lic (SDPA par blocs de clés : la passe coupée 7 936 + 17 n'est pas la passe dense) | court ≈ 0,74, ids divergents ; long ≈ 0,031 | court < 0,29 (dans le témoin : alors la coupe ne changeait rien et R4/R5 sont à relire) |
 | R7 | régime | AVANT `prefill=bf16(coupé@256)` ; APRÈS `prefill=bf16` sans coupe ; exil MLP égal entre bras d'une chaîne (8 court, 45 long) | exil différent : comparaison contaminée |
-| R8 | durée | ≤ 14 min (4 chargements, le premier 60-240 s) | > 18 |
+| R8 | durée | ≤ 20 min (6 chargements, le premier 60-240 s) | > 25 |
 
-Issue qui me gêne, nommée avant : **R6 court prédit NON TENU.** À la lettre de la règle 9, la sortie après correctif n'est pas « équivalente »
-à l'ancienne sortie servie. Ma lecture, à juger par chef : l'ancienne sortie est celle d'une passe coupée en deux (7 936 + 17 jetons) dont lic a
-montré qu'elle dépend de la longueur d'appel (SDPA par blocs de clés), et le témoin reprise lui-même (0,144) dit que gemma est loin de l'exactitude
-sur ce chemin ; la référence d'un modèle sans état récurrent est la passe dense, pas la passe coupée — mais c'est le chef qui choisit la référence.
+Issue nommée à la première écriture : contre l'ancienne sortie servie, R6 court était prédit NON TENU (0,74 > 0,29).
+**Décision chef (01/10, avant la prise, commit à part) : la référence est la passe dense non coupée.** La coupe à la frontière d'instantané
+était un artefact du mauvais prédicat, pas un comportement à préserver ; le Δ 0,737 avec/sans coupe est le phénomène lic (le SDPA dépend de la
+longueur totale des clés), pas une faute du correctif. R6 se juge donc contre un témoin SANS coupe, même commit (arbre témoin) et même passe ;
+l'écart entre l'avant coupé et l'après (R6 bis) est publié comme changement de sortie attendu, chiffré, attribué à lic. Deux prises de plus
+(avant sans coupe, court et long) : durée R8 portée à ≤ 20 min (6 chargements).
 Autres issues : R2 > 0 ⇒ diagnostic faux, tout s'arrête ; R4 faux ⇒ autre changement de moteur, bissection avant tout verdict ; exil ≠ ⇒ rejeu.
 
 ## (b) Débit b=12 ABBA — `scratchpad/poste6-g9m-retenu-b12.sh`
