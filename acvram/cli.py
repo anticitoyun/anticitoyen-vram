@@ -100,6 +100,7 @@ VARIABLES_LUES = {
     "ACVRAM_GDN_ETAT_EN_PLACE", # engine/gdn.py : 156 F4, état GDN mis à jour en place (défaut 1)
     "ACVRAM_GDN_AB",            # engine/gdn.py : 175, portes α‖β bf16 en un appel (auto défaut | separe témoin | concat | triton)
     "ACVRAM_GDN_CONV_FUSEE",    # engine/gdn.py : 156 F2, conv de décodage fusionnée (défaut 1)
+    "ACVRAM_GDN_TUILES",        # engine/gdn.py : I5, J tuiles par programme dans la récurrence GDN (opt-in, défaut 0, au bit)
     "ACVRAM_ADMISSION_FENETRE_MS",  # server/app.py : 179, fenêtre d'admission (défaut 5 ms, en rafale)
     "ACVRAM_ADMISSION_GUET",    # server/app.py : 269 b, porte de la fenêtre à 1 requête si une autre est entrée (opt-in, défaut 0)
     "ACVRAM_PREFILL_TRANCHES",  # engine/runner.py : 284 b, préfill par lot coupé à la frontière d'instantané des hybrides (défaut 1)
