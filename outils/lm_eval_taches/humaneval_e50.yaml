@@ -1,0 +1,29 @@
+# e50.3 § 7 (poste3, 01/10) — humaneval_e50 : lm-eval ne fait QUE générer et journaliser
+# (`--log_samples`, `--predict_only` côté qualite-e50.sh) ; AUCUNE métrique de ce fichier
+# n'exécute le code généré — pass@1 est calculé à part, par
+# `outils/qualite-e50-humaneval-score.py`, qui fait passer chaque complétion dans
+# `outils/bac-a-sable-humaneval.sh` (§ 2 bis). Choix fait plutôt que de patcher l'exécuteur
+# `unsafe_code` du paquet lm-eval (API interne non vérifiable ici : `.venv-panel` n'existe pas
+# sur ce poste, aucune prise) — même garantie (jamais nu), chemin qui ne dépend d'aucun détail
+# interne du paquet. `metric_list` reste vide à dessein : `exact_match`/`pass_at_k` natifs de
+# lm-eval appelleraient leur propre exécution non sandboxée (`confirm_run_unsafe_code`),
+# précisément ce que REGLES § 6 et la précision chef du 01/10 interdisent.
+task: humaneval_e50
+dataset_path: openai_humaneval
+output_type: generate_until
+test_split: test
+doc_to_text: "{{prompt}}"
+doc_to_target: "{{test}}"
+generation_kwargs:
+  until:
+    - "\nclass"
+    - "\ndef"
+    - "\nif __name__"
+    - "\nprint"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 512
+num_fewshot: 0
+metric_list: []
+metadata:
+  version: 1.0

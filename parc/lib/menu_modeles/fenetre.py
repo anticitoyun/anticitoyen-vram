@@ -379,6 +379,15 @@ class Fenetre(Adw.ApplicationWindow):
                 marques.append("génère images+vidéos")
             elif m.outils_etat == "non":
                 marques.append("sans outils")
+            # bd e50.1 : étiquettes dédiées, dérivées du nom (parc.py:deriver_capacites) —
+            # heretic et abliterated restent distincts l'un de l'autre, pas fondus dans un
+            # « sans-censure » générique qui les rendrait introuvables au filtre texte.
+            if "heretic" in m.capacites:
+                marques.append("heretic")
+            if "abliterated" in m.capacites:
+                marques.append("abliterated")
+            if "nsfw" in m.capacites:
+                marques.append("nsfw")
             lbl.set_text(" · ".join(marques))
             lbl.add_css_class("dim-label")
 
