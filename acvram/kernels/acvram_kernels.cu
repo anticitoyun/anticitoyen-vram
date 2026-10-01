@@ -6447,7 +6447,7 @@ torch::Tensor paged_attention_canal(torch::Tensor q, torch::Tensor kc,
 // 512 o entre fils voisins : 172 Go/s, ~11 % du plancher, nsys p81). Plus de
 // tableau row[D] en registres (255 registres et 48 o déversés) : deux passes
 // sur j croissant, la seconde recalcule s·e (le même produit, donc le même
-// arrondi) ; mêmes expressions qu'avant, dans le même ordre — sortie AU BIT du
+// arrondi) ; arrondis IMPOSÉS par intrinsèques, copiés du SASS du témoin — sortie AU BIT du
 // témoin `kda_decode_vk_kernel` (l'ancien noyau, état [D_i, D_j]),
 // tests/test_kda_etat_kv.py.
 // ============================================================================
@@ -6504,16 +6504,24 @@ __global__ void kda_decode_kernel(
     __syncthreads();
     const float beta = 1.f / (1.f + __expf(-__bfloat162float(beta_pre[h])));
 
+    // Arrondis IMPOSÉS par intrinsèques, copiés du SASS du témoin (contractions que nvcc y avait choisies) : la forme
+    // C seule ne les fixe pas. Écrit en « r = s·e ; r += d·sk », ce noyau contractait fma(s, e, d·sk) au lieu de
+    // fma(d, sk, s·e) : pas au bit (prise 61w du 01/10 08:44, SASS relu contre le témoin).
     float *scol = S + (size_t)h * D * D + i;              // S[h][j][i], j au pas D
     float pred = 0.f;
     #pragma unroll 16
-    for (int j = 0; j < D; ++j) { const float r = scol[(size_t)j * D] * se[j]; pred += r * sk[j]; }
-    const float d = beta * (v - pred);
+    for (int j = 0; j < D; ++j) {
+        const float r = __fmul_rn(scol[(size_t)j * D], se[j]);             // FMUL s·e
+        pred = __fmaf_rn(r, sk[j], pred);                                  // FFMA r·sk + pred
+    }
+    const float d = beta * (v - pred);    // le témoin fusionne la SiLU de v : FFMA acc·rcp − pred, puis FMUL β
     float o = 0.f;
     #pragma unroll 16
     for (int j = 0; j < D; ++j) {
-        float r = scol[(size_t)j * D] * se[j];
-        r += d * sk[j]; o += r * sq[j]; scol[(size_t)j * D] = r;
+        float r = __fmul_rn(scol[(size_t)j * D], se[j]);                   // même produit, même arrondi
+        r = __fmaf_rn(d, sk[j], r);                                        // FFMA d·sk + r (le témoin)
+        o = __fmaf_rn(r, sq[j], o);                                        // FFMA r·sq + o
+        scol[(size_t)j * D] = r;
     }
 
     const float ms = block_sum(o * o) / (float)D;
