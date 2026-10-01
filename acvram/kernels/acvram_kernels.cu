@@ -6507,9 +6507,7 @@ __global__ void kda_decode_kernel(
     // Arrondis IMPOSÉS par intrinsèques, copiés du SASS du témoin (contractions que nvcc y avait choisies) : la forme
     // C seule ne les fixe pas. Écrit en « r = s·e ; r += d·sk », ce noyau contractait fma(s, e, d·sk) au lieu de
     // fma(d, sk, s·e) : pas au bit (prise 61w du 01/10 08:44, SASS relu contre le témoin). À D=128 le témoin lui-même
-    // n'est pas homogène : 127 FFMA fma(d, sk, s·e) et une itération contractée fma(s, e, d·sk) (`FMUL.FTZ R32, R32,
-    // R204`, R204 = d) — non reproduite (décision chef 01/10) : état ≠ d'un arrondi sur cette ligne j, sortie
-    // identique (tests/test_kda_etat_kv.py::test_noyau_b1_d128_une_ligne_un_arrondi).
+    // n'est pas homogène (j = 0, voir plus bas) : reproduit.
     float *scol = S + (size_t)h * D * D + i;              // S[h][j][i], j au pas D
     float pred = 0.f;
     #pragma unroll 16
@@ -6519,8 +6517,24 @@ __global__ void kda_decode_kernel(
     }
     const float d = beta * (v - pred);    // le témoin fusionne la SiLU de v : FFMA acc·rcp − pred, puis FMUL β
     float o = 0.f;
+    {
+        // j = 0 détaché : à D=128, le SASS du témoin (nvcc 13, --use_fast_math, sm_120f ; extrait
+        // scratchpad/poste5-kda-01-10/kda_noyaux.cu → kda_rapide.sass, lignes 956-966 du noyau
+        // kda_decode_vk_kernel<128>) contracte CETTE itération autrement :
+        //     FMUL.FTZ R32, R32, R204          d·sk[0]          (R204 = d, R32 = sk[0..3] par LDS.128 [+0x200])
+        //     FFMA.FTZ R176, R176, R160, R32   s[0]·se[0] + d·sk[0]   (R176 = srow[0] par LDG, R160 = se[0])
+        //     FFMA.FTZ R160, R176, R160, RZ    o = r·sq[0] + 0
+        // — et toutes les autres en fma(d, sk, s·e). Reproduite à l'identique (décision chef 01/10 10:40 : au bit
+        // partout, REGLES § 9) ; à D=64 le témoin est homogène. tests/test_kda_etat_kv.py casse si cette branche saute.
+        const float s0 = scol[0];
+        float r;
+        if constexpr (D == 128) r = __fmaf_rn(s0, se[0], __fmul_rn(d, sk[0]));
+        else                    r = __fmaf_rn(d, sk[0], __fmul_rn(s0, se[0]));
+        o = __fmaf_rn(r, sq[0], o);
+        scol[0] = r;
+    }
     #pragma unroll 16
-    for (int j = 0; j < D; ++j) {
+    for (int j = 1; j < D; ++j) {
         float r = __fmul_rn(scol[(size_t)j * D], se[j]);                   // même produit, même arrondi
         r = __fmaf_rn(d, sk[j], r);                                        // FFMA d·sk + r (le témoin)
         o = __fmaf_rn(r, sq[j], o);                                        // FFMA r·sq + o
