@@ -177,6 +177,9 @@ else
     # cwd neutre : lancé depuis un arbre acvram, le paquet refuse l'import (garde d'arbre 276 f) — --version
     # rendait 1 et `set -e` tuait le lanceur sans un mot (t5e, 27/09) ; le service hérite du même cwd.
     cd /
+    # 01/10 (rafale e50.2) : carte.sh pose ACVRAM_ARBRE par défaut (bd jdp) et l'exporte au service ; le paquet
+    # n'est aucun arbre, sa garde d'import refusait donc tout lancement. Contournement nommé, au point de décision.
+    export ACVRAM_ARBRE_LIBRE=1
     # 1re ligne seule : --version imprime aussi la mention de soutien, qui coupait « source= » en deux
     SOURCE="paquet($("$ACVRAM_BIN" --version 2>/dev/null | awk 'NR==1{print $NF}'))"
 fi
