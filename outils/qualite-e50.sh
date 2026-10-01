@@ -10,12 +10,16 @@
 # `outils/qualite-e50-humaneval-score.py` sous bac à sable, § 2 bis), S et étoile
 # (`outils/qualite-e50-bareme.py`), écriture PAR `parc.py:ecrire_note` SEULEMENT (jamais une
 # autre écriture du TSV des fiches), ligne ajoutée à `outils/qualite-e50.tsv`. Requiert
-# `.venv-panel` (refus sinon, comme `panel-taches.sh`) et `--je-sais-que-la-carte-est-libre`.
+# un interprète lm-eval (refus sinon) et `--je-sais-que-la-carte-est-libre`. Interprète résolu
+# dans cet ordre (chef, 01/10) : `$ACVRAM_LMEVAL_PY`, puis `$DEPOT/.venv-panel/bin/python`
+# (emplacement réel attendu, `panel-taches.sh`), puis la copie figée temporaire de la campagne
+# 275 — même règle que `tests/test_qualite_e50_taches_chargent.py`, pour que ce test vérifie le
+# même lm-eval qu'une campagne réelle lancerait.
 #
-# NON EXERCÉ EN CONDITIONS RÉELLES À L'ÉCRITURE DE CETTE PIÈCE : `.venv-panel` n'existe pas sur
-# ce poste (aucune prise, aucun lm-eval installé) — seul `--simule` est vérifié par les tests de
-# cette pièce. `--executer` est écrit avec le même soin mais À VALIDER au premier essai réel
-# (poste2/poste1, campagne-qualite-e50.py, pièce suivante).
+# NON EXERCÉ EN CONDITIONS RÉELLES À L'ÉCRITURE DE CETTE PIÈCE : aucun `.venv-panel` sous ce
+# worktree (aucune prise, aucun lm-eval installé ICI) — seul `--simule` est vérifié par les
+# tests de cette pièce. `--executer` est écrit avec le même soin mais À VALIDER au premier
+# essai réel (poste2/poste1, campagne-qualite-e50.py, pièce suivante).
 #
 # Usage : outils/qualite-e50.sh <alias> [--executer --je-sais-que-la-carte-est-libre]
 set -euo pipefail
@@ -98,8 +102,22 @@ if [ "$MODE" = simule ]; then
 fi
 
 [ "$CONFIRME" = 1 ] || { echo "REFUS : --executer exige --je-sais-que-la-carte-est-libre (REGLES §3)" >&2; exit 65; }
-PY_PANEL="$ICI/.venv-panel/bin/python"
-[ -x "$PY_PANEL" ] || { echo "REFUS : $PY_PANEL absent — installer .venv-panel d'abord (voir outils/panel-taches.sh)" >&2; exit 66; }
+# Ordre de résolution (chef, 01/10, même règle que tests/test_qualite_e50_taches_chargent.py) :
+# $ACVRAM_LMEVAL_PY, puis $ICI/.venv-panel (emplacement réel attendu, panel-taches.sh), puis la
+# copie figée TEMPORAIRE de la campagne 275 — pour que le test de chargement vérifie le MÊME
+# interpréteur que celui que cette campagne lancerait réellement.
+PY_PANEL="${ACVRAM_LMEVAL_PY:-}"
+if [ -z "$PY_PANEL" ] && [ -x "$ICI/.venv-panel/bin/python" ]; then
+  PY_PANEL="$ICI/.venv-panel/bin/python"
+fi
+if [ -z "$PY_PANEL" ] && [ -x "$HOME/Bureau/Claude/travail/poste2-275-figee/.venv-panel/bin/python" ]; then
+  PY_PANEL="$HOME/Bureau/Claude/travail/poste2-275-figee/.venv-panel/bin/python"
+fi
+[ -n "$PY_PANEL" ] && [ -x "$PY_PANEL" ] || {
+  echo "REFUS : aucun interprète lm-eval trouvé (ACVRAM_LMEVAL_PY, $ICI/.venv-panel, ou la copie figée 275) — installer .venv-panel d'abord (voir outils/panel-taches.sh)" >&2
+  exit 66
+}
+echo "lm-eval : $PY_PANEL"
 
-echo "ÉCHEC : --executer n'est pas encore exercé sur ce poste (.venv-panel absent à l'écriture de cette pièce) — à compléter/valider à la première campagne réelle (poste2/poste1), voir le verdict e50.3 §7." >&2
+echo "ÉCHEC : --executer n'est pas encore exercé en conditions réelles (serveur acvram neuf + lm-eval de bout en bout) — à compléter/valider à la première campagne réelle (poste2/poste1), voir le verdict e50.3 §7." >&2
 exit 67
