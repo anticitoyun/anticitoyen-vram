@@ -18,6 +18,10 @@ export ACVRAM_PREFILL_MORCEAU="$MORCEAU" ACVRAM_SAMPLER_LENT=1
 head=$(git -C "$DEPOT" rev-parse --short=9 HEAD)
 if [ -n "$COMMIT_ATTENDU" ] && [[ "$head" != "$COMMIT_ATTENDU"* ]]; then echo "ÉCHEC : HEAD $head ≠ $COMMIT_ATTENDU"; exit 2; fi
 dossier=$(grep "^$ALIAS	" "$HOME/TSV/acvram-chemins.tsv" | cut -f2); [ -d "$dossier" ] || { echo "ÉCHEC : alias $ALIAS inconnu"; exit 3; }
+# bd jdp (01/10) : depuis un worktree, le venv principal peut importer l'acvram de l'arbre principal — on CONTRÔLE l'origine
+# avant toute prise (PYTHONPATH exporté ci-dessus), et on refuse (rc 6) si elle n'est pas sous $DEPOT ; la ligne va au journal.
+prov=$(CUDA_VISIBLE_DEVICES="" "$PY" -c 'import acvram; print(acvram.__file__)' 2>/dev/null)
+case "$prov" in "$DEPOT"/*) echo "# provenance acvram : $prov" ;; *) echo "ÉCHEC : acvram importé hors du worktree ($prov ≠ $DEPOT/…)"; exit 6 ;; esac
 # Invite figée par son objet git, jamais l'arbre : même texte pour les trois bras, quel que soit HEAD.
 : > "$SORTIE/invite.txt"
 for f in ${INVITE_FICHIERS:-README.md}; do     # contexte long (REGLES § 4) : INVITE_FICHIERS="README.md REPRISE.md", INVITE_SHA de la concaténation
