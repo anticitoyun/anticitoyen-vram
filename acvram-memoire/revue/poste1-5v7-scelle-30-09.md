@@ -60,3 +60,21 @@ Bras : Coder-30B qkvo-i8c à 16 384, serveur neuf, `--no-prefix-cache`, T=0, log
 * Un bras PAS SERVI ou une réponse vide → script arrêté (exit 1), aucun verdict au bit ; le témoin 0 à 16 384 devait tenir.
 * vrm (qwen3-vl-30b vision, 32 768, compaction 1) : prédit **SERT** (chauffe 32 768 tenue) si l'OOM de `vision.py:415`
   venait des segments épinglés (5v7) ; OOM de nouveau → cause distincte, vrm reste ouverte, à nommer.
+
+## Fenêtre du 01/10 03:38-03:41 (carte.sh `poste1-5v7-bit`, tenue 213 s, arbre 26e4c744d) : INVALIDE, défaut du script
+Sortie brute « DIFFÉRENT » et « vrm PAS SERVI » : ni l'une ni l'autre ne juge la compaction. `servir` mettait
+`cd && setsid … &` en fond : `$!` était le sous-shell bash, pas python. `stop` n'a donc jamais tué le serveur du bras 1
+(PID 1579, tué à la fin par carte.sh, ligne ORPHELIN du journal). Le bras 0 a refusé (`loader.py:1374`, budget KV 0,00 Gio,
+libre 3,1), `pret` a lu « coder » sur le serveur 1 encore vivant, et les 6 réponses viennent du MÊME serveur en compaction 1.
+La sonde vrm a refusé pour la même raison (6 118 Mio manquants). Preuve : `bit-coder-1.log` porte 3 lots de requêtes
+et les GET de la sonde qwen3vl.
+Observation de passage, pas un verdict : sur ce serveur et en ngram, 2e passage contre 1er = textes égaux 3/3, invites 2-3
+au bit, invite 1 découpée autrement (« -2 » contre « - »+« 2 ») avec 7/25 logprobs ≠ (max 0,60). Le ngram dépend de
+l'historique du serveur.
+
+## Addendum AVANT le rejeu (01/10, script corrigé et éprouvé à sec contre un faux serveur : égal, différent, port pris)
+`$!` = le serveur, arrêt par groupe, port 8095 vérifié libre avant chaque bras et après chaque arrêt. `--speculative none`
+(retire la dépendance à l'historique). Bras 1, 0, puis t = compaction 1 sur serveur neuf : c'est le témoin de
+reproductibilité. Lecture fixée ici : la prédiction reste AU BIT (1 = 0). Si 1 = t et 1 ≠ 0 : la compaction change la
+sortie, c'est un bogue et PILES_COMPACTER ne part pas en défaut. Si 1 ≠ t : l'instrument n'est pas reproductible et la
+comparaison 1 contre 0 ne juge rien. vrm : prédiction inchangée.
