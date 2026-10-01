@@ -6,6 +6,7 @@ barèmes de tri (rang_qualite, rang_refus). Les constantes de chemins et de
 moteurs viennent de `config` ; aucune circularité neuve (config n'importe pas
 parc).
 """
+import json
 import os
 import re
 import sys
@@ -77,6 +78,66 @@ def etiquette_vedette(alias):
     if alias in _VEDETTE_CODE_EXTRA or _VEDETTE_CODE.search(alias):
         return "code android/linux"
     return None
+
+
+# bd e50.1 (chef, 01/10) : chaque capacité vient d'une SOURCE précise, jamais inventée —
+# alias/nom pour heretic/abliterated/sans-censure/nsfw/coder (motifs repris d'usages-modeles.py
+# § _CENSURE, dupliqués à dessein : outils/ n'est pas embarqué dans le paquet parc) ; config.json
+# pour vision_config (image_in) et le jeton vidéo (video_in) ; chat_template de
+# tokenizer_config.json pour <think> (thinking) et les appels d'outils (tools). Avant cette
+# pièce, m.capacites venait SEULEMENT de config.toml (« capabilities », posée ailleurs, sparse :
+# 14 alias « thinking », 1 seul « video_in » pour 30 noms VL).
+_CAP_HERETIC = re.compile(r"heretic", re.I)
+_CAP_ABLITERATED = re.compile(r"abliterated|ablit[ée]rated|(?<![a-z])abl(?![a-z])", re.I)
+_CAP_SANS_CENSURE = re.compile(r"uncensored|d[ée]censur[ée]?", re.I)
+_CAP_NSFW = re.compile(r"nsfw|adult|(?<![a-z])18\+", re.I)
+_CAP_CODER = re.compile(r"coder|(?<![a-z])code(?![a-z])", re.I)
+
+
+def _lire_json_borne(chemin, limite=2_000_000):
+    """`None` si absent, illisible, ou trop gros (un config.json de modèle tient en quelques
+    Ko ; une taille hors norme est un signal d'erreur, pas un fichier à charger entier)."""
+    try:
+        if os.path.getsize(chemin) > limite:
+            return None
+        with open(chemin, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def deriver_capacites(alias, nom, dossier, vision_status, capabilities_toml=()):
+    """Tuple trié, dérivé des SOURCES ci-dessus, uni à `capabilities_toml` (ce que config.toml
+    affirme déjà — jamais perdu, seulement complété)."""
+    caps = {c for c in capabilities_toml if c}
+    texte = f"{alias} {nom or ''}".lower()
+    if _CAP_HERETIC.search(texte):
+        caps.add("heretic"); caps.add("sans-censure")
+    if _CAP_ABLITERATED.search(texte):
+        caps.add("abliterated"); caps.add("sans-censure")
+    if _CAP_SANS_CENSURE.search(texte):
+        caps.add("sans-censure")
+    if _CAP_NSFW.search(texte):
+        caps.add("nsfw")
+    if _CAP_CODER.search(texte):
+        caps.add("coder")
+    if vision_status == "vision":
+        caps.add("image_in")
+    if dossier:
+        cfg = _lire_json_borne(os.path.join(dossier, "config.json"))
+        if cfg:
+            if "vision_config" in cfg:
+                caps.add("image_in")
+            if any(k.startswith("video_") for k in cfg):
+                caps.add("video_in")
+        tok = _lire_json_borne(os.path.join(dossier, "tokenizer_config.json"))
+        if tok:
+            gabarit = (tok.get("chat_template") or "").lower()
+            if "<think>" in gabarit:
+                caps.add("thinking")
+            if "tool_call" in gabarit or "tools" in gabarit:
+                caps.add("tools")
+    return tuple(sorted(caps))
 
 
 class Modele(GObject.Object):
@@ -155,9 +216,9 @@ class Modele(GObject.Object):
         # doit pas sortir sur « vision ». « vl » et le reste restent substring libre.
         lisibles = []
         if "video_in" in self.capacites:
-            lisibles += ["voit vidéos"]
+            lisibles += ["voit vidéos", "vidéo"]
         if "thinking" in self.capacites:
-            lisibles += ["réflexion"]
+            lisibles += ["réflexion", "raisonnement"]
         if self.outils_etat == "ok":
             lisibles += ["génère images", "génère vidéos", "médias"]
         return " ".join([self.alias, self.usage or "", self.nom or "", self.qual or "",
@@ -267,9 +328,10 @@ def charger_parc():
             ctx_service = ligne[1] if len(ligne) > 1 else 0
         elif p == "rapide":
             ctx_service = 65536          # défaut de llamacpp-appoint, jamais surchargé
-        parc.append(Modele(alias, p, m.get("model", "?"), m.get("max_context_size", 0),
-                           n[0], n[1], n[2], n[3], dossier, ctx_service, gab,
-                           m.get("capabilities", []), vs))
+        nom_modele = m.get("model", "?")
+        caps = deriver_capacites(alias, nom_modele, dossier, vs, m.get("capabilities", []))
+        parc.append(Modele(alias, p, nom_modele, m.get("max_context_size", 0),
+                           n[0], n[1], n[2], n[3], dossier, ctx_service, gab, caps, vs))
     parc = _dedoublonner_par_dossier(parc)
     parc.sort(key=lambda x: (ORDRE_MOTEUR.get(x.provider, 9), x.alias))
     # S1/S3 (poste7-menus-cloture-19-09) : le compte est le contrôle, pas la lecture
