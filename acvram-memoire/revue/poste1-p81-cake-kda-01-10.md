@@ -70,3 +70,41 @@ Lecture : si la trace confirme 5-12 % au décodage b=1, recoalescer notre noyau 
 * Pièce candidate (après la trace) : `kda_decode_kernel` réécrit avec plusieurs blocs par tête (tranches de lignes i), S en mémoire
   partagée par tuiles et lectures coalescées, sans tableau `row` en registres. Même ordre de somme par ligne (j croissant), donc au bit
   exigé, test d'équivalence dans le même commit.
+
+## MESURE (prise `poste1-p81-nsys`, 01/10 08:07:05-08:11:23)
+* instrument : `outils/gpu/mesure/nsys-kda-p81.sh` + `kda-part-p81.py` (nvtx_kern_sum, classes fla testées, garde kimi_linear), trace sha256 c62217f149e4f307 (49 Mo, sur disque, non commitée)
+* commit : fdf7ebf66 (arbre figé `travail/poste1-p81-fige`, ATTENDU asserté)
+* régime : Kimi-Linear-35B-kda-nvfp4, régime NOMINAL (graphes on, hybrides ≤ 12, 0 couche exilée), en processus, sans HTTP ; 5090 seule ; avant/après : seul 8081 (autre carte)
+* scellé : prédictions de la section « Part du KDA » ci-dessus, écrites avant la prise
+* mesuré (temps de NOYAUX par pas ; mur entre parenthèses, occupation 0,92-0,96) :
+  | plage | GPU/pas | cœur KDA/pas | part | prédit |
+  |---|---|---|---|---|
+  | préfill 8 192 | 1 400,6 ms (mur 1 514,9) | 72,1 ms | **5,15 %** | 5-15 % : tenu |
+  | décodage b=1 | 3,496 ms (mur 3,711) | 0,487 ms (`kda_decode_kernel`, 24,3 µs × 20) | **13,9 %** | 5-12 % : **hors bande, par le haut** |
+  | décodage b=12 | 10,616 ms (mur 11,073) | 0,198 ms (fla fused_recurrent) + **2,174 ms de transpositions de S** | 1,87 % + **20,5 %** | ≥ 2,9 % : faux tel que posé |
+* verdict : **le levier KDA est la disposition de l'état S, pas CAKE.**
+  - b=1 : notre noyau lit 4 Mio en 24,3 µs par couche, soit **172 Go/s ≈ 11 % du plancher** (lignes non coalescées, 32 blocs,
+    255 registres). La prédiction était trop basse (13,9 contre ≤ 12) ; son falsificateur (< 0,1 ms) n'est pas atteint.
+  - b=12 : `decode_static_batch` (kda.py:253-263) transpose S deux fois par couche et par pas. Notre état est [V, K], celui de fla
+    [K, V]. Ce sont des copies de 24 Mio (grille 24 576 × 128 × 2 = 12 × 32 × 128 × 128 éléments, 2 560 lancements = 20 × 64 × 2),
+    à 2,17 ms par pas : **20,5 % du temps GPU**. Le noyau fla lui-même ne coûte que 0,198 ms (9,9 µs pour 48 Mio, soit 4,8 To/s) :
+    il lit S dans le L2, encore chaud de la copie qui le précède. Mon « ≥ 2,9 % » supposait un S lu en HBM, et ne voyait pas les copies.
+  - préfill : cœur fla 5,15 %, dans la bande ; CAKE n'y gagnerait au mieux que 2,6 % et ne tourne pas sur sm_120.
+* durée : prévue ≤ 10 min (4-6), tenue 258 s
+
+## Écart (chef)
+poste3 a fait tourner ≈ 58 tests processeur avec un leurre « ninja » vers 08:05-08:07. Les plages mesurées tombent à 238-242 s du départ
+de la trace, soit ≈ 08:11:03-08:11:07, après cette fenêtre (pendant le chargement). Les parts sont des rapports de durées de
+NOYAUX : la charge hôte ne les touche pas. Ce qui en dépendrait, c'est le mur et l'occupation (0,92-0,96), donc la traduction Amdahl
+en débit ci-dessous. Relevé au départ de la prise : `gpg` 100 %, un `python` à 22,9 % (hors moteur).
+
+## Levier et prédiction pour la pièce suivante (scellée ici, avant code)
+**État S en disposition [K, V] (celle de fla) partout** : statiques, `forward`, `forward_batch`, `decode_static_batch`, `kda_decode_kernel`.
+* b=12 : les deux transpositions disparaissent (−2,17 ms). Le noyau fla lit alors S en HBM : 0,66 ms au plancher pour 1 Go, prédit
+  0,7-0,9. Net : 10,62 → **8,9-9,1 ms de noyaux par pas (−14 à −16 %)**, mur 11,07 → 9,3-9,6 ms. FAUX si le gain est < 1,0 ms.
+* b=1 : en [K, V], le fil i lit la COLONNE i, si bien que des fils voisins lisent des adresses voisines (coalescé) ; on garde un fil
+  par ligne de sortie et le même ordre de somme (j croissant). Avec plusieurs blocs par tête et sans `row[128]` en registres, prédit
+  0,487 → **0,08-0,15 ms**, soit −0,34 à −0,41 ms (**−9 à −11 % du mur b=1**). FAUX si > 0,25 ms.
+* Équivalence : **au bit** exigée sur les deux chemins. La disposition ne change aucune opération flottante : fla reçoit les mêmes
+  valeurs, notre noyau garde l'ordre de somme par fil. Test d'équivalence au bit dans le même commit (REGLES § 7) : sorties et état
+  final identiques sur 64 pas b=1 et b=12, avant et après.
