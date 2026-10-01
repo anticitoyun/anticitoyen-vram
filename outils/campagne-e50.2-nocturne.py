@@ -18,9 +18,11 @@ valeur, la raison va au bilan, jamais un « 0 » écrit à la place (ordre chef 
 Fenêtre : 20:00-07:00 ; aucun alias ne DÉMARRE après 06:30 ; carte GPU0 (5090) seule —
 jamais ACVRAM_CARTE surchargé ici, donc jamais la 3080 Ti (ordre chef 01/10).
 
-Hors périmètre automatique : tabby et yals « chargent leur modèle eux-mêmes » (pas de
-lanceur scriptable, `fenetre.py:1149-1151`) — comptés dans la cible, jamais mesurés par
-cette campagne, nommés au bilan avec leur raison.
+Hors périmètre automatique (3 exclusions, ordre chef 01/10, voir `_raison_hors_perimetre`) :
+tabby/yals chargent leur modèle eux-mêmes ; rapide = llamacpp-appoint = le service PERMANENT
+de l'utilisatrice sur la 3080 Ti (port 8081) ; llamacpp > 30 Go force les deux GPU
+(`llamacpp-serveur:67`). Comptés dans la cible, jamais mesurés, nommés au bilan avec leur
+raison exacte.
 """
 import argparse
 import datetime
@@ -39,13 +41,37 @@ from menu_modeles.config import MOTEURS, ORDRE_MOTEUR  # noqa: E402
 from menu_modeles.moteur import pid_du_port  # noqa: E402
 
 BIN = _parc.PARC.bin if hasattr(_parc, "PARC") else Path.home() / ".local" / "bin"
-HORS_PERIMETRE = {"tabby", "yals"}  # chargent leur modèle eux-mêmes, non scriptables ici
+SEUIL_DEUX_GPU_OCTETS = 30_000_000_000  # llamacpp-serveur:67 : > 30 Go -> CUDA_VISIBLE_DEVICES=0,1
 
 HEURE_DEBUT = datetime.time(20, 0)
 HEURE_DERNIER_DEPART = datetime.time(6, 30)
 HEURE_FIN = datetime.time(7, 0)
 
 PLAFOND_DEFAUT_S = 15 * 60  # 15 min/alias tant que le calibrage n'a pas parlé (ordre chef)
+
+
+def _taille_gguf_octets(dossier):
+    """Reproduit exactement le choix de llamacpp-serveur (lignes 23-24, 56-59) : le premier
+    .gguf non-mmproj/gabarit du dossier, et si découpé (`*-of-*.gguf`) la somme de TOUS les
+    morceaux — jamais la taille du seul premier fichier."""
+    if not dossier:
+        return 0
+    d = Path(dossier)
+    if not d.is_dir():
+        return 0
+    candidats = sorted(
+        f for f in d.glob("*.gguf")
+        if f.stat().st_size > 1_000_000 and "mmproj" not in f.name.lower()
+        and not f.name.startswith("gabarit")
+    )
+    if not candidats:
+        return 0
+    premier = candidats[0]
+    if "-of-" in premier.name:
+        # même glob que llamacpp-serveur:24 : *-of-*.gguf, TOUS les morceaux, pas le premier
+        morceaux = list(d.glob("*-of-*.gguf"))
+        return sum(f.stat().st_size for f in morceaux)
+    return premier.stat().st_size
 
 
 def _besoin_tps(m):
@@ -55,6 +81,23 @@ def _besoin_tps(m):
 
 def _besoin_refus(m):
     return (m.refus or "").strip() == "inconnu"
+
+
+def _raison_hors_perimetre(m):
+    """Les trois exclusions de chef (01/10), toutes vérifiées dans le code des lanceurs,
+    jamais supposées : (1) tabby/yals chargent leur modèle eux-mêmes (fenetre.py:1149-1151) ;
+    (2) rapide = llamacpp-appoint = le service PERMANENT de l'utilisatrice, port 8081, PID
+    connu — jamais un lanceur de campagne ; (3) llamacpp > 30 Go (taille des morceaux, pas du
+    premier fichier) force CUDA_VISIBLE_DEVICES=0,1 (llamacpp-serveur:67), donc la 3080 Ti."""
+    if m.provider in ("tabby", "yals"):
+        return "charge son modèle lui-même, non scriptable"
+    if m.provider == "rapide":
+        return "service permanent utilisateur (port 8081), jamais relancé par une campagne"
+    if m.provider == "llamacpp":
+        taille = _taille_gguf_octets(m.dossier)
+        if taille > SEUIL_DEUX_GPU_OCTETS:
+            return f"{taille/1e9:.1f} Go > 30 Go, llamacpp-serveur répartit sur les 2 GPU"
+    return None
 
 
 def cible():
@@ -71,12 +114,13 @@ def simuler():
     c = cible()
     n_tps = sum(1 for m in c if _besoin_tps(m))
     n_refus = sum(1 for m in c if _besoin_refus(m))
-    hors = [m for m in c if m.provider in HORS_PERIMETRE]
-    autos = [m for m in c if m.provider not in HORS_PERIMETRE]
+    raisons = {m.alias: _raison_hors_perimetre(m) for m in c}
+    hors = [m for m in c if raisons[m.alias]]
+    autos = [m for m in c if not raisons[m.alias]]
     print(f"cible : {len(c)} alias (tps à mesurer : {n_tps} ; refus à mesurer : {n_refus})")
-    print(f"hors périmètre automatique (tabby/yals, chargent leur modèle eux-mêmes) : {len(hors)}")
+    print(f"hors périmètre automatique (3 exclusions chef 01/10) : {len(hors)}")
     for m in hors:
-        print(f"  hors périmètre : {m.alias} ({m.provider})")
+        print(f"  hors périmètre : {m.alias} ({m.provider}) — {raisons[m.alias]}")
     print(f"à mesurer par cette campagne : {len(autos)}")
     for m in autos:
         besoins = []
@@ -168,10 +212,25 @@ def _parser_refus(sortie):
     return r
 
 
+def _garde_appoint(journal):
+    """Garde qui refuse (ordre chef 01/10, point 3) : renvoie le PID actuel du service
+    PERMANENT de l'utilisatrice (port 8081), ou None si le port est sans propriétaire —
+    preuve à chaud, pas seulement la lecture du code des lanceurs."""
+    pid = pid_du_port(8081)
+    if pid is None:
+        with open(journal, "a") as f:
+            f.write("=== GARDE : port 8081 (service permanent) sans propriétaire\n")
+    return pid
+
+
 def executer(journal, duree_max_par_moteur):
-    c = [m for m in cible() if m.provider not in HORS_PERIMETRE]
-    bilan = {"tenu": [], "timeout": [], "refus": [], "echec": [], "sautes": []}
+    c = [m for m in cible() if not _raison_hors_perimetre(m)]
+    bilan = {"tenu": [], "timeout": [], "refus": [], "echec": [], "sautes": [], "garde": []}
     calibrage = {}
+    pid_appoint = _garde_appoint(journal)
+    if pid_appoint is None:
+        bilan["garde"].append(("—", "port 8081 déjà sans propriétaire avant tout lancement — arrêt"))
+        c = []
     for m in c:
         # reprise : déjà à jour depuis un passage précédent de CETTE campagne (relu
         # à chaque alias, pas en mémoire — symétrique de prise-tache-275.sh)
@@ -221,6 +280,15 @@ def executer(journal, duree_max_par_moteur):
             bilan["timeout"].append((m.alias, str(e)))
         finally:
             _arreter(m, journal)
+
+        pid_apres = _garde_appoint(journal)
+        if pid_apres != pid_appoint:
+            with open(journal, "a") as f:
+                f.write(f"=== GARDE : PID du service permanent changé ({pid_appoint} -> "
+                        f"{pid_apres}) après {m.alias} — ARRÊT immédiat, rien d'autre lancé\n")
+            bilan["garde"].append((m.alias, f"PID 8081 changé {pid_appoint}->{pid_apres}"))
+            break
+        pid_appoint = pid_apres
 
         # ordre chef : un alias en échec/TIMEOUT garde sa valeur ANCIENNE, jamais un
         # « 0 » — on n'écrit que ce qui a vraiment été mesuré cette passe.
