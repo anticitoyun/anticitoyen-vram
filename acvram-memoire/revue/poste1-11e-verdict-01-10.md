@@ -16,6 +16,13 @@
 * verdict : **défaut max6 inchangé (règle du scellé). 4sur6 et balayage-w gagnent chacun ≈ 0,16-0,17 % de PPL sur max6 (conclusif à 128 fenêtres), sous le seuil de 0,5 % ; balayage (MSE pur) ne se distingue pas de max6.** La pondération (balayage-w contre balayage) va dans le sens de H-Scale (−0,077 %) sans être conclusive. Rien ne justifie de payer balayage-w (×10 en quantification finale) quand 4sur6 donne le même gain pour ×2 ; si un gain de 0,16 % vaut un changement de défaut, c'est 4sur6 qui se présente, sur pièce séparée (alias, KL b=1 ≤ 0,74 sous gabarit), décision du chef
 * durée : prévue ≤ 30 min par prise ; tenues : conversions 370 + 120 + 99 + 106 s, evals 5 × ~15 s (65 k) puis 5 × ~40 s (262 k) ; ≈ 15 min de carte en tout
 
+## Bilan des hypothèses scellées d'poste6 (bd8, `poste6-bd8-arxiv-01-10.md` l.73-81 ; scellées pour le 14B sur le corpus privé, jugées ici sur le 7B/wiki-gptq, 128 fenêtres, PPL ponctuelles)
+* H1 PPL(balayage-w)/PPL(max6) = 9,7251 / 9,7417 = **0,99830** ; prédit 0,985-0,998 → **FAUX de justesse, par le haut** (0,0003 au-dessus de la bande ; le falsificateur explicite « > 1,000 » n'est pas atteint : le proxy act_scale² vaut quelque chose, mais moins que prédit).
+* H2 PPL(balayage)/PPL(max6) = 9,7326 / 9,7417 = **0,99907** ; prédit 0,990-1,005, FAUX si < 0,985 → **tenu** (balayage MSE pas mieux que max6, comme la figure 1 de H-Scale l'annonçait).
+* H3 PPL(balayage-w) ≤ PPL(balayage) : 9,7251 ≤ 9,7326 (écart −0,0075) → **tenu** (FAUX si balayage meilleur de > 0,003).
+* H4 PPL(4sur6)/PPL(max6) = 9,7264 / 9,7417 = **0,99843** ; prédit 0,992-1,000, FAUX si > 1,002 → **tenu**.
+* Décision du chef (01/10) : max6 reste le défaut ; 4sur6 n'est pas ouvert (0,16 % < seuil 0,5 %).
+
 ## Instrument : un défaut d'analyse, pas de mesure
 La première `analyser` (09:02) a rendu rc 6, que le script imprime comme « témoin différent ». En réalité, `acvram eval --json > fichier` écrit
 son en-tête (variables ignorées, cadrage, budget, lignes `[acvram]` et `[régime]`) AVANT le JSON, et `json.load` sur le fichier entier
