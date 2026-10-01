@@ -186,7 +186,6 @@ def pas_fp32(S: torch.Tensor, q, k, v, g, beta, scale: float | None = None) -> t
 # ---------------------------------------------------------------------------------------------------------------
 import triton
 import triton.language as tl
-from triton.language.extra import libdevice
 
 
 @triton.jit
@@ -305,7 +304,13 @@ def _bord_kernel(Z, Bs, Cs, KC, UC, BKb, BWb, BGb, Nb, total,
         c = tl.maximum(tl.sqrt(tl.sum(tl.abs(S), 1) / V), PLANCHER_LISSAGE)
         Rc = S / c[:, None]
         bmax = tl.maximum(tl.max(tl.abs(Rc), 0), PLANCHER_ECHELLE)
-        zq = libdevice.rint(Rc / bmax[None, :] * 127.0)
+        x = Rc / bmax[None, :] * 127.0
+        # arrondi au pair le plus proche (= torch.round, référence) écrit à la main : le rint des bibliothèques CUDA
+        # n'existe pas sous TRITON_INTERPRET (CI sans carte). x − floor(x) est exact en fp32 pour |x| ≤ 127.
+        f = tl.floor(x)
+        d = x - f
+        pair = (f - 2.0 * tl.floor(f * 0.5)) == 0.0
+        zq = tl.where(d > 0.5, f + 1.0, tl.where(d < 0.5, f, tl.where(pair, f, f + 1.0)))
         zq = tl.minimum(tl.maximum(zq, -127.0), 127.0)
         tl.store(Z + (i_nh * K + o_k[:, None]) * V + o_v[None, :], zq.to(tl.int8))
         tl.store(Bs + i_nh * V + o_v, bmax)
@@ -317,6 +322,8 @@ _SM: dict = {}
 
 
 def _nb_sm(dev) -> int:
+    if dev.type != "cuda":                                 # TRITON_INTERPRET=1 (CI sans carte) : grille arbitraire
+        return 4
     if dev not in _SM:
         _SM[dev] = torch.cuda.get_device_properties(dev).multi_processor_count
     return _SM[dev]
@@ -329,7 +336,8 @@ def pas(et: dict, q, k, v, g, beta, A_log=None, dt_bias=None, BVB: int = 32) -> 
     HV, V = v.shape[2], v.shape[3]
     BVB = min(BVB, V)
     o = torch.empty_like(v)
-    with torch.cuda.device(q.device.index):
+    import contextlib
+    with (torch.cuda.device(q.device.index) if q.is_cuda else contextlib.nullcontext()):
         _pas_kernel[(Nn * HV, V // BVB)](
             q, k, v, g, beta, A_log, dt_bias, o, et["Z"], et["B"], et["C"], et["kc"], et["uc"], et["bk"], et["bw"],
             et["bg"], et["n"], K ** -0.5, H=H, HV=HV, K=K, V=V, BVB=BVB, P=P, R=R,

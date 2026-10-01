@@ -114,8 +114,12 @@ def _absolu(et):
     return torch.exp(Pn)[..., None, None] * S0 + torch.einsum("nhp,nhpk,nhpv->nhkv", poids, bk, et["bw"].float().abs())
 
 
-def _bornes_pas(et, q, k, v, g, beta):
-    """Bornes élément par élément de |o_T − o_R| et |w_T − w_R| pour un pas parti de ``et`` (formes de la référence)."""
+def _bornes_pas(et, q, k, v, g, beta, dk=None):
+    """Bornes élément par élément de |o_T − o_R| et |w_T − w_R| pour un pas parti de ``et`` (formes de la référence).
+    ``dk`` [N, H, K] : écart MESURÉ des clés fp16 du pas (lu dans les deux enregistrements `bk`). Les deux côtés
+    normalisent k dans un ordre de somme différent puis l'arrondissent en fp16 : quelques éléments basculent d'une
+    ulp fp16 (à sec, deux ordres de somme : 1,0e-4 des éléments, 102 sur 40 pas à b=12) — trou de la première
+    dérivation, rouge sur carte le 01/10 07:06 (revue/poste5-leap-int8-prise-01-10.md)."""
     N_, HV_, V_ = v.shape
     H_, K_ = q.shape[1], q.shape[2]
     gqa, gam = HV_ // H_, _gamma(K_, E.P, E.R)
@@ -128,7 +132,14 @@ def _bornes_pas(et, q, k, v, g, beta):
     bw = gam * b * (v.float().abs() + a * mk)
     w = b * (v.float() - a * E._s_t(et, kn, gqa))
     kq = (kn * qn).sum(-1, keepdim=True).abs()
-    bo = gam * (a * mq + kq * w.abs()) + kq * bw
+    if dk is not None:                                  # bascules fp16 de la clé du pas : s_k, w et k·q bougent
+        dkh = dk.float().repeat_interleave(gqa, 1)
+        ds = b * a * torch.einsum("nhkv,nhk->nhv", M, dkh)
+        dkq = (dkh * qn.abs()).sum(-1, keepdim=True)
+        bw = bw + ds
+    else:
+        ds, dkq = torch.zeros_like(bw), torch.zeros_like(kq)
+    bo = gam * (a * mq + kq * w.abs()) + kq * bw + dkq * (w.abs() + ds)
     return bo, bw + D16 * w.abs()
 
 
@@ -144,11 +155,21 @@ def verifier_resynchro(pas_t, et0, entrees, pas_n):
     for t in range(pas_n):
         x = entrees(t)
         et_r = {c: y.clone() for c, y in et_t.items()}
-        bo, bw = _bornes_pas(et_r, *x)
+        et_avant = {c: y.clone() for c, y in et_t.items()}
         n_avant = et_r["n"].clone()
         o_r = E.pas_reference(et_r, *x)
         o_t = pas_t(et_t, *x)
-        assert ((o_t - o_r).abs() <= bo).all(), (t, float(((o_t - o_r).abs() / bo.clamp(min=1e-30)).max()))
+        nk = n_avant.view(n_avant.shape[0], et_r["bk"].shape[1], -1)[..., 0].long()
+        ik = nk[..., None, None].expand(*nk.shape, 1, et_r["bk"].shape[-1])
+        dk = (et_t["bk"].gather(2, ik) - et_r["bk"].gather(2, ik)).float().abs()[:, :, 0]      # [N, H, K]
+        bo, bw = _bornes_pas(et_avant, *x, dk=dk)
+        hors = (o_t - o_r).abs() > bo
+        if bool(hors.any()):
+            sans_bascule = hors & (dk.sum(-1).repeat_interleave(o_r.shape[1] // dk.shape[1], 1) == 0)[..., None]
+            raise AssertionError(f"pas {t} : {int(hors.sum())} sorties hors borne (dont {int(sans_bascule.sum())} "
+                                 f"sur des têtes SANS bascule de clé), rapport max "
+                                 f"{float(((o_t - o_r).abs() / bo.clamp(min=1e-30)).max()):.3g}, clés basculées "
+                                 f"{int((dk > 0).sum())}")
         gel = bool((et_r["n"] == 0).all() and (n_avant == E.P - 1).all())
         if not gel:
             assert torch.equal(et_t["n"], et_r["n"]), t
