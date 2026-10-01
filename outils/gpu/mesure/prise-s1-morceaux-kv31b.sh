@@ -19,7 +19,10 @@ head=$(git -C "$DEPOT" rev-parse --short=9 HEAD)
 if [ -n "$COMMIT_ATTENDU" ] && [[ "$head" != "$COMMIT_ATTENDU"* ]]; then echo "ÉCHEC : HEAD $head ≠ $COMMIT_ATTENDU"; exit 2; fi
 dossier=$(grep "^$ALIAS	" "$HOME/TSV/acvram-chemins.tsv" | cut -f2); [ -d "$dossier" ] || { echo "ÉCHEC : alias $ALIAS inconnu"; exit 3; }
 # Invite figée par son objet git, jamais l'arbre : même texte pour les trois bras, quel que soit HEAD.
-git -C "$DEPOT" show "$INVITE_COMMIT:README.md" > "$SORTIE/invite.txt" || { echo "ÉCHEC : invite $INVITE_COMMIT:README.md illisible"; exit 3; }
+: > "$SORTIE/invite.txt"
+for f in ${INVITE_FICHIERS:-README.md}; do     # contexte long (REGLES § 4) : INVITE_FICHIERS="README.md REPRISE.md", INVITE_SHA de la concaténation
+  git -C "$DEPOT" show "$INVITE_COMMIT:$f" >> "$SORTIE/invite.txt" || { echo "ÉCHEC : invite $INVITE_COMMIT:$f illisible"; exit 3; }
+done
 sha=$(sha256sum "$SORTIE/invite.txt" | cut -d' ' -f1)
 [ "$sha" = "$INVITE_SHA" ] || { echo "ÉCHEC : invite sha256 $sha ≠ scellé"; exit 3; }
 "$PY" - "$SORTIE/invite.txt" "$ALIAS" > "$SORTIE/requete.json" <<'EOF'
