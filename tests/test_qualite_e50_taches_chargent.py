@@ -3,12 +3,18 @@
 `huggingface_hub` installé dans le venv lm-eval réel exige un id complet. Corrigé en
 `openai/gsm8k` et `openai/openai_humaneval`.
 
-Ce test charge RÉELLEMENT les 5 tâches e50 avec le vrai lm-eval (le venv figé de la campagne
-275, `~/Bureau/Claude/travail/poste2-275-figee/.venv-panel` — pas `.venv-panel` à la racine de
-CE worktree, qui n'existe pas) : `TaskManager(include_path=...).load_task_or_group`,
-`eval_docs`, `doc_to_text` du premier document. Aucune carte, aucun modèle, aucun serveur —
-juste le chargement du dataset et le rendu du gabarit de prompt. Saute proprement si ce venv
-précis est absent (un autre poste peut ne pas l'avoir)."""
+Ce test charge RÉELLEMENT les 5 tâches e50 avec un vrai lm-eval installé :
+`TaskManager(include_path=...).load_task_or_group`, `eval_docs`, `doc_to_text` du premier
+document. Aucune carte, aucun modèle, aucun serveur — juste le chargement du dataset et le
+rendu du gabarit de prompt.
+
+Interpréteur résolu par le MÊME ordre que `outils/qualite-e50.sh` (chef, 01/10, après
+fusion) : `$ACVRAM_LMEVAL_PY`, puis `$DEPOT/.venv-panel/bin/python` (l'emplacement RÉEL que
+`qualite-e50.sh`/`panel-taches.sh` utilisent) en premier recours sérieux, puis la copie figée
+TEMPORAIRE de la campagne 275 (`travail/poste2-275-figee/.venv-panel`) en tout dernier — dès
+qu'un `.venv-panel` réel existe sous ce worktree, ce test (et `qualite-e50.sh`) le préfère
+automatiquement et ne dépend plus de la copie figée. Saute proprement si aucun des trois
+n'est présent."""
 import json
 import os
 import shutil
@@ -16,11 +22,27 @@ import subprocess
 import pytest
 
 ICI = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY_LMEVAL = os.path.expanduser("~/Bureau/Claude/travail/poste2-275-figee/.venv-panel/bin/python")
+
+
+def _resoudre_py_lmeval():
+    """Même ordre que `outils/qualite-e50.sh` : $ACVRAM_LMEVAL_PY, $DEPOT/.venv-panel,
+    repli temporaire (copie figée 275) — rend None si aucun n'est un exécutable."""
+    candidats = [
+        os.environ.get("ACVRAM_LMEVAL_PY"),
+        os.path.join(ICI, ".venv-panel", "bin", "python"),
+        os.path.expanduser("~/Bureau/Claude/travail/poste2-275-figee/.venv-panel/bin/python"),
+    ]
+    for c in candidats:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+PY_LMEVAL = _resoudre_py_lmeval()
 
 pytestmark = pytest.mark.skipif(
-    not os.path.isfile(PY_LMEVAL) or not shutil.which("bash"),
-    reason="venv lm-eval figé (travail/poste2-275-figee/.venv-panel) absent sur ce poste")
+    not PY_LMEVAL or not shutil.which("bash"),
+    reason="aucun interprète lm-eval trouvé (ACVRAM_LMEVAL_PY, .venv-panel, ou copie figée 275)")
 
 TACHES = ["mmlu_e50_hsm", "mmlu_e50_law", "mmlu_e50_ccs", "gsm8k_e50", "humaneval_e50"]
 

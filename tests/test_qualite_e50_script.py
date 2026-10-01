@@ -67,6 +67,25 @@ def test_refuse_executer_sans_confirmation():
     assert "je-sais-que-la-carte-est-libre" in r.stderr
 
 
+def test_executer_resout_acvram_lmeval_py_en_priorite():
+    """chef (01/10) : même ordre de résolution que le test de chargement réel —
+    $ACVRAM_LMEVAL_PY prime sur tout, y compris sur un .venv-panel qui existerait."""
+    env = {**os.environ, "ACVRAM_LMEVAL_PY": "/usr/bin/python3"}
+    r = subprocess.run(["bash", SCRIPT, _un_alias_reel(True), "--executer",
+                       "--je-sais-que-la-carte-est-libre"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert "lm-eval : /usr/bin/python3" in r.stdout, r.stdout
+
+
+def test_executer_refuse_si_aucun_interprete_lmeval():
+    env = {**os.environ, "ACVRAM_LMEVAL_PY": "/tmp/acvram-e50-interprete-inexistant"}
+    r = subprocess.run(["bash", SCRIPT, _un_alias_reel(True), "--executer",
+                       "--je-sais-que-la-carte-est-libre"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 66, r.stdout + r.stderr
+    assert "aucun interprète lm-eval trouvé" in r.stderr
+
+
 def test_refuse_argument_inconnu():
     r = subprocess.run(["bash", SCRIPT, _un_alias_reel(True), "--mode-bidon"],
                        capture_output=True, text=True, timeout=30)
