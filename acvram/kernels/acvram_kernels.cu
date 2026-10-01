@@ -6450,6 +6450,13 @@ torch::Tensor paged_attention_canal(torch::Tensor q, torch::Tensor kc,
 // arrondi) ; arrondis IMPOSÉS par intrinsèques, copiés du SASS du témoin — sortie AU BIT du
 // témoin `kda_decode_vk_kernel` (l'ancien noyau, état [D_i, D_j]),
 // tests/test_kda_etat_kv.py.
+// ddw (01/10) : coalescée, la lecture restait à ~11 µs par couche (inféré,
+// ~25 % du plancher) : 4 096 chaînes série sur j (ordre imposé par le « au
+// bit ») et 16 lectures en vol par fil, soit ~256 Kio en vol pour tout le GPU.
+// La tuile S[h] entière (D·D·4 o) part en cp.async dès l'entrée, avant les
+// convolutions : toute la couche est en vol d'un coup, et les deux passes
+// lisent la mémoire partagée. Les opérandes sont les mêmes, l'arithmétique
+// aussi (revue/poste5-ddw-scelle-01-10.md).
 // ============================================================================
 template <int D>
 __global__ void kda_decode_kernel(
@@ -6470,6 +6477,24 @@ __global__ void kda_decode_kernel(
         int K, float eps) {
     const int h = blockIdx.x, i = threadIdx.x, c = h * D + i;
     __shared__ float sq[D], sk[D], sv[D], se[D], red[32];
+    extern __shared__ float4 tuile4[];                     // S[h] : [D_j][D_i], D·D·4 o
+    const float *tuile = reinterpret_cast<const float *>(tuile4);
+    float *scol = S + (size_t)h * D * D + i;              // S[h][j][i], j au pas D
+    {
+        const float4 *src = reinterpret_cast<const float4 *>(S + (size_t)h * D * D);
+        #pragma unroll 8
+        for (int e = i; e < D * D / 4; e += D) {          // fils voisins → 16 o voisins
+#if __CUDA_ARCH__ >= 800
+            const unsigned s = (unsigned)__cvta_generic_to_shared(tuile4 + e);
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(src + e));
+#else
+            tuile4[e] = src[e];
+#endif
+        }
+#if __CUDA_ARCH__ >= 800
+        asm volatile("cp.async.commit_group;\n" ::);
+#endif
+    }
 
     auto conv = [&](const __nv_bfloat16 *x, const float *w, float *st) {
         float acc = 0.f;
@@ -6501,6 +6526,9 @@ __global__ void kda_decode_kernel(
     const float gp = __bfloat162float(g1_pre[c]) + dt_bias[c];
     const float sp = gp > 20.f ? gp : log1pf(__expf(gp));   // softplus
     sq[i] = q; sk[i] = k; sv[i] = v; se[i] = __expf(a[h] * sp);
+#if __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group 0;\n" ::);           // la tuile de CE fil ; la barrière suivante, celle des autres
+#endif
     __syncthreads();
     const float beta = 1.f / (1.f + __expf(-__bfloat162float(beta_pre[h])));
 
@@ -6508,11 +6536,10 @@ __global__ void kda_decode_kernel(
     // C seule ne les fixe pas. Écrit en « r = s·e ; r += d·sk », ce noyau contractait fma(s, e, d·sk) au lieu de
     // fma(d, sk, s·e) : pas au bit (prise 61w du 01/10 08:44, SASS relu contre le témoin). À D=128 le témoin lui-même
     // n'est pas homogène (j = 0, voir plus bas) : reproduit.
-    float *scol = S + (size_t)h * D * D + i;              // S[h][j][i], j au pas D
     float pred = 0.f;
     #pragma unroll 16
     for (int j = 0; j < D; ++j) {
-        const float r = __fmul_rn(scol[(size_t)j * D], se[j]);             // FMUL s·e
+        const float r = __fmul_rn(tuile[j * D + i], se[j]);                // FMUL s·e
         pred = __fmaf_rn(r, sk[j], pred);                                  // FFMA r·sk + pred
     }
     const float d = beta * (v - pred);    // le témoin fusionne la SiLU de v : FFMA acc·rcp − pred, puis FMUL β
@@ -6526,7 +6553,7 @@ __global__ void kda_decode_kernel(
         //     FFMA.FTZ R160, R176, R160, RZ    o = r·sq[0] + 0
         // — et toutes les autres en fma(d, sk, s·e). Reproduite à l'identique (décision chef 01/10 10:40 : au bit
         // partout, REGLES § 9) ; à D=64 le témoin est homogène. tests/test_kda_etat_kv.py casse si cette branche saute.
-        const float s0 = scol[0];
+        const float s0 = tuile[i];
         float r;
         if constexpr (D == 128) r = __fmaf_rn(s0, se[0], __fmul_rn(d, sk[0]));
         else                    r = __fmaf_rn(d, sk[0], __fmul_rn(s0, se[0]));
@@ -6535,7 +6562,7 @@ __global__ void kda_decode_kernel(
     }
     #pragma unroll 16
     for (int j = 1; j < D; ++j) {
-        float r = __fmul_rn(scol[(size_t)j * D], se[j]);                   // même produit, même arrondi
+        float r = __fmul_rn(tuile[j * D + i], se[j]);                      // même produit, même arrondi
         r = __fmaf_rn(d, sk[j], r);                                        // FFMA d·sk + r (le témoin)
         o = __fmaf_rn(r, sq[j], o);                                        // FFMA r·sq + o
         scol[(size_t)j * D] = r;
@@ -6558,10 +6585,18 @@ torch::Tensor kda_decode(torch::Tensor xq, torch::Tensor xk, torch::Tensor xv,
     TORCH_CHECK(xq.scalar_type() == torch::kBFloat16, "KDA : projections bf16 attendues");
     const int H = S.size(0), D = S.size(1), K = wq.size(1);
     TORCH_CHECK(D == 128 || D == 64, "KDA : dimension de tete non instanciee : ", D);
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(S.data_ptr()) % 16 == 0, "KDA : etat S non aligne sur 16 o (cp.async)");
     auto y = torch::empty({1, H * D}, xq.options().dtype(torch::kBFloat16));
     auto stream = at::cuda::getCurrentCUDAStream();
+    const size_t tuile = (size_t)D * D * sizeof(float);   // ddw : S[h] entier en mémoire partagée dynamique
+    if (tuile > 48 * 1024) {
+        const cudaError_t rc = D == 128
+            ? cudaFuncSetAttribute(kda_decode_kernel<128>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)tuile)
+            : cudaFuncSetAttribute(kda_decode_kernel<64>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)tuile);
+        TORCH_CHECK(rc == cudaSuccess, "KDA : cudaFuncSetAttribute(", (long)tuile, " o) : ", cudaGetErrorString(rc));
+    }
     #define BF(t) reinterpret_cast<const __nv_bfloat16 *>((t).data_ptr())
-    #define KDA_LAUNCH(DD) kda_decode_kernel<DD><<<H, DD, 0, stream>>>( \
+    #define KDA_LAUNCH(DD) kda_decode_kernel<DD><<<H, DD, tuile, stream>>>( \
         BF(xq), BF(xk), BF(xv), BF(g1_pre), BF(g2), BF(beta_pre), \
         wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), \
         cq.data_ptr<float>(), ck.data_ptr<float>(), cv.data_ptr<float>(), \
