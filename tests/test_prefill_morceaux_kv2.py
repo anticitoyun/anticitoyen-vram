@@ -131,3 +131,19 @@ def test_frontiere_d_instantane_passe_aussi_par_morceaux(converted, monkeypatch)
     m = _logits_invite(eng, 511)
     assert eng.stats.prefill_morceaux == 1, eng.stats.prefill_morceaux
     assert float((m.float() - seul.float()).abs().max()) == 0.0
+
+
+def test_poids_en_flux_refusent_les_tranches(converted, monkeypatch):
+    """MLP exilé (QuantLinear.streamed posé) : `tranches_possibles` rend faux — en service (S1 01/10, gemma-4-31B, 8/60
+    MLP en RAM hôte) la seconde tranche d'une couche reprenait un créneau du bassin de flux déjà réattribué (down_proj
+    servi avec un poids gate/up). Le repli séquentiel reste au bit (test ci-dessus)."""
+    from acvram import kernels
+    from acvram.engine.layers import QuantLinear
+    monkeypatch.setattr(R, "_PREFILL_MORCEAU", MORCEAU)
+    eng = _moteur(converted, "bf16", monkeypatch)
+    monkeypatch.setattr(kernels, "prefill_compact", lambda *a, **k: False)   # le jouet dense refuse sinon (résidu différé)
+    lots = []
+    assert eng.model.tranches_possibles(lots, False)
+    q = next(m for m in eng.model.modules() if isinstance(m, QuantLinear))
+    monkeypatch.setattr(q, "streamed", object())
+    assert not eng.model.tranches_possibles(lots, False)
