@@ -85,3 +85,5 @@ Bras 1 servi (sha256 6ecf74463cdd9773, 66 940 o ; spéculation coupée). Bras 0 
 (petits blocs 7,42/0,14 Gio), qui empêche le témoin de servir. Script arrêté net (rc 1), carte rendue propre.
 Avant le rejeu : `--max-seqs 2` sur les trois bras Coder (environ 2 Gio de KV, requêtes séquentielles). La prédiction et la
 lecture de l'addendum restent inchangées.
+Correction (prise `poste1-5v7-bit3` à 05:37, 2 s) : `serve` n'a pas `--max-seqs` (option de `plan`), argparse a refusé.
+L'équivalent servi est `--max-batch 2` (`max_concurrent_seqs`, cli.py:916). Drapeaux du script vérifiés contre le parseur.
