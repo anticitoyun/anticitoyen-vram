@@ -12,8 +12,8 @@ from acvram.engine.speculative import MTPProposer, NGramProposer, Proposal
 from test_mla_glue_c15 import _jouet
 
 
-def _seq(max_tokens=256, output_ids=None, ids=(1, 2, 3)):
-    s = types.SimpleNamespace(id=1, params=types.SimpleNamespace(max_tokens=max_tokens),
+def _seq(max_tokens=256, output_ids=None, ids=(1, 2, 3), seq_id=1):
+    s = types.SimpleNamespace(id=seq_id, params=types.SimpleNamespace(max_tokens=max_tokens),
                                output_ids=list(output_ids or []))
     s.all_ids = list(ids)
     return s
@@ -128,19 +128,57 @@ def test_runner_k_insuffisant():
 def test_mtp_amorcage_echec_prefill_absent_releve_cause_et_tailles():
     h = torch.zeros(16, 8)
     p = _mtp(mtp_hidden=h, mtp_prefill=None)
-    p.propose(_seq(ids=(1, 2, 3, 4, 5)), k=4)
+    p.propose(_seq(ids=(1, 2, 3, 4, 5), seq_id=7), k=4)
     assert len(p._amorcage_echecs) == 1
     r = p._amorcage_echecs[-1]
-    assert r == {"cause": "prefill_absent", "hs_shape0": None, "len_ids": 5, "len_ids_moins_1": 4}
+    assert r == {"seq_id": 7, "cause": "prefill_absent", "hs_shape0": None,
+                 "len_ids": 5, "len_ids_moins_1": 4}
 
 
 def test_mtp_amorcage_echec_prefill_court_releve_tailles():
     h = torch.zeros(16, 8)
     prefill_court = torch.zeros(2, 8)   # trop court pour len(ids)-1 = 4
     p = _mtp(mtp_hidden=h, mtp_prefill=prefill_court)
-    p.propose(_seq(ids=(1, 2, 3, 4, 5)), k=4)
+    p.propose(_seq(ids=(1, 2, 3, 4, 5), seq_id=7), k=4)
     r = p._amorcage_echecs[-1]
-    assert r == {"cause": "prefill_court", "hs_shape0": 2, "len_ids": 5, "len_ids_moins_1": 4}
+    assert r == {"seq_id": 7, "cause": "prefill_court", "hs_shape0": 2,
+                 "len_ids": 5, "len_ids_moins_1": 4}
+
+
+def test_mtp_premier_echec_amorcage_garde_le_premier_pas_les_retentatives():
+    h = torch.zeros(16, 8)
+    p = _mtp(mtp_hidden=h, mtp_prefill=None)
+    seq = _seq(ids=(1, 2, 3, 4, 5), seq_id=9)
+    p.propose(seq, k=4)
+    premier = dict(p._premier_echec_amorcage[9])
+    seq.all_ids = [1, 2, 3, 4, 5, 6, 7]   # la séquence avance, une retentative de plus
+    p.propose(seq, k=4)
+    assert p._premier_echec_amorcage[9] == premier   # inchangé malgré la 2e tentative
+    assert len(p._amorcage_echecs) == 2              # le relevé glissant, lui, avance
+
+
+def test_mtp_premier_echec_amorcage_une_entree_par_sequence():
+    h = torch.zeros(16, 8)
+    p = _mtp(mtp_hidden=h, mtp_prefill=None)
+    p.propose(_seq(ids=(1, 2, 3), seq_id=1), k=4)
+    p.propose(_seq(ids=(1, 2, 3, 4), seq_id=2), k=4)
+    assert set(p._premier_echec_amorcage) == {1, 2}
+
+
+def test_model_mtp_prefill_releves_porte_seq_ids():
+    # vérifié via EngineStats : le relevé lui-même exige un ForwardBatch réel (coûteux à
+    # jouet) — ici on vérifie que le champ existe et son contrat par un relevé simulé.
+    stats = runner_mod.EngineStats()
+    stats.source_modele = lambda: types.SimpleNamespace(
+        _mtp_prefill_releves=[{"evenement": "ecriture", "taille": 78, "seq_ids": [42]}])
+    assert stats.to_dict()["mtp_prefill_releves"] == [{"evenement": "ecriture", "taille": 78, "seq_ids": [42]}]
+
+
+def test_engine_stats_premiers_echecs_amorcage():
+    spec = types.SimpleNamespace(_premier_echec_amorcage={7: {"cause": "prefill_court", "seq_id": 7}})
+    stats = runner_mod.EngineStats()
+    stats.source_speculateur = lambda: spec
+    assert stats.to_dict()["spec_premiers_echecs_amorcage"] == {7: {"cause": "prefill_court", "seq_id": 7}}
 
 
 def test_mtp_amorcage_echecs_bornes_a_4():

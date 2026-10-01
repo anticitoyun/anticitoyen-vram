@@ -485,6 +485,11 @@ class MTPProposer:
         # sans_hidden apparaisse) : les 4 derniers échecs d'amorçage, avec la cause exacte
         # et les tailles en jeu — exposés via EngineStats.source_speculateur, pas un print.
         self._amorcage_echecs: deque = deque(maxlen=4)
+        # chef (01/10, après le faux départ "cache à 50 jetons") : les échecs du relevé
+        # glissant ne sont que les RETENTATIVES d'un amorçage déjà raté (st.length reste à 0).
+        # La vraie question est le PREMIER échec de chaque séquence — gardé à part, une entrée
+        # par seq.id, jamais écrasé par les retentatives suivantes de la même séquence.
+        self._premier_echec_amorcage: dict = {}
 
     def _ensure_blocks(self, st: _DraftState, needed_tokens: int) -> bool:
         need = (needed_tokens + self.block_size - 1) // self.block_size
@@ -527,6 +532,13 @@ class MTPProposer:
         i = min(self._ligne, h.shape[0] - 1)
         return h[i:i + 1]
 
+    def _noter_echec_amorcage(self, seq: Any, cause: str, hs_shape0: Optional[int], len_ids: int) -> None:
+        cle = seq.id if hasattr(seq, "id") else id(seq)
+        entree = {"seq_id": cle, "cause": cause, "hs_shape0": hs_shape0,
+                  "len_ids": len_ids, "len_ids_moins_1": len_ids - 1}
+        self._amorcage_echecs.append(entree)
+        self._premier_echec_amorcage.setdefault(cle, entree)
+
     def _amorcer(self, seq: Any, st: _DraftState) -> bool:
         """Remplit le cache de la tête avec le contexte de l'invite.
 
@@ -537,15 +549,12 @@ class MTPProposer:
         hs = getattr(self.model, "_mtp_prefill", None)
         ids = seq.all_ids
         if hs is None or hs.shape[0] < len(ids) - 1:
-            self._amorcage_echecs.append({
-                "cause": "prefill_absent" if hs is None else "prefill_court",
-                "hs_shape0": None if hs is None else int(hs.shape[0]),
-                "len_ids": len(ids), "len_ids_moins_1": len(ids) - 1})
+            self._noter_echec_amorcage(seq, "prefill_absent" if hs is None else "prefill_court",
+                                       None if hs is None else int(hs.shape[0]), len(ids))
             return False
         n = len(ids) - 1
         if not self._ensure_blocks(st, n + 8):
-            self._amorcage_echecs.append({"cause": "blocs_epuises", "hs_shape0": int(hs.shape[0]),
-                                          "len_ids": len(ids), "len_ids_moins_1": len(ids) - 1})
+            self._noter_echec_amorcage(seq, "blocs_epuises", int(hs.shape[0]), len(ids))
             return False
         emb = self.model.embed_tokens
         toks = torch.tensor(ids[1:n + 1], dtype=torch.long, device=emb.device)

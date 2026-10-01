@@ -273,6 +273,13 @@ class EngineStats:
         spec = self.source_speculateur() if callable(self.source_speculateur) else self.source_speculateur
         return list(getattr(spec, "_amorcage_echecs", None) or [])
 
+    def premiers_echecs_amorcage(self) -> dict:
+        """Un par seq.id, jamais écrasé par les retentatives (chef 01/10) : le relevé
+        glissant ne montre que des retentatives d'un amorçage déjà raté ; la cause réelle
+        est au PREMIER échec de chaque séquence."""
+        spec = self.source_speculateur() if callable(self.source_speculateur) else self.source_speculateur
+        return dict(getattr(spec, "_premier_echec_amorcage", None) or {})
+
     def releves_mtp_prefill(self) -> list:
         m = self.source_modele() if callable(self.source_modele) else self.source_modele
         return list(getattr(m, "_mtp_prefill_releves", None) or [])
@@ -329,6 +336,7 @@ class EngineStats:
             "spec_k_insuffisant": self.spec_k_insuffisant,
             "spec_raisons_non_engage": dict(self.spec_raisons),
             "spec_amorcage_echecs": self.releves_amorcage(),
+            "spec_premiers_echecs_amorcage": self.premiers_echecs_amorcage(),
             "mtp_prefill_releves": self.releves_mtp_prefill(),
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),

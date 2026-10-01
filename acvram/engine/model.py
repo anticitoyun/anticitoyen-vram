@@ -218,7 +218,9 @@ class ACVRamModel(nn.Module):
                 # propre cache : au prefill on garde tous les etats, pas
                 # seulement celui du dernier jeton.
                 self._mtp_prefill = etat.detach()
-                self._mtp_prefill_releves.append({"evenement": "ecriture", "taille": int(etat.shape[0])})
+                self._mtp_prefill_releves.append({
+                    "evenement": "ecriture", "taille": int(etat.shape[0]),
+                    "seq_ids": list(batch.seq_ids) if batch.seq_ids is not None else None})
             self._garder_hidden(etat[(batch.last_token_indices() if logits_positions
                                       is None else logits_positions).to(etat.device)])
         # La vérification spéculative et la perplexité ont toutes deux besoin
