@@ -151,6 +151,7 @@ def verifier_resynchro(pas_t, et0, entrees, pas_n):
     """``pas_t(et, *x)`` (le candidat) contre `pas_reference`, chaque pas parti du même état compressé. Rend le
     nombre de gels traversés ; lève AssertionError à la première borne violée."""
     et_t, gels = {c: x.clone() for c, x in et0.items()}, 0
+    stats = {"tetes": 0, "tetes_bascule": 0, "expliquees": 0}
     gam = _gamma(et0["Z"].shape[2], E.P, E.R)
     for t in range(pas_n):
         x = entrees(t)
@@ -162,14 +163,22 @@ def verifier_resynchro(pas_t, et0, entrees, pas_n):
         nk = n_avant.view(n_avant.shape[0], et_r["bk"].shape[1], -1)[..., 0].long()
         ik = nk[..., None, None].expand(*nk.shape, 1, et_r["bk"].shape[-1])
         dk = (et_t["bk"].gather(2, ik) - et_r["bk"].gather(2, ik)).float().abs()[:, :, 0]      # [N, H, K]
+        # Têtes SANS bascule de clé : borne STRICTE (sans terme Δk) — un seul hors-borne = bogue du noyau (C2′).
+        # Têtes AVEC bascule : comptées à part comme « expliquées » (borne avec le Δk mesuré), jamais « tenues »
+        # (chef 01/10) ; un hors-borne même là reste un rouge.
+        bo0, bw0 = _bornes_pas(et_avant, *x)
         bo, bw = _bornes_pas(et_avant, *x, dk=dk)
-        hors = (o_t - o_r).abs() > bo
-        if bool(hors.any()):
-            sans_bascule = hors & (dk.sum(-1).repeat_interleave(o_r.shape[1] // dk.shape[1], 1) == 0)[..., None]
-            raise AssertionError(f"pas {t} : {int(hors.sum())} sorties hors borne (dont {int(sans_bascule.sum())} "
-                                 f"sur des têtes SANS bascule de clé), rapport max "
-                                 f"{float(((o_t - o_r).abs() / bo.clamp(min=1e-30)).max()):.3g}, clés basculées "
-                                 f"{int((dk > 0).sum())}")
+        bascule = (dk.sum(-1).repeat_interleave(o_r.shape[1] // dk.shape[1], 1) > 0)[..., None].expand_as(o_r)
+        d = (o_t - o_r).abs()
+        rouge_strict = (d > bo0) & ~bascule
+        rouge_bascule = (d > bo) & bascule
+        stats["tetes_bascule"] += int(bascule[..., 0].sum()); stats["tetes"] += int(bascule[..., 0].numel())
+        stats["expliquees"] += int(((d > bo0) & bascule).sum())
+        if bool(rouge_strict.any() or rouge_bascule.any()):
+            raise AssertionError(f"pas {t} : {int(rouge_strict.sum())} sorties hors borne STRICTE sur des têtes SANS "
+                                 f"bascule (bogue), {int(rouge_bascule.sum())} hors borne même avec Δk ; rapport max "
+                                 f"strict {float(torch.where(bascule, torch.zeros_like(d), d / bo0.clamp(min=1e-30)).max()):.3g}")
+        bw = torch.where(bascule[..., :1].expand_as(bw), bw, bw0)
         gel = bool((et_r["n"] == 0).all() and (n_avant == E.P - 1).all())
         if not gel:
             assert torch.equal(et_t["n"], et_r["n"]), t
@@ -183,6 +192,9 @@ def verifier_resynchro(pas_t, et0, entrees, pas_n):
             borne = _q_gel(et_t) + _q_gel(et_r) + gam * _absolu(et_r).flatten(2).norm(dim=-1)
             assert (d <= borne).all(), (t, "gel", float((d / borne).max()))
         et_t = {c: y.clone() for c, y in et_t.items()}
+    print(f"RESUME resynchro : {gels} gels ; têtes×pas {stats['tetes']}, dont avec bascule de clé "
+          f"{stats['tetes_bascule']} (jugées à part) ; sorties hors borne stricte expliquées par une bascule "
+          f"{stats['expliquees']} — non comptées comme tenues", flush=True)
     return gels
 
 
