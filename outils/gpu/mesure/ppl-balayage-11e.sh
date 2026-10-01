@@ -12,7 +12,10 @@
 # Sorties sous $SORTIE (défaut : scratchpad/poste6-11e-ppl-<date>/), JSON d'eval + journaux + relevés.
 set -uo pipefail
 ICI=$(dirname "$(readlink -f "$0")"); DEPOT=$(cd "$ICI/../../.." && pwd)
-COMMIT_ATTENDU="${COMMIT_ATTENDU:-}"          # court, celui de l'en-tête du scellé ; vide = pas d'assertion (à éviter)
+# Addendum poste1 01/10 : commit figé du jour obligatoire, mesureur ≠ auteur (poste6 a écrit ScaleSweep), carte 0 seule,
+# témoin max6 rejoué au bit, MAX_TOKENS 65536 → 262144 si l'IC95 dépasse ± 0,25 % (NON RÉSOLU).
+COMMIT_ATTENDU="${COMMIT_ATTENDU:?COMMIT_ATTENDU = HEAD figé du jour (addendum du scellé)}"
+MAX_TOKENS="${MAX_TOKENS:-65536}"
 SOURCE="${SOURCE:-/mnt/4TO_SATACMR_2022/Modeles/models/Qwen2.5-Coder-7B-Instruct}"
 CORPUS="${CORPUS:-/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt}"
 CORPUS_SHA="e52922746ad09bac73b0dba32b2987c0d7924da14337dcd43c1d9113a9f6d0ae"
@@ -20,7 +23,8 @@ PROFIL="${PROFIL:-rig-14900k-5090-3080ti}"
 RACINE="${ACVRAM_MODELES:-/mnt/AI_GENERATOR/models_acvram}"
 SORTIE="${SORTIE:-$DEPOT/scratchpad/poste6-11e-ppl-$(date +%Y%m%d)}"
 PY="${PY:-$DEPOT/.venv/bin/python}"
-export ACVRAM_POSTE="${ACVRAM_POSTE:-poste6}" ACVRAM_DUREE_MAX="${ACVRAM_DUREE_MAX:-1800}"
+export ACVRAM_POSTE="${ACVRAM_POSTE:?poste du mesureur}" ACVRAM_DUREE_MAX="${ACVRAM_DUREE_MAX:-1800}" CUDA_VISIBLE_DEVICES=0
+[ "$ACVRAM_POSTE" != poste6 ] || { echo "ÉCHEC : l'autrice de ScaleSweep ne mesure pas sa méthode (REGLES § 3)"; exit 5; }
 mkdir -p "$SORTIE"
 
 nom_de() { echo "Qwen2.5-Coder-7B-11e-$1"; }        # trois dossiers frères, même source, même profil, même calibration
@@ -28,7 +32,7 @@ releve() { { date +%FT%T; uptime; nvidia-smi --query-compute-apps=pid,process_na
              nvidia-smi --query-gpu=power.limit,clocks.sm --format=csv,noheader; } >> "$SORTIE/releve-$1.txt" 2>&1; }
 verifier_tete() {
   local head; head=$(git -C "$DEPOT" rev-parse --short=9 HEAD)
-  if [ -n "$COMMIT_ATTENDU" ] && [[ "$head" != "$COMMIT_ATTENDU"* && "$COMMIT_ATTENDU" != "$head"* ]]; then
+  if [[ "$head" != "$COMMIT_ATTENDU"* && "$COMMIT_ATTENDU" != "$head"* ]]; then
     echo "ÉCHEC : HEAD $head ≠ $COMMIT_ATTENDU (scellé)"; exit 2; fi
   echo "# HEAD $head · poste $ACVRAM_POSTE · durée max ${ACVRAM_DUREE_MAX}s · sortie $SORTIE"
 }
@@ -47,15 +51,24 @@ case "${1:-}" in
     verifier_tete
     [ "$(sha256sum "$CORPUS" | cut -c1-64)" = "$CORPUS_SHA" ] || { echo "ÉCHEC : corpus ≠ sha256 du scellé"; exit 4; }
     releve "debut-evaluer"; rc=0
-    for ech in max6 4sur6 balayage; do
-      d="$RACINE/$(nom_de "$ech")"; [ -f "$d/acvram_manifest.json" ] || { echo "ÉCHEC : $d absent"; exit 3; }
+    for ech in max6 4sur6 balayage max6-t; do          # max6-t : témoin de l'instrument, max6 rechargé et rejoué
+      d="$RACINE/$(nom_de "${ech%-t}")"; [ -f "$d/acvram_manifest.json" ] || { echo "ÉCHEC : $d absent"; exit 3; }
       "$DEPOT/outils/carte.sh" "$PY" -m acvram.cli eval "$d" --corpus "$CORPUS" --window 2048 --stride 2048 \
-        --min-context 0 --max-tokens 65536 --device cuda:0 --json > "$SORTIE/eval-$ech.json" 2> "$SORTIE/eval-$ech.err" \
-        || { rc=$?; echo "eval $ech : rc $rc"; }
+        --min-context 0 --max-tokens "$MAX_TOKENS" --device cuda:0 --json > "$SORTIE/eval-$ech.json" 2> "$SORTIE/eval-$ech.err" \
+        || { rc=$?; echo "eval $ech : rc $rc — série arrêtée"; releve "fin-evaluer"; exit "$rc"; }
     done
     releve "fin-evaluer"; exit "$rc" ;;
   analyser)
-    { "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-max6.json" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
+    { "$PY" - "$SORTIE/eval-max6.json" "$SORTIE/eval-max6-t.json" <<'PYEOF'
+import json, sys
+a, b = (json.load(open(c)) for c in sys.argv[1:3])
+a, b = (x[0] if isinstance(x, list) else x for x in (a, b))
+ok = a["par_fenetre"] == b["par_fenetre"] and len(a["par_fenetre"]) > 0
+print("TÉMOIN max6 = max6-t AU BIT" if ok else "TÉMOIN max6 ≠ max6-t : S2-S4 INVALIDES (bruit d'instrument), aucun chiffre calculé")
+sys.exit(0 if ok else 6)
+PYEOF
+      [ $? -eq 0 ] || exit 6               # chef 01/10 : témoin ≠ → le bootstrap ne tourne pas, aucun chiffre S2-S4 à citer
+      "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-max6.json" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
       "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
       # contrôle gratuit : la conversion max6 neuve contre l'alias Qwen2.5-Coder-7B-nvfp4 existant (mêmes options ?)
       for f in "$RACINE/Qwen2.5-Coder-7B-nvfp4"/acvram-0000*.safetensors; do sha256sum "$f" | cut -c1-16; done | sort | md5sum

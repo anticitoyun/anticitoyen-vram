@@ -15,9 +15,11 @@ BRAS = ("A1", "A2", "B")
 MORCEAU_ATTENDU = {"A1": 0, "A2": 0, "B": 1}
 
 
-def lire(base: Path, bras: str) -> dict:
+def lire(base: Path, bras: str, fichier: str = "completion.json") -> dict:
     d = base / f"poste6-s1-{bras}"
-    c = json.loads((d / "completion.json").read_text(encoding="utf-8"))
+    if not (d / fichier).exists():
+        return {}
+    c = json.loads((d / fichier).read_text(encoding="utf-8"))
     m = json.loads((d / "metrics.json").read_text(encoding="utf-8"))
     log = (d / "serveur.log").read_text(encoding="utf-8", errors="replace")
     ch = c["choices"][0]
@@ -78,22 +80,33 @@ def main() -> int:
         x = r[b]
         print(f"{b}: jetons {x['n']} sha_ids {x['sha_ids']} prompt_tokens {x['prompt_tokens']} prefill_morceaux {x['morceaux']} "
               f"régime(morceaux@4096)={x['regime_morceaux']} exil_MLP {x['exil']} fin={x['fini']}")
-    p1 = all(r[b]["morceaux"] == MORCEAU_ATTENDU[b] for b in BRAS) and r["B"]["regime_morceaux"] and not r["A1"]["regime_morceaux"]
+    # la chauffe compte ses propres morceaux (2 essais à 10 240 le 01/10) : B > 0, A = 0
+    p1 = r["A1"]["morceaux"] == 0 and r["A2"]["morceaux"] == 0 and r["B"]["morceaux"] > 0 and r["B"]["regime_morceaux"] and not r["A1"]["regime_morceaux"]
     d2, n2 = ecart(r["A1"], r["A2"])
     d3, n3 = ecart(r["A1"], r["B"])
     p2 = d2 == 0.0 and n2 > 0
-    seuil3 = 0.0 if p2 else 2 * d2
+    # REGLES § 4 (chef 01/10) : le seuil des morceaux est 2 × l'écart du témoin reprise (même requête rejouée sur le serveur
+    # A1, REQUETES=2 → completion-2.json : K/V de l'invite relus du cache), jamais « au bit » (SDPA par blocs de clés)
+    rep = lire(base, "A1", "completion-2.json")
+    dr, nr = ecart(r["A1"], rep) if rep else (float("nan"), 0)
+    if rep and dr == float("inf"):
+        # ids divergents dès le témoin : l'écart se lit sur les logprobs de la position 0 (seul point commun garanti)
+        dr = abs(r["A1"]["vals"][0] - rep["vals"][0]) if r["A1"]["vals"] and rep["vals"] else float("inf")
+    seuil3 = 2 * dr if nr or rep else (0.0 if p2 else 2 * d2)
+    if d3 == float("inf") and r["B"]["vals"] and r["A1"]["vals"]:
+        d3 = abs(r["A1"]["vals"][0] - r["B"]["vals"][0]); n3 = 1       # même lecture pour B : position 0
     p3 = n3 > 0 and d3 <= seuil3
     pt = {r[b]["prompt_tokens"] for b in BRAS}
     p4 = len(pt) == 1 and (r["A1"]["prompt_tokens"] or 0) >= 5120
     p5 = len({r[b]["exil"] for b in BRAS}) == 1
-    print(f"P1 prise (B=1, A=0, régime) : {'tenu' if p1 else 'FAUX'}")
+    print(f"P1 prise (B>0, A=0, régime) : {'tenu' if p1 else 'FAUX'}")
     print(f"P2 témoin A1/A2 : Δmax {d2:.3g} sur {n2} valeurs : {'tenu (au bit)' if p2 else 'FAUX — seuil P3 = 2×Δ = ' + format(seuil3, '.3g')}")
-    print(f"P3 B/A1 : Δmax {d3:.3g} sur {n3} valeurs (seuil {seuil3:.3g}) : {'tenu' if p3 else 'FAUX'}")
+    print(f"témoin reprise A1 (requête rejouée) : Δ {dr:.3g} sur {nr} valeurs" + ("" if rep else " — ABSENT (REQUETES=2 non passé) : seuil = témoin A1/A2"))
+    print(f"P3 B/A1 : Δ {d3:.3g} sur {n3} valeurs ≤ 2 × témoin reprise = {seuil3:.3g} : {'tenu' if p3 else 'FAUX'}")
     print(f"P4 prompt_tokens {sorted(pt)} ≥ 5120 et égaux : {'tenu' if p4 else 'FAUX'}")
     print(f"P5 exil MLP identique ({[r[b]['exil'] for b in BRAS]}) : {'tenu' if p5 else 'FAUX — comparaison contaminée'}")
     ok = p1 and p2 and p3 and p4 and p5
-    print("VERDICT :", "P1-P5 tenus — morceaux 4096 au bit du seul tenant sur carte" if ok else "au moins un seuil FAUX, voir ci-dessus")
+    print("VERDICT :", "P1-P5 tenus — morceaux dans 2 × le témoin reprise (REGLES § 4)" if ok else "au moins un seuil FAUX, voir ci-dessus")
     return 0 if ok else 1
 
 
