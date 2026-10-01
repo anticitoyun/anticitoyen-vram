@@ -111,7 +111,7 @@ def _entrees_b1(NH, D, KER, graine):
 
 
 @carte_ext
-@pytest.mark.parametrize("D", [64, 128])
+@pytest.mark.parametrize("D", [64])
 def test_noyau_b1_au_bit_du_temoin(D):
     NH, KER, ext = 32, 4, K._extension()
     di = NH * D
@@ -134,6 +134,43 @@ def test_noyau_b1_au_bit_du_temoin(D):
             raise AssertionError(f"D={D} pas {pas} : sortie bf16 {int((y != y_t).sum())} éléments ≠, max {float(ulp_y):.1f} "
                                  f"ulp ; état fp32 {int((dS > 0).sum())} éléments ≠, max {float(ulp_S):.1f} ulp")
         assert all(torch.equal(c, d) for c, d in zip(conv_n, conv_t)), pas
+
+
+@carte_ext
+def test_noyau_b1_d128_une_ligne_un_arrondi():
+    """D=128 : le TÉMOIN n'est pas homogène. Dans son SASS (nvcc --use_fast_math, sm_120f ; extrait
+    scratchpad/poste5-kda-01-10/kda_noyaux.cu), d sert à 127 FFMA fma(d, sk, s·e) et à UNE FMUL
+    `FMUL.FTZ R32, R32, R204` (R204 = d) : pour une seule itération j, nvcc y a contracté fma(s, e, d·sk) ; à D=64 il est
+    homogène (64 FFMA, test au bit ci-dessus). Le nouveau noyau fait fma(d, sk, s·e) pour les 128 j (décision chef
+    01/10 : ne pas figer l'accident). Tolérance NOMMÉE, chaque pas parti du MÊME état : sortie bf16 identique ; une seule
+    ligne j de l'état [h, K, V], la même à tous les pas, peut différer, et de |Δ| ≤ 2⁻²² (|S nouveau| + |S ancien|) — un
+    arrondi fp32 des deux produits (|s·e| ≤ |s| car e = exp(a·softplus) ≤ 1, |d·sk| ≤ |r| + |s|). Casse si une 2e ligne
+    diffère, si la sortie bouge ou si l'écart dépasse la borne."""
+    NH, D, KER, ext = 32, 128, 4, K._extension()
+    di = NH * D
+    g_ = torch.Generator().manual_seed(D)
+    f = lambda *s, e=0.3: (torch.randn(*s, generator=g_) * e).to("cuda")
+    wq, wk, wv = f(di, KER), f(di, KER), f(di, KER)
+    dt, a, nw = f(di), -torch.rand(NH, generator=g_).to("cuda") - 0.5, 1 + f(D, e=0.1)
+    conv = [f(di, KER - 1, e=0.5) for _ in range(3)]
+    S_kv = f(NH, D, D, e=0.2)
+    lignes = set()
+    for pas in range(64):
+        x = _entrees_b1(NH, D, KER, 1000 * D + pas)
+        S_avant = S_kv.clone()
+        conv_t = [c.clone() for c in conv]
+        S_vk = S_kv.transpose(-1, -2).contiguous()               # le témoin repart du même état
+        y = ext.kda_decode(*x, wq, wk, wv, *conv, dt, a, nw, S_kv, 1e-6)
+        y_t = ext.kda_decode_vk(*x, wq, wk, wv, *conv_t, dt, a, nw, S_vk, 1e-6)
+        assert torch.equal(y, y_t), f"pas {pas} : la sortie bf16 a bougé"
+        assert all(torch.equal(c, d) for c, d in zip(conv, conv_t)), pas
+        S_t = S_vk.transpose(-1, -2)
+        diff = (S_kv - S_t).abs()
+        j = torch.nonzero(diff.amax(dim=(0, 2)) > 0).flatten().tolist()   # lignes j (clé) touchées, toutes têtes
+        lignes.update(j)
+        assert len(lignes) <= 1, f"pas {pas} : lignes j différentes {sorted(lignes)} — une seule attendue"
+        borne = 2.0 ** -22 * (S_kv.abs() + S_avant.abs())
+        assert (diff <= borne).all(), (pas, float((diff / borne.clamp(min=1e-38)).max()))
 
 
 @carte_ext

@@ -6506,7 +6506,10 @@ __global__ void kda_decode_kernel(
 
     // Arrondis IMPOSÉS par intrinsèques, copiés du SASS du témoin (contractions que nvcc y avait choisies) : la forme
     // C seule ne les fixe pas. Écrit en « r = s·e ; r += d·sk », ce noyau contractait fma(s, e, d·sk) au lieu de
-    // fma(d, sk, s·e) : pas au bit (prise 61w du 01/10 08:44, SASS relu contre le témoin).
+    // fma(d, sk, s·e) : pas au bit (prise 61w du 01/10 08:44, SASS relu contre le témoin). À D=128 le témoin lui-même
+    // n'est pas homogène : 127 FFMA fma(d, sk, s·e) et une itération contractée fma(s, e, d·sk) (`FMUL.FTZ R32, R32,
+    // R204`, R204 = d) — non reproduite (décision chef 01/10) : état ≠ d'un arrondi sur cette ligne j, sortie
+    // identique (tests/test_kda_etat_kv.py::test_noyau_b1_d128_une_ligne_un_arrondi).
     float *scol = S + (size_t)h * D * D + i;              // S[h][j][i], j au pas D
     float pred = 0.f;
     #pragma unroll 16
