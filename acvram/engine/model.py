@@ -266,7 +266,7 @@ class ACVRamModel(nn.Module):
         return self._logits_finaux(logits)
 
     @torch.inference_mode()
-    def forward_tranches(self, batches: list) -> list:
+    def forward_tranches(self, batches: list, return_hidden: bool = False) -> list:
         """Pièce 284 b : le préfill de plusieurs tranches (une par séquence ou par morceau de séquence, chacune comme
         `forward` la recevrait seule) COUCHE PAR COUCHE : pour chaque couche, chaque tranche passe seule — mêmes lignes,
         mêmes appels, mêmes chemins que `forward(batch)` —, dans une portée qui partage les poids déquantifiés de la
@@ -300,7 +300,7 @@ class ACVRamModel(nn.Module):
                 else:
                     xs = [layer(x, b, self.caches.get(i)) for x, b in zip(xs, batches)]
             _trace_couche("forward", i, layer)
-        return [self._sortie(x, d, b) for x, d, b in zip(xs, deltas, batches)]
+        return [self._sortie(x, d, b, return_hidden) for x, d, b in zip(xs, deltas, batches)]    # d19 qualité : états de toutes les lignes
 
     def _residu_differe(self) -> bool:
         """C15-prefill : résidu différé (x, delta) d'une couche à la suivante — blocs ordinaires à multiplicateur 1,0 seulement."""

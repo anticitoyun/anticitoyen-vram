@@ -159,3 +159,31 @@ def test_j3b_fenetre_qui_tient_devstral_65536(monkeypatch):
     assert avec == 65536, avec
     assert sans < 65536, sans
     print(f"d19 J3 b : fenêtre Devstral à 65 536 demandés, base 15 Gio : {avec} avec morceaux, {sans} sans")
+
+
+def test_j4_etats_par_forward_tranches_au_bit_de_la_passe_dense(converted, monkeypatch):
+    """Instrument qualité (scratchpad/d19-qualite.py) : les états cachés de toutes les lignes rendus par `forward_tranches`
+    (lots-morceaux avec K/V transitoires, return_hidden) sont au bit de `model(batch, return_hidden=True)` sur le jouet (cache int8)."""
+    from acvram.engine.model import ForwardBatch
+    from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
+    eng = _moteur(converted, monkeypatch)
+    model = eng.model
+    ids = [(7 + i * 13) % 200 + 3 for i in range(400)]
+    n = len(ids)
+
+    def lot(blocs, debut, fin, rang=None, total=None):
+        slots = torch.tensor([blocs[i // BLOCK_SIZE] * BLOCK_SIZE + i % BLOCK_SIZE for i in range(debut, fin)], dtype=torch.long)
+        b = ForwardBatch(tokens=torch.tensor(ids[debut:fin]), positions=torch.arange(debut, fin), seq_lens=[fin], query_lens=[fin - debut],
+                         block_tables=[torch.tensor(blocs)], slot_mapping=slots, is_prefill=True)
+        if rang is not None:
+            b.morceau = (rang, total, n, True)
+        return b
+    nb = (n + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
+    blocs_a = BlockAllocator(nb, enable_prefix_cache=False).allocate(nb)
+    with torch.no_grad():
+        ha = model(lot(blocs_a, 0, n), return_hidden=True)
+        bornes = [128, 256, 400]
+        lots = [lot(blocs_a, 0 if j == 0 else bornes[j - 1], f, j, len(bornes)) for j, f in enumerate(bornes)]
+        assert model.tranches_possibles(lots, False)
+        hb = torch.cat(model.forward_tranches(lots, return_hidden=True), 0)
+    assert ha.shape == hb.shape and torch.equal(ha, hb), float((ha.float() - hb.float()).abs().max())
