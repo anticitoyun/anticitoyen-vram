@@ -330,12 +330,20 @@ def _arreter(m, journal):
     time.sleep(2)
 
 
+# même motif que fenetre.py (ANSI) : banc-outils colore sa sortie SANS tester isatty
+# (~/.local/bin/banc-outils:163,183-190) — un rc2==0 avec couleur intacte cassait
+# silencieusement _parser_outils (jamais vu avant ce soir, campagne.log 10:35-10:37 :
+# « → \x1b[1m4/8\x1b[0m appels corrects » ne matche pas « → (\d+)/(\d+) » tel quel).
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
 def _lancer_banc(outil, port, journal):
     r = subprocess.run([str(BIN / outil), "--port", str(port)], cwd=RACINE,
                         capture_output=True, text=True)
+    sortie = _ANSI.sub("", r.stdout)
     with open(journal, "a") as f:
-        f.write(f"=== {outil} port={port} rc={r.returncode}\n{r.stdout}\n{r.stderr}\n")
-    return r.returncode, r.stdout
+        f.write(f"=== {outil} port={port} rc={r.returncode}\n{sortie}\n{r.stderr}\n")
+    return r.returncode, sortie
 
 
 def _parser_outils(sortie):
@@ -359,10 +367,38 @@ def _garde_appoint(journal):
     return pid
 
 
+def _version_paquet():
+    """Décision chef 01/10 : e50.2 mesure le PAQUET installé (acvram-serveur sans
+    ACVRAM_ARBRE, `acvram-serveur:160-176`), pas l'arbre ATTENDU — les fiches du menu
+    doivent dire ce que l'utilisatrice obtient réellement en lançant depuis les menus.
+    `ATTENDU` ne protège donc que l'ORCHESTRATION (ce script, parc.toml, notes-modeles.tsv),
+    jamais le moteur servi — nommé explicitement, pour ne pas confondre les deux."""
+    r = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "acvram"],
+                        capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _garde_version_paquet(journal, version_depart):
+    """Garde qui refuse (point 2, décision chef 01/10) : relit la version dpkg avant
+    chaque alias ; si elle a changé depuis le début de la campagne (un .deb installé en
+    cours de nuit), arrête net — un mélange de versions dans les mêmes fiches ne serait
+    pas nommé."""
+    v = _version_paquet()
+    if v != version_depart:
+        with open(journal, "a") as f:
+            f.write(f"=== GARDE PAQUET : version changée ({version_depart} -> {v}) — ARRÊT\n")
+        return False
+    return True
+
+
 def executer(journal, duree_max_par_moteur):
     c = [m for m in cible() if not _raison_hors_perimetre(m)]
     bilan = {"tenu": [], "timeout": [], "refus": [], "echec": [], "sautes": [], "garde": []}
     calibrage = {}
+    version_paquet = _version_paquet()
+    with open(journal, "a") as f:
+        f.write(f"=== moteur mesuré : paquet acvram {version_paquet} "
+                f"(ATTENDU ne couvre QUE l'orchestration — ce script, parc — pas le paquet)\n")
     pid_appoint = _garde_appoint(journal)
     if pid_appoint is None:
         bilan["garde"].append(("—", "port 8081 déjà sans propriétaire avant tout lancement — arrêt"))
@@ -376,6 +412,10 @@ def executer(journal, duree_max_par_moteur):
             bilan["sautes"].append((m.alias, "déjà à jour, sauté"))
             continue
         _attendre_fin_pause(journal)
+
+        if not _garde_version_paquet(journal, version_paquet):
+            bilan["garde"].append((m.alias, f"version paquet changée depuis {version_paquet} — arrêt"))
+            break
 
         plafond = duree_max_par_moteur.get(m.provider, PLAFOND_DEFAUT_S)
         debut = time.time()
@@ -439,7 +479,8 @@ def executer(journal, duree_max_par_moteur):
         # « 0 » — on n'écrit que ce qui a vraiment été mesuré cette passe.
         if nouveau_tps != ancien_tps or nouveau_refus != ancien_refus:
             _parc.ecrire_note(m.alias, nouveau_refus, nouveau_tps, ancien_qual, ancien_usage)
-            bilan["tenu"].append((m.alias, f"tps={nouveau_tps} refus={nouveau_refus}"))
+            bilan["tenu"].append((m.alias, f"tps={nouveau_tps} refus={nouveau_refus} "
+                                   f"(paquet acvram {version_paquet})"))
         elif raisons:
             bilan["refus"].append((m.alias, "; ".join(raisons)))
 
@@ -452,12 +493,12 @@ def executer(journal, duree_max_par_moteur):
                         f"plafond resserré à {duree_max_par_moteur[m.provider]}s\n")
 
     with open(journal, "a") as f:
-        f.write(f"=== FIN {time.strftime('%H:%M:%S')}\n")
+        f.write(f"=== FIN {time.strftime('%H:%M:%S')} (paquet acvram {version_paquet} au départ)\n")
         for cle, lot in bilan.items():
             f.write(f"BILAN {cle} : {len(lot)}\n")
             for alias, raison in lot:
                 f.write(f"  {alias} : {raison}\n")
-    print(f"=== FIN {time.strftime('%H:%M:%S')}")
+    print(f"=== FIN {time.strftime('%H:%M:%S')} (paquet acvram {version_paquet} au départ)")
     for cle, lot in bilan.items():
         print(f"BILAN {cle} : {len(lot)}")
     return 0
