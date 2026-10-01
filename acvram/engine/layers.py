@@ -736,6 +736,25 @@ class RotaryEmbedding(nn.Module):
             base = self.base * (factor ** (dim / (dim - 2)))
             return 1.0 / (base ** (torch.arange(0, dim, 2, device=device,
                                                 dtype=torch.float32) / dim))
+        if rtype in ("yarn",) and "truncate" in self.scaling:
+            # evp (gpt-oss) : la config NOMME `truncate` → formule de transformers à l'identique (seuils non arrondis si
+            # false, 1/(facteur·base^…) et non (1/base^…)/facteur). Une config sans ce champ garde le chemin ci-dessous,
+            # au bit d'avant (cliquet tests/test_gpt_oss_evp.py::test_yarn_sans_truncate_au_bit_d_avant).
+            import math
+            factor = max(factor, 1.0)
+            orig = float(self.scaling.get("original_max_position_embeddings") or 4096)
+            bf = float(self.scaling.get("beta_fast") or 32); bs = float(self.scaling.get("beta_slow") or 1)
+            def corr(nrot: float) -> float:
+                return (dim * math.log(orig / (nrot * 2 * math.pi))) / (2 * math.log(self.base))
+            low, high = corr(bf), corr(bs)
+            if self.scaling["truncate"]:
+                low, high = math.floor(low), math.ceil(high)
+            low, high = max(low, 0), min(high, dim - 1)
+            if low == high:
+                high += 0.001
+            pos = self.base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float) / dim)
+            extra = 1 - ((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low)).clamp(0, 1).to(device)
+            return (1.0 / (factor * pos)) * (1 - extra) + (1.0 / pos) * extra
         if rtype in ("yarn",):
             # YaRN (DeepSeek-V2/V3) : interpolation des basses fréquences,
             # extrapolation des hautes, rampe entre beta_fast et beta_slow
@@ -761,6 +780,23 @@ class RotaryEmbedding(nn.Module):
             inv = torch.where((wavelen <= low_wl) & (wavelen >= high_wl), smoothed, inv)
             return inv
         return inv
+
+    def facteur_attention(self) -> float:
+        """evp : `attention_factor` de transformers appliqué à cos/sin, SEULEMENT pour un YaRN dont la config nomme
+        `truncate` (gpt-oss) — `get_mscale(facteur)`, ou le rapport mscale/mscale_all_dim. 1,0 pour tout autre RoPE :
+        les alias YaRN déjà servis (DeepSeek : mscale porté par le chargeur MLA) restent au bit."""
+        s = self.scaling
+        if str(s.get("rope_type") or s.get("type") or "") != "yarn" or "truncate" not in s:
+            return 1.0
+        if s.get("attention_factor") is not None:
+            return float(s["attention_factor"])
+        import math
+        f = float(s.get("factor") or 1.0)
+        def m(scale: float, ms: float = 1.0) -> float:
+            return 1.0 if scale <= 1 else 0.1 * ms * math.log(scale) + 1.0
+        if s.get("mscale") and s.get("mscale_all_dim"):
+            return float(m(f, s["mscale"]) / m(f, s["mscale_all_dim"]))
+        return m(f)
 
     def _ensure(self, seq_len: int, device, dtype) -> None:
         """Tables cos/sin au dtype FIXE du module (`self._dtype`), jamais à celui du premier appelant.
@@ -789,8 +825,9 @@ class RotaryEmbedding(nn.Module):
         t = torch.arange(n, device=device, dtype=torch.float32)
         freqs = torch.outer(t, self.inv_freq.to(device))
         emb = torch.cat((freqs, freqs), dim=-1)
-        self._cos = emb.cos().to(dtype)
-        self._sin = emb.sin().to(dtype)
+        af = self.facteur_attention()
+        self._cos = (emb.cos() * af if af != 1.0 else emb.cos()).to(dtype)
+        self._sin = (emb.sin() * af if af != 1.0 else emb.sin()).to(dtype)
         self._cache_len = n
         self._generation = getattr(self, "_generation", 0) + 1     # tables dérivées : reconstruites si périmées
 
