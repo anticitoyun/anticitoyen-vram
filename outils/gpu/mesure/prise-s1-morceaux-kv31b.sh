@@ -3,7 +3,7 @@
 # Scellé (P1-P6, bras A1/A2/B) : acvram-memoire/revue/poste6-s1-morceaux-scelle-carte-30-09.md — écrit AVANT.
 # Un processus par bras (ACVRAM_PREFILL_MORCEAU lu à l'import) ; moteur depuis l'ARBRE (PYTHONPATH) ; sous carte.sh ; relevés
 # début/fin ; journal lu par ses lignes [acvram] seulement ; le texte généré n'est jamais affiché (§ 6). Comparaison à sec :
-# s1-morceaux-comparer.py. Usage : prise-s1-morceaux-kv31b.sh A1|A2|B
+# s1-morceaux-comparer.py. Usage : prise-s1-morceaux-kv31b.sh A1|A2|B ; env : ALIAS, CTX, SORTIE, OPTIONS_SERVE (ex. --no-prefix-cache)
 set -uo pipefail
 ICI=$(dirname "$(readlink -f "$0")"); DEPOT=$(cd "$ICI/../../.." && pwd)
 BRAS="${1:?bras A1, A2 ou B}"
@@ -34,7 +34,7 @@ releve debut
 LOG="$SORTIE/serveur.log"; t0=$SECONDS
 srv=$(ACVRAM_TYPE=service ACVRAM_NOM="s1-$BRAS-$ALIAS" ACVRAM_SERVICE_LOG="$LOG" ACVRAM_CARTE=0 \
       "$DEPOT/outils/carte.sh" "$PY" -m acvram.cli serve "$dossier" --port "$PORT" --served-name "$ALIAS" --max-model-len "$CTX" \
-      --speculative none --max-batch 1) \
+      --speculative none --max-batch 1 ${OPTIONS_SERVE:-}) \
   || { echo "ÉCHEC : carte.sh a refusé le verrou"; releve fin; exit 4; }
 echo "# serveur PID $srv, journal $LOG"
 rc=1
