@@ -21,7 +21,7 @@ if [ -n "$COMMIT_ATTENDU" ] && [[ "$head" != "$COMMIT_ATTENDU"* ]]; then echo "�
 dossier=$(grep "^$ALIAS	" "$HOME/TSV/acvram-chemins.tsv" | cut -f2); [ -d "$dossier" ] || { echo "ÉCHEC : alias $ALIAS inconnu"; exit 3; }
 # bd jdp (01/10) : depuis un worktree, le venv principal peut importer l'acvram de l'arbre principal — on CONTRÔLE l'origine
 # avant toute prise (PYTHONPATH exporté ci-dessus), et on refuse (rc 6) si elle n'est pas sous $DEPOT ; la ligne va au journal.
-prov=$(CUDA_VISIBLE_DEVICES="" "$PY" -c 'import acvram; print(acvram.__file__)' 2>/dev/null)
+prov=$(CUDA_VISIBLE_DEVICES="" "$PY" -c 'import acvram; print(acvram.__file__)' 2>/dev/null | tail -n 1)   # la garde ACVRAM_ARBRE imprime « ARBRE … » avant : dernière ligne seulement (01/10, 6 rc 6 faux)
 case "$prov" in "$DEPOT"/*) echo "# provenance acvram : $prov" ;; *) echo "ÉCHEC : acvram importé hors du worktree ($prov ≠ $DEPOT/…)"; exit 6 ;; esac
 # Invite figée par son objet git, jamais l'arbre : même texte pour les trois bras, quel que soit HEAD.
 : > "$SORTIE/invite.txt"

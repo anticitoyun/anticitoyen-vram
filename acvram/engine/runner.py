@@ -89,11 +89,6 @@ def _att_relire_kv() -> bool:
     return bool(getattr(_a, "_RELIRE_KV", False))
 
 
-# g9m : 1 = un modèle n'est « hybride » (instantanés, coupe du préfill, décodage sans lot spéculatif) que s'il porte un état
-# récurrent ; 0 (défaut) = dès qu'il a des layer_types (gemma-3/4 traités en hybrides : cache de préfixe jamais servi).
-_HYBRIDE_PAR_RECURRENCE = os.environ.get("ACVRAM_HYBRIDE_PAR_RECURRENCE", "0") == "1"
-
-
 def _lire_morceau() -> int:
     try:
         return max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU", "0") or 0))
@@ -708,12 +703,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # g9m (01/10) : « hybride » = porte un état récurrent (linéaire, SSM, convolution), pas « a des layer_types » — gemma-3/4
         # (sliding/full) n'en a aucun et, pris pour un hybride, plafonnait l'appariement du cache de préfixe à une frontière
         # photographiée qui n'existe jamais (0 jeton servi), coupait son préfill à 256 et décodait sans lot spéculatif.
-        # Derrière ACVRAM_HYBRIDE_PAR_RECURRENCE (chef 01/10) : le correctif CHANGE la sortie de gemma (témoin reprise 0,144
-        # en court, 36 × Devstral) — défaut 0 = ancien comportement jusqu'à la garde qualité de poste2 (ABBA b=12, McNemar).
-        if _HYBRIDE_PAR_RECURRENCE:
-            self.est_hybride = bool(getattr(self.spec, "couches_recurrentes", 0))
-        else:
-            self.est_hybride = bool(getattr(self.spec, "layer_types", None))
+        # Retenu par le chef (01/10, après la carte : cache servi 7 952/7 953, témoin reprise 0,144 court / 0,027 long) :
+        # c'est la définition, pas un régime — « a des layer_types » était un défaut, aucune variable ne le rétablit.
+        self.est_hybride = self.spec.couches_recurrentes > 0
         # Tour de vision (multimodal P1) : None sans tour (manifeste
         # `vision: non`) ; alors toute image est refusée, nommément.
         from .. import regime as _regime
