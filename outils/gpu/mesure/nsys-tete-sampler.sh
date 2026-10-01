@@ -18,7 +18,10 @@
 # Durée : chargement + chauffe + 10 s de fenêtre + post-traitement ≈ 5 min.
 set -u
 ICI=$(cd "$(dirname "$0")" && pwd)
-ARBRE=${ACVRAM_ARBRE:-$(cd "$ICI/../../.." && pwd)}
+_DEPOT_NTS=$(cd "$ICI/../../.." && pwd)
+. "$_DEPOT_NTS/outils/arbre-defaut.sh"
+ARBRE=${ACVRAM_ARBRE:-$(_acvram_arbre_defaut "$_DEPOT_NTS")}
+export ACVRAM_ARBRE="$ARBRE"
 PY=${PY_ACVRAM:-$ARBRE/.venv/bin/python}
 MODELE=${ACVRAM_MODELE_MESURE:-$(${PY} -c "import sys; sys.path.insert(0,'$ARBRE/outils'); from racine_modeles import racine_modeles as r; print(r()+'/Qwen3-Coder-30B-A3B-nvfp4')")}
 O=${SORTIE:-$ICI/../../../scratchpad/nsys-tete-sampler-$(date +%d-%m)}

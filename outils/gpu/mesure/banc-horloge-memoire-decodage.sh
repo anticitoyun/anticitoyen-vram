@@ -22,6 +22,8 @@
 set -u
 S="$(cd "$(dirname "$0")/../../.." && pwd)"
 PY=${ACVRAM_PY:-$S/../../anticitoyen-vram/.venv/bin/python3}
+. "$S/outils/arbre-defaut.sh"
+export ACVRAM_ARBRE="${ACVRAM_ARBRE:-$(_acvram_arbre_defaut "$S")}"
 MODEL=$("$(dirname "$0")/../../racine_modeles.py")/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
 SCRIPT="$S/outils/gpu/mesure/banc-horloge-decodage.py"
 SORTIE_DIR="$S/scratchpad/horloge-memoire-14-09"
