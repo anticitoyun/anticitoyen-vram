@@ -87,3 +87,12 @@ Avant le rejeu : `--max-seqs 2` sur les trois bras Coder (environ 2 Gio de KV, r
 lecture de l'addendum restent inchangées.
 Correction (prise `poste1-5v7-bit3` à 05:37, 2 s) : `serve` n'a pas `--max-seqs` (option de `plan`), argparse a refusé.
 L'équivalent servi est `--max-batch 2` (`max_concurrent_seqs`, cli.py:916). Drapeaux du script vérifiés contre le parseur.
+
+## VERDICT au bit et vrm (prise `poste1-5v7-bit4`, 01/10 05:37:48-05:40:02)
+* instrument : `scratchpad/poste1-fenetre-30-09/bit-5v7.sh` + harnais `outils/gpu/mesure/serveur-bras.sh` (éprouvé contre un faux serveur, `tests/test_serveur_bras.py`)
+* commit : 6e3d471c0 (poste1-aym), ATTENDU vérifié par le script
+* régime : serveur neuf par bras, `--speculative none --no-prefix-cache --max-batch 2`, contexte 16 384, T=0, logprobs 5, 3 invites × 128 jetons ; 5090 à 15 Mio avant et après, seul 8081 (autre carte)
+* scellé : AU BIT prédit (1 = 0) avec le témoin t ; écrit avant la mesure (sections « Scellé » et « Addendum »)
+* mesuré : bras 1, 0 et t → sha256 6ecf74463cdd9773 (66 940 o) tous trois. La variable a pris : petits blocs 0,31/0,02 Gio (1, t) contre 7,42/0,14 (0), libres après piles 13,15 contre 6,04
+* verdict : **AU BIT** — la compaction ne change pas la sortie servie ; témoin reproductible. **vrm : qwen3-vl-30b SERT** à 32 768 (compaction 1 ; piles 11,72 → 13,42 Gio libres, chauffe 32 768/32 768 tenue, 4 491 Mio libres après la passe). L'OOM de `vision.py:415` venait des segments épinglés (5v7)
+* durée : prévue ≤ 10 min, tenue 134 s (bit4) ; prises perdues avant : 213 s (script), 32 s (témoin refusé), 2 s (drapeau)
