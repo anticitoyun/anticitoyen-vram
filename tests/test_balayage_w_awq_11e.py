@@ -19,8 +19,8 @@ def _max6_ensuite():
     nvfp4.regler_echelle("max6")
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError,
-                   reason="11e : la grille AWQ quantifie sous balayage-w sans importance (calibrate.py:260-263)")
+# Vert depuis l'option A (poste6 01/10, ordre chef) : la grille AWQ quantifie toujours en max6 (calibrate.py `_quant_dequant`),
+# seule la quantification finale applique balayage-w avec son importance.
 def test_conversion_balayage_w_avec_awq_et_vraies_statistiques(tiny_checkpoint, target_rig, tmp_path):
     from acvram.engine.config import load_model_spec
     from acvram.memory.tiering import PlannerOptions, auto_plan
@@ -37,3 +37,5 @@ def test_conversion_balayage_w_avec_awq_et_vraies_statistiques(tiny_checkpoint, 
                        spec=spec, stats=stats)
     m = json.load(open(os.path.join(tmp_path, "acvram_manifest.json")))
     assert m["echelle_nvfp4"]["regle"] == "balayage-w" and m["echelle_nvfp4"]["part_balayes"] > 0
+    # les tenseurs hors calibration (sans stats) sont passés en balayage et comptés, pas tus
+    assert m["echelle_nvfp4"]["tenseurs_replies"] >= 1

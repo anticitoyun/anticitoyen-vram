@@ -26,6 +26,13 @@ if [ -z "${ACVRAM_MODELES:-}" ]; then
   ACVRAM_MODELES=$("$(dirname "${BASH_SOURCE[0]}")/../../racine_modeles.py") || { echo "ECHEC : racine_modeles.py"; exit 3; }
 fi
 export ACVRAM_MODELES
+# bd jdp (01/10) : un cwd hors de tout arbre acvram au moment d'une étape (scratchpad, /tmp)
+# passe la garde `acvram/__init__.py:_garde_arbre` en silence. L'arbre du cwd prime (chef,
+# correctif suivant) — le gabarit lui-même (celui qui porte ce fichier) seulement en dernier
+# recours, sauf si la chaîne appelante a déjà posé ACVRAM_ARBRE.
+_CH_DEPOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+. "$_CH_DEPOT/outils/arbre-defaut.sh"
+export ACVRAM_ARBRE="${ACVRAM_ARBRE:-$(_acvram_arbre_defaut "$_CH_DEPOT")}"
 _CH_NOM=; _CH_O=; _CH_ETAT=tenu; _CH_JOURNAL=
 chaine_debut() {   # chaine_debut <nom> <dossier de sortie>
   _CH_NOM=$1; _CH_O=$2; mkdir -p "$_CH_O"; _CH_JOURNAL=$_CH_O/chaine.tsv

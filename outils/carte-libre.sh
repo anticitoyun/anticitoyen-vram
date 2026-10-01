@@ -42,6 +42,7 @@ SEUIL_MIO=${SEUIL_MIO:-800}
 # processus est toléré. Le sm% le dit.
 SEUIL_INTRUS_MIO=${SEUIL_INTRUS_MIO:-100}
 MOTIF=${MOTIF:-'python.*(outils/|acvram)'}
+MOTIF_COMPIL=${MOTIF_COMPIL:-'(^|/)(nvcc|cicc|ptxas|cudafe\+\+|ninja)( |$)'}
 RACINE=${RACINE:-$PPID}          # l'appelant : ses descendants sont « a nous »
 
 # Mes ancetres, sur quelques niveaux seulement. Ils comptent comme « miens » :
@@ -194,7 +195,7 @@ comp=0
 while read -r pid _; do
   [ -n "${pid:-}" ] || continue
   mien "$pid" || comp=$((comp + 1))
-done < <(pgrep -af '(^|/)(nvcc|cicc|ptxas|cudafe\+\+|ninja)( |$)' 2>/dev/null)
+done < <(pgrep -af "$MOTIF_COMPIL" 2>/dev/null)
 if [ "$comp" -gt 0 ]; then
   echo "carte 0 libre, mais $comp processus de compilation en cours : le processeur est charge" >&2
   exit 2

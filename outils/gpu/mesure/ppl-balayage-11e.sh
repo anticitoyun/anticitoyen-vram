@@ -23,6 +23,11 @@ PROFIL="${PROFIL:-rig-14900k-5090-3080ti}"
 RACINE="${ACVRAM_MODELES:-/mnt/AI_GENERATOR/models_acvram}"
 SORTIE="${SORTIE:-$DEPOT/scratchpad/poste6-11e-ppl-$(date +%Y%m%d)}"
 PY="${PY:-$DEPOT/.venv/bin/python}"
+# poste1 01/10 : depuis un worktree figé, $DEPOT/.venv n'existe pas et le venv principal (éditable) importe acvram depuis
+# l'arbre PRINCIPAL — la conversion tournerait sur un autre commit que celui asserté, sans le dire. PYTHONPATH force
+# l'arbre mesuré, et verifier_tete refuse (rc 3) si l'acvram importé n'en vient pas.
+. "$DEPOT/outils/arbre-defaut.sh"
+export PYTHONPATH="$DEPOT${PYTHONPATH:+:$PYTHONPATH}" ACVRAM_ARBRE="${ACVRAM_ARBRE:-$(_acvram_arbre_defaut "$DEPOT")}"
 export ACVRAM_POSTE="${ACVRAM_POSTE:?poste du mesureur}" ACVRAM_DUREE_MAX="${ACVRAM_DUREE_MAX:-1800}" CUDA_VISIBLE_DEVICES=0
 [ "$ACVRAM_POSTE" != poste6 ] || { echo "ÉCHEC : l'autrice de ScaleSweep ne mesure pas sa méthode (REGLES § 3)"; exit 5; }
 mkdir -p "$SORTIE"
@@ -34,7 +39,9 @@ verifier_tete() {
   local head; head=$(git -C "$DEPOT" rev-parse --short=9 HEAD)
   if [[ "$head" != "$COMMIT_ATTENDU"* && "$COMMIT_ATTENDU" != "$head"* ]]; then
     echo "ÉCHEC : HEAD $head ≠ $COMMIT_ATTENDU (scellé)"; exit 2; fi
-  echo "# HEAD $head · poste $ACVRAM_POSTE · durée max ${ACVRAM_DUREE_MAX}s · sortie $SORTIE"
+  local origine; origine=$(cd / && "$PY" -c "import acvram, os; print(os.path.dirname(os.path.dirname(acvram.__file__)))")
+  [ "$origine" = "$DEPOT" ] || { echo "ÉCHEC : acvram importé depuis $origine, pas depuis l'arbre mesuré $DEPOT"; exit 3; }
+  echo "# HEAD $head · acvram $origine · poste $ACVRAM_POSTE · durée max ${ACVRAM_DUREE_MAX}s · sortie $SORTIE"
 }
 
 case "${1:-}" in
@@ -61,7 +68,16 @@ case "${1:-}" in
   analyser)
     { "$PY" - "$SORTIE/eval-max6.json" "$SORTIE/eval-max6-t.json" <<'PYEOF'
 import json, sys
-a, b = (json.load(open(c)) for c in sys.argv[1:3])
+def lire(c):                               # en-tête d'acvram eval avant le JSON (11e, 01/10) : même lecture que le bootstrap
+    L = open(c, encoding="utf-8").read().split("\n")
+    for i, l in enumerate(L):
+        if l.lstrip().startswith(("[", "{")):
+            try:
+                return json.loads("\n".join(L[i:]))
+            except json.JSONDecodeError:
+                continue
+    sys.exit(f"{c} : aucun JSON")
+a, b = (lire(c) for c in sys.argv[1:3])
 a, b = (x[0] if isinstance(x, list) else x for x in (a, b))
 ok = a["par_fenetre"] == b["par_fenetre"] and len(a["par_fenetre"]) > 0
 print("TÉMOIN max6 = max6-t AU BIT" if ok else "TÉMOIN max6 ≠ max6-t : S2-S4 INVALIDES (bruit d'instrument), aucun chiffre calculé")
