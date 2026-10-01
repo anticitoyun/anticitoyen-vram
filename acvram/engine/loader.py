@@ -497,6 +497,14 @@ def load_model(path: str, plan: Optional[Plan] = None,
                       f"({source})", flush=True)
 
             experts = []
+            # evp (gpt-oss) : SwiGLU bornée (constantes de transformers : alpha 1,702, limit 7 — une autre borne n'est
+            # pas celle que le moteur calcule, refus nommé), biais lus par `_linear` (`….bias` à côté du poids)
+            act_experts = "silu"
+            if spec.swiglu_limit:
+                from .attention import _OSS_LIMIT
+                if spec.swiglu_limit != _OSS_LIMIT:
+                    raise ValueError(f"swiglu_limit={spec.swiglu_limit} : seul {_OSS_LIMIT} (gpt-oss) est servi")
+                act_experts = "swiglu_oss"
             for e in range(n_experts):
                 # `residents is None` : comportement d'aujourd'hui, uniforme
                 # (`elin` retombe sur `streamed_mlp`). Sinon, CHAQUE expert
@@ -506,7 +514,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 experts.append(MLP(
                     elin(f"mlp.experts.{e}.gate_proj.weight", streamed=s),
                     elin(f"mlp.experts.{e}.up_proj.weight", streamed=s),
-                    elin(f"mlp.experts.{e}.down_proj.weight", streamed=s)))
+                    elin(f"mlp.experts.{e}.down_proj.weight", streamed=s), act=act_experts))
             shared = None
             shared_gate = None
             if manifest["tensors"].get(p + "mlp.shared_expert.gate_proj.weight"):
@@ -886,6 +894,11 @@ def load_model(path: str, plan: Optional[Plan] = None,
             layers.append(DecoderLayerGDN(i, gdn, mlp_gdn, in_norm, post_norm, d, mlp_device=mlp_dev))
             continue
 
+        # evp (gpt-oss) : fenêtre glissante sur les couches `sliding_attention` et puits par tête. Ce chemin générique ne
+        # posait aucune fenêtre : seul un modèle à puits (gpt-oss) la reçoit ici — les autres restent au bit d'avant.
+        puits = manifest["tensors"].get(p + "self_attn.sinks")
+        fenetre = (spec.sliding_window if (puits and spec.layer_types and i < len(spec.layer_types)
+                                           and spec.layer_types[i] == "sliding_attention") else 0)
         attn = Attention(
             spec,
             lin("self_attn.q_proj.weight", streamed_attn),
@@ -895,7 +908,10 @@ def load_model(path: str, plan: Optional[Plan] = None,
             rope,
             norm_opt("self_attn.q_norm.weight"),
             norm_opt("self_attn.k_norm.weight"),
-            output_gate=spec.attn_output_gate)
+            output_gate=spec.attn_output_gate,
+            window=fenetre)
+        if puits:
+            attn.sinks = reader.get(p + "self_attn.sinks").to(dtype).to(d)
 
         mlp: torch.nn.Module = faire_mlp()
 

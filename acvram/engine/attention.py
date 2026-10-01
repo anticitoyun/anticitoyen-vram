@@ -686,8 +686,6 @@ class MLP(nn.Module):
         from .layers import (stack_int8_linears, stack_nvfp4_linears,
                              stack_int4_awq_linears, stack_plain_linears)
         paire = [self.gate_proj, self.up_proj]
-        if any(getattr(l, "bias", None) is not None for l in paire):
-            return False             # evp : les piles ne portent pas de biais ; gate et up restent deux projections
         self.gate_up = (stack_int8_linears(paire) or stack_nvfp4_linears(paire)
                         or stack_int4_awq_linears(paire)
                         or stack_plain_linears(paire))

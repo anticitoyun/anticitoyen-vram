@@ -74,6 +74,10 @@ def is_hfquant(path: str) -> bool:
         return q.get("format") in ("pack-quantized", "nvfp4-pack-quantized", "mixed-precision")
     if m == "fp8":
         return True
+    if m == "mxfp4":
+        # evp : gpt-oss (seule source MXFP4 connue) — experts convertis EXACTEMENT en NVFP4 (quant/mxfp4.py)
+        from .mxfp4 import est_gpt_oss_mxfp4
+        return est_gpt_oss_mxfp4(path)
     return m == "modelopt"
 
 
@@ -292,6 +296,10 @@ class HFQuantCheckpoint:
         """``direct_nvfp4`` : les poids NVFP4 (modelopt, compressed-tensors
         nvfp4-pack-quantized) sortent en ``NVFP4Tensor`` tels quels ; les
         autres formats et les couches gardées en clair sortent comme avant."""
+        if self.method == "mxfp4":
+            from .mxfp4 import iter_gpt_oss
+            yield from iter_gpt_oss(self.path, direct_nvfp4=direct_nvfp4)
+            return
         dev = "cuda:0" if torch.cuda.is_available() else "cpu"
         # les compagnons (scales, qzeros, weight_scale…) peuvent vivre dans un
         # autre fragment que le poids : index global clé → fichier

@@ -189,3 +189,45 @@ def test_swiglu_borne_contre_transformers_et_temoin():
         assert not torch.equal(mlp._fusionner(gu[..., ::2], gu[..., 1::2]), ref)
     finally:
         A._OSS_LIMIT = lim
+
+
+_SOURCE_20B = "/mnt/2TO_2023_980PRO/Modeles/sources_hf_temporaire/gpt-oss-20b-mxfp4"
+
+
+def test_mxfp4_vers_nvfp4_exact_synthetique_et_refus():
+    from acvram.quant.mxfp4 import mxfp4_dequant, mxfp4_vers_nvfp4
+    from acvram.quant.nvfp4 import dequantize_nvfp4
+    g = torch.Generator().manual_seed(4)
+    blocs = torch.randint(0, 256, (6, 5, 16), generator=g, dtype=torch.uint8)
+    ech = torch.randint(110, 128, (6, 5), generator=g, dtype=torch.uint8)
+    ech[0, 0], ech[5, 4] = 110, 127                      # 17 octaves : la limite tenue
+    t = mxfp4_vers_nvfp4(blocs, ech)
+    assert torch.equal(dequantize_nvfp4(t, torch.float32), mxfp4_dequant(blocs, ech))
+    ech[0, 0] = 109                                      # 18 octaves : refus nommé
+    with pytest.raises(ValueError, match="exacte impossible"):
+        mxfp4_vers_nvfp4(blocs, ech)
+
+
+@pytest.mark.skipif(not __import__("os").path.isdir(_SOURCE_20B), reason="source gpt-oss-20b absente")
+def test_mxfp4_vers_nvfp4_au_bit_de_transformers_sur_le_20b():
+    """Couche 0 réelle, experts 0 et 31 : les poids NVFP4 écrits (gate, up désentrelacés ; down) déquantifiés == la
+    déquantification de transformers (`convert_moe_packed_tensors`), au bit."""
+    import json
+    import os
+    from safetensors import safe_open
+    from transformers.integrations.mxfp4 import convert_moe_packed_tensors
+    from acvram.quant.mxfp4 import mxfp4_vers_nvfp4
+    from acvram.quant.nvfp4 import dequantize_nvfp4
+    ou = json.load(open(os.path.join(_SOURCE_20B, "model.safetensors.index.json")))["weight_map"]
+
+    def lire(k):
+        with safe_open(os.path.join(_SOURCE_20B, ou[k]), "pt") as f:
+            return f.get_tensor(k)
+    for proj in ("gate_up_proj", "down_proj"):
+        b, s = lire(f"model.layers.0.mlp.experts.{proj}_blocks"), lire(f"model.layers.0.mlp.experts.{proj}_scales")
+        for e in (0, 31):
+            ref = convert_moe_packed_tensors(b[e:e + 1], s[e:e + 1], dtype=torch.float32)[0].T   # [out, in]
+            lignes = ((slice(0, None, 2), slice(1, None, 2)) if proj == "gate_up_proj" else (slice(None),))
+            for li in lignes:
+                t = mxfp4_vers_nvfp4(b[e, li].contiguous(), s[e, li].contiguous())
+                assert torch.equal(dequantize_nvfp4(t, torch.float32), ref[li]), (proj, e, li)
