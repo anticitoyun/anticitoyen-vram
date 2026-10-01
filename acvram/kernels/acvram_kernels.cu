@@ -6441,10 +6441,119 @@ torch::Tensor paged_attention_canal(torch::Tensor q, torch::Tensor kc,
 // convolutions causales à état (+SiLU), la L2-normalisation de q et k, les
 // portes g1/β, la récurrence delta sur S (décroissance sur l'axe clé), la
 // RMSNorm de sortie et la porte sigmoïde g2.
-// S[h] est [D_i (sortie), D_j (clé)], j contigu ; le fil i porte la ligne i.
+// 61w (01/10) : S[h] est [D_j (clé), D_i (sortie)] — la disposition de fla,
+// partout dans kda.py. Le fil i porte la COLONNE i : au pas j, les fils
+// voisins lisent des adresses voisines (lecture coalescée ; avant, la ligne i,
+// 512 o entre fils voisins : 172 Go/s, ~11 % du plancher, nsys p81). Plus de
+// tableau row[D] en registres (255 registres et 48 o déversés) : deux passes
+// sur j croissant, la seconde recalcule s·e (le même produit, donc le même
+// arrondi) ; mêmes expressions qu'avant, dans le même ordre — sortie AU BIT du
+// témoin `kda_decode_vk_kernel` (l'ancien noyau, état [D_i, D_j]),
+// tests/test_kda_etat_kv.py.
 // ============================================================================
 template <int D>
 __global__ void kda_decode_kernel(
+        const __nv_bfloat16 *__restrict__ xq, const __nv_bfloat16 *__restrict__ xk,
+        const __nv_bfloat16 *__restrict__ xv,        // [H*D] projections (bf16)
+        const __nv_bfloat16 *__restrict__ g1_pre,    // [H*D] f_b(f_a(x))
+        const __nv_bfloat16 *__restrict__ g2,        // [H*D] g_b(g_a(x))
+        const __nv_bfloat16 *__restrict__ beta_pre,  // [H]
+        const float *__restrict__ wq, const float *__restrict__ wk,
+        const float *__restrict__ wv,                // [H*D, K] poids conv
+        float *__restrict__ cq, float *__restrict__ ck,
+        float *__restrict__ cv,                      // [H*D, K-1] états conv
+        const float *__restrict__ dt_bias,           // [H*D]
+        const float *__restrict__ a,                 // [H]  = -exp(A_log)
+        const float *__restrict__ norm_w,            // [D]
+        float *__restrict__ S,                       // [H, D_clé, D_sortie]
+        __nv_bfloat16 *__restrict__ y,               // [H*D] sortie
+        int K, float eps) {
+    const int h = blockIdx.x, i = threadIdx.x, c = h * D + i;
+    __shared__ float sq[D], sk[D], sv[D], se[D], red[32];
+
+    auto conv = [&](const __nv_bfloat16 *x, const float *w, float *st) {
+        float acc = 0.f;
+        const float xc = __bfloat162float(x[c]);
+        const float *wr = w + (size_t)c * K;
+        float *sr = st + (size_t)c * (K - 1);
+        #pragma unroll 4
+        for (int t = 0; t < K - 1; ++t) acc += wr[t] * sr[t];
+        acc += wr[K - 1] * xc;
+        #pragma unroll 4
+        for (int t = 0; t < K - 2; ++t) sr[t] = sr[t + 1];
+        sr[K - 2] = xc;
+        return acc / (1.f + __expf(-acc));                  // SiLU
+    };
+    auto block_sum = [&](float v) {
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+        if ((i & 31) == 0) red[i >> 5] = v;
+        __syncthreads();
+        float t = 0.f;
+        for (int w = 0; w < D / 32; ++w) t += red[w];
+        __syncthreads();
+        return t;
+    };
+
+    float q = conv(xq, wq, cq), k = conv(xk, wk, ck), v = conv(xv, wv, cv);
+    const float nq = block_sum(q * q), nk = block_sum(k * k);
+    q *= rsqrtf(nq + eps) * rsqrtf((float)D);
+    k *= rsqrtf(nk + eps);
+    const float gp = __bfloat162float(g1_pre[c]) + dt_bias[c];
+    const float sp = gp > 20.f ? gp : log1pf(__expf(gp));   // softplus
+    sq[i] = q; sk[i] = k; sv[i] = v; se[i] = __expf(a[h] * sp);
+    __syncthreads();
+    const float beta = 1.f / (1.f + __expf(-__bfloat162float(beta_pre[h])));
+
+    float *scol = S + (size_t)h * D * D + i;              // S[h][j][i], j au pas D
+    float pred = 0.f;
+    #pragma unroll 16
+    for (int j = 0; j < D; ++j) { const float r = scol[(size_t)j * D] * se[j]; pred += r * sk[j]; }
+    const float d = beta * (v - pred);
+    float o = 0.f;
+    #pragma unroll 16
+    for (int j = 0; j < D; ++j) {
+        float r = scol[(size_t)j * D] * se[j];
+        r += d * sk[j]; o += r * sq[j]; scol[(size_t)j * D] = r;
+    }
+
+    const float ms = block_sum(o * o) / (float)D;
+    const float n = o * rsqrtf(ms + eps) * norm_w[i];
+    y[c] = __float2bfloat16(n / (1.f + __expf(-__bfloat162float(g2[c]))));
+}
+
+torch::Tensor kda_decode(torch::Tensor xq, torch::Tensor xk, torch::Tensor xv,
+                         torch::Tensor g1_pre, torch::Tensor g2,
+                         torch::Tensor beta_pre, torch::Tensor wq,
+                         torch::Tensor wk, torch::Tensor wv, torch::Tensor cq,
+                         torch::Tensor ck, torch::Tensor cv,
+                         torch::Tensor dt_bias, torch::Tensor a,
+                         torch::Tensor norm_w, torch::Tensor S, double eps) {
+    CHECK_CUDA(S); ACVRAM_DEVICE_GUARD(S);
+    CHECK_CONTIG(S); CHECK_CONTIG(cq); CHECK_CONTIG(ck); CHECK_CONTIG(cv);
+    TORCH_CHECK(xq.scalar_type() == torch::kBFloat16, "KDA : projections bf16 attendues");
+    const int H = S.size(0), D = S.size(1), K = wq.size(1);
+    TORCH_CHECK(D == 128 || D == 64, "KDA : dimension de tete non instanciee : ", D);
+    auto y = torch::empty({1, H * D}, xq.options().dtype(torch::kBFloat16));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define BF(t) reinterpret_cast<const __nv_bfloat16 *>((t).data_ptr())
+    #define KDA_LAUNCH(DD) kda_decode_kernel<DD><<<H, DD, 0, stream>>>( \
+        BF(xq), BF(xk), BF(xv), BF(g1_pre), BF(g2), BF(beta_pre), \
+        wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), \
+        cq.data_ptr<float>(), ck.data_ptr<float>(), cv.data_ptr<float>(), \
+        dt_bias.data_ptr<float>(), a.data_ptr<float>(), norm_w.data_ptr<float>(), \
+        S.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), \
+        K, (float)eps)
+    if (D == 128) { KDA_LAUNCH(128); } else { KDA_LAUNCH(64); }
+    #undef KDA_LAUNCH
+    #undef BF
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
+
+// Témoin du test au bit (61w) : l'ancien noyau, état [D_sortie, D_clé], jamais servi.
+template <int D>
+__global__ void kda_decode_vk_kernel(
         const __nv_bfloat16 *__restrict__ xq, const __nv_bfloat16 *__restrict__ xk,
         const __nv_bfloat16 *__restrict__ xv,        // [H*D] projections (bf16)
         const __nv_bfloat16 *__restrict__ g1_pre,    // [H*D] f_b(f_a(x))
@@ -6511,7 +6620,7 @@ __global__ void kda_decode_kernel(
     y[c] = __float2bfloat16(n / (1.f + __expf(-__bfloat162float(g2[c]))));
 }
 
-torch::Tensor kda_decode(torch::Tensor xq, torch::Tensor xk, torch::Tensor xv,
+torch::Tensor kda_decode_vk(torch::Tensor xq, torch::Tensor xk, torch::Tensor xv,
                          torch::Tensor g1_pre, torch::Tensor g2,
                          torch::Tensor beta_pre, torch::Tensor wq,
                          torch::Tensor wk, torch::Tensor wv, torch::Tensor cq,
@@ -6526,7 +6635,7 @@ torch::Tensor kda_decode(torch::Tensor xq, torch::Tensor xk, torch::Tensor xv,
     auto y = torch::empty({1, H * D}, xq.options().dtype(torch::kBFloat16));
     auto stream = at::cuda::getCurrentCUDAStream();
     #define BF(t) reinterpret_cast<const __nv_bfloat16 *>((t).data_ptr())
-    #define KDA_LAUNCH(DD) kda_decode_kernel<DD><<<H, DD, 0, stream>>>( \
+    #define KDA_LAUNCH(DD) kda_decode_vk_kernel<DD><<<H, DD, 0, stream>>>( \
         BF(xq), BF(xk), BF(xv), BF(g1_pre), BF(g2), BF(beta_pre), \
         wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), \
         cq.data_ptr<float>(), ck.data_ptr<float>(), cv.data_ptr<float>(), \
@@ -8649,6 +8758,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("residu") = c10::optional<torch::Tensor>(),
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
+    m.def("kda_decode_vk", &kda_decode_vk, "KDA : temoin du test au bit 61w (ancien noyau, etat [V, K])");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
     m.def("mla_prep_batch", &mla_prep_batch, py::arg("q"), py::arg("kvp"), py::arg("lens"), py::arg("cos32"),
           py::arg("sin32"), py::arg("k_b"), py::arg("w_norm"), py::arg("nope"), py::arg("rope"), py::arg("rank"),

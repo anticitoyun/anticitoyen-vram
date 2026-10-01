@@ -14,7 +14,11 @@ Conventions du convertisseur, déjà appliquées dans le GGUF :
 - Sortie : RMSNorm(ssm_norm) par tête × sigmoid(g_b(g_a(x))), puis out_proj.
 
 L'état d'une séquence : ``(conv_q, conv_k, conv_v [d_inner, kernel−1],
-S [heads, d, d] float32)`` — porté par le moteur, hors cache paginé.
+S [heads, d_k, d_v] float32)`` — disposition [K, V], celle de fla, partout
+(61w, 01/10 : la nôtre était [V, K] ; décodage en lot, préfill et lot eager
+transposaient S deux fois par couche et par pas, 2,17 ms/pas à b=12 sur
+Kimi-Linear, revue/poste1-p81-cake-kda-01-10.md). Porté par le moteur, hors
+cache paginé.
 """
 
 from __future__ import annotations
@@ -53,6 +57,16 @@ def _recurrent_kda():
         return fused_recurrent_kda
     except ImportError:
         return None
+
+
+def _recurrent_kda_fwd():
+    """`fused_recurrent_kda_fwd` de fla : l'enveloppe publique force `inplace_final_state=False` (allocation de
+    l'état final) ; l'appel direct écrit l'état final DANS l'état initial (h0 = ht) — chaque programme lit sa tuile
+    [K, BV] avant la boucle et l'écrit après (fused_recurrent.py, chemin hors lot continu), donc au bit."""
+    if _recurrent_kda() is None:
+        return None
+    from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
+    return fused_recurrent_kda_fwd
 
 
 def _interprete() -> bool:
@@ -154,15 +168,17 @@ class KimiDeltaAttention(nn.Module):
         chunk = _chunk_kda() if (t > 1 and x.is_cuda) else None
         if chunk is not None:
             # prefill : noyau Triton par blocs de fla (même mathématique que
-            # la boucle ; l'état fla est [K, V], le nôtre [V, K])
+            # la boucle), état [K, V] des deux côtés
             core, S_fin = chunk(
                 q_raw.unsqueeze(0), k_raw.unsqueeze(0), v.unsqueeze(0),
                 g=g1.unsqueeze(0), beta=beta.unsqueeze(0),
-                initial_state=S.transpose(-1, -2).contiguous().unsqueeze(0),
+                initial_state=S.contiguous().unsqueeze(0),
                 output_final_state=True, use_qk_l2norm_in_kernel=True)
             sorties = core[0].to(torch.float32)
-            S = S_fin[0].transpose(-1, -2).contiguous().to(torch.float32)
+            S = S_fin[0].contiguous().to(torch.float32)
         else:
+          # boucle de référence écrite sur [V, K] (sa sortie au bit d'avant 61w) : transposée à l'entrée et à la sortie
+          S = S.transpose(-1, -2).contiguous()
           sorties = torch.empty(t, self.nh, self.d,
                                 dtype=torch.float32, device=x.device)
           for i in range(t):
@@ -171,6 +187,7 @@ class KimiDeltaAttention(nn.Module):
               d = beta[i].unsqueeze(-1) * (v[i] - pred)
               S = S + d.unsqueeze(-1) * k[i].unsqueeze(-2)
               sorties[i] = torch.einsum('hij,hj->hi', S, q[i])
+          S = S.transpose(-1, -2).contiguous()
 
         # RMSNorm par tête × porte sigmoïde g2
         var = sorties.pow(2).mean(-1, keepdim=True)
@@ -243,10 +260,9 @@ class KimiDeltaAttention(nn.Module):
                          for j, forme in ((0, (self.d_inner, k1)), (1, (self.d_inner, k1)),
                                           (2, (self.d_inner, k1)), (3, (self.nh, self.d, self.d))))
         q, k, v, g1, beta, g2 = self._lot_projete(h, cq, ck, cv)
-        # l'état fla est [K, V], le nôtre [V, K] (docstring du module)
-        o, S_fin = _recurrent_kda()(q, k, v, g=g1, beta=beta, initial_state=S.transpose(-1, -2).contiguous(),
+        o, S_fin = _recurrent_kda()(q, k, v, g=g1, beta=beta, initial_state=S.contiguous(),
                                     output_final_state=True, use_qk_l2norm_in_kernel=True)
-        S_new = S_fin.transpose(-1, -2).to(torch.float32)
+        S_new = S_fin.to(torch.float32)
         y = self._lot_sortie(o, g2, h.dtype)
         return y, [(cq[i].clone(), ck[i].clone(), cv[i].clone(), S_new[i].contiguous()) for i in range(b)]
 
@@ -254,10 +270,11 @@ class KimiDeltaAttention(nn.Module):
         b = h.shape[0]
         g_, contigu = tranches(self, statics, b, ("cq", "ck", "cv", "S"))
         q, k, v, g1, beta, g2 = self._lot_projete(h, g_["cq"], g_["ck"], g_["cv"])
-        o, S_fin = _recurrent_kda()(q, k, v, g=g1, beta=beta,
-                                    initial_state=g_["S"].transpose(-1, -2).contiguous(),
-                                    output_final_state=True, use_qk_l2norm_in_kernel=True)
-        g_["S"].copy_(S_fin.transpose(-1, -2))
+        S = g_["S"]                                      # [b, nh, K, V], contigu (tranche du lot ou empilement)
+        import contextlib
+        with (torch.cuda.device(S.device.index) if S.is_cuda else contextlib.nullcontext()):
+            o, _ = _recurrent_kda_fwd()(q, k, v, g=g1, beta=beta, initial_state=S, inplace_final_state=True,
+                                        output_final_state=True, use_qk_l2norm_in_kernel=True)
         if not contigu:
             redistribuer(statics, b, g_)
         return self._lot_sortie(o, g2, h.dtype)
@@ -310,12 +327,13 @@ class KimiDeltaAttention(nn.Module):
         g1 = F.softplus(self.f_b(self.f_a(x)).float()[0] + self.dt_bias)
         g1 = g1.view(self.nh, self.d) * self.a.view(self.nh, 1)
         beta = torch.sigmoid(self.beta_proj(x).float()[0])   # [nh]
-        S = st["S"]
+        S = st["S"].transpose(-1, -2).contiguous()          # repli torch écrit sur [V, K] (au bit d'avant 61w)
         S.mul_(torch.exp(g1).unsqueeze(-2))                   # axe clé
         pred = torch.einsum('hij,hj->hi', S, k)
         d = beta.unsqueeze(-1) * (v - pred)
         S.add_(d.unsqueeze(-1) * k.unsqueeze(-2))          # mul puis add, comme forward
         o = torch.einsum('hij,hj->hi', S, q)
+        st["S"].copy_(S.transpose(-1, -2))
         var = o.pow(2).mean(-1, keepdim=True)
         normed = o * torch.rsqrt(var + self.eps) * self.norm_weight.float()
         g2 = self.g_b(self.g_a(x)).float()[0].view(self.nh, self.d)
