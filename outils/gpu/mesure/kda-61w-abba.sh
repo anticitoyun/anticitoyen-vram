@@ -12,7 +12,7 @@ export ACVRAM_MODELE_MESURE=${ACVRAM_MODELE_MESURE:-/mnt/AI_GENERATOR/models_acv
 for v in A B; do
     a=$(eval echo "\${ARBRE_$v:?}"); h=$(eval echo "\${ATTENDU_$v:?}")
     [ "$(git -C "$a" rev-parse HEAD)" = "$h" ] || { echo "ÉCHEC : arbre $v $(git -C "$a" rev-parse --short HEAD) ≠ $h"; exit 65; }
-    o=$(cd / && PYTHONPATH="$a" CUDA_VISIBLE_DEVICES="" "$PY" -c "import acvram, os; print(os.path.dirname(os.path.dirname(os.path.realpath(acvram.__file__))))")
+    o=$(cd / && PYTHONPATH="$a" ACVRAM_ARBRE="$a" CUDA_VISIBLE_DEVICES="" "$PY" -c "import acvram, os; print(os.path.dirname(os.path.dirname(os.path.realpath(acvram.__file__))))" | tail -1)   # la garde imprime « ARBRE … » d'abord
     [ "$o" = "$(realpath "$a")" ] || { echo "ÉCHEC : acvram de $v importé depuis $o"; exit 3; }
 done
 O=${SORTIE:-$ARBRE_B/scratchpad/poste1-61w-$(date +%d-%m)}
