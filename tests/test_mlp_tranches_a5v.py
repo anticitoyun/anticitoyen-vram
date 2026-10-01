@@ -55,6 +55,17 @@ def test_reserve_inchangee_sans_plafond_et_sous_le_plafond():
     assert abs(ecart - (34816 - 20480) * mlp_jeton) < 34816                   # arrondi entier < T octets
 
 
+def _sans_carte(monkeypatch):
+    """Les tests à plan factice (`_plan` : couches sans octets ni budget KV) jugent le seul critère a5v « le plus grand
+    plafond sans exil de plus ». Sous CUDA, `_plafonner_mlp_prefill` (kv31b) demande aussi si le plancher KV tient —
+    `_reserve_prefill` et `_borner_kv_par_la_vram` lisent alors `attn_bytes`, `mlp_bytes`, les tiers — ce que le plan
+    factice n'a pas : la suite GPU de la 0.7.17 cassait ici (AttributeError, chef 01/10). Le régime est donc posé par
+    le test, pas par la machine ; le chemin « plancher KV sous VRAM simulée » a ses propres tests
+    (test_reserve_prefill_tranches_kv31b.py, is_available et mem_get_info forcés)."""
+    monkeypatch.setattr(A, "_MLP_MORCEAU", 4096)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+
 def _plan(n_exiles):
     return types.SimpleNamespace(layers=[types.SimpleNamespace(mlp_storage="cpu" if i < n_exiles else "cuda:0")
                                          for i in range(40)])
@@ -63,7 +74,7 @@ def _plan(n_exiles):
 def test_plafond_le_plus_grand_sans_exil(monkeypatch):
     """Planificateur factice : un MLP exilé par 1 Gio de réserve au-delà de 10 Gio. Le plafond rendu est le plus grand
     multiple de 1 024 sans exil ; un plafond de 1 024 de plus en exilerait un."""
-    monkeypatch.setattr(A, "_MLP_MORCEAU", 4096)
+    _sans_carte(monkeypatch)
     spec, ctx = _spec(), 34816
 
     def planifier():
@@ -77,7 +88,7 @@ def test_plafond_le_plus_grand_sans_exil(monkeypatch):
 
 
 def test_plafond_jamais_pose_si_rien_n_est_exile_ni_pour_un_moe_ni_un_hybride(monkeypatch):
-    monkeypatch.setattr(A, "_MLP_MORCEAU", 4096)
+    _sans_carte(monkeypatch)
     for spec, plan in ((_spec(), _plan(0)), (_spec(num_experts=128, moe_intermediate_size=768), _plan(10)),
                        (_spec(layer_types=["linear_attention", "full_attention"]), _plan(10))):
         assert not L._plafonner_mlp_prefill(spec, 34816, plan, lambda: _plan(0))
