@@ -50,3 +50,13 @@ Coder-30B qkvo-i8c, 29 096, piles au chargement ; ligne du chargeur (`diag-A.log
 réservé non alloué, étaient des segments de 2 Mio épinglés par les petits survivants. Le regroupement les rend tous :
 13,15 Gio libres, contre 10,62 avant les piles, car les originaux des experts sont rendus eux aussi. La prémisse du plan
 (Σ × 1) est JUSTE : rien à compter de plus. Le correctif ne touche pas le plan.
+
+## Scellé AVANT la fenêtre au bit (01/10, script `bit-5v7.sh`)
+Bras : Coder-30B qkvo-i8c à 16 384, serveur neuf, `--no-prefix-cache`, T=0, logprobs 5, 3 invites × 128 jetons ;
+`ACVRAM_PILES_COMPACTER=1` puis `0`. La compaction ne fait que recopier des octets (aucun calcul) : prédit **AU BIT**
+(3/3 réponses, texte et logprobs identiques). Issues nommées :
+* DIFFÉRENT → la compaction change un tenseur servi (copie fautive, mauvaise vue, ordre de pile) : PILES_COMPACTER
+  ne part PAS en défaut 0.7.17 tant que la cause n'est pas nommée ; bogue, pas bruit (T=0, même serveur, mêmes invites).
+* Un bras PAS SERVI ou une réponse vide → script arrêté (exit 1), aucun verdict au bit ; le témoin 0 à 16 384 devait tenir.
+* vrm (qwen3-vl-30b vision, 32 768, compaction 1) : prédit **SERT** (chauffe 32 768 tenue) si l'OOM de `vision.py:415`
+  venait des segments épinglés (5v7) ; OOM de nouveau → cause distincte, vrm reste ouverte, à nommer.
