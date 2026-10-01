@@ -83,6 +83,12 @@ _PREFILL_FILE = os.environ.get("ACVRAM_PREFILL_FILE", "0") == "1"
 # le morceau k+1 les relit par sa table de blocs). C'est la précondition de l'anneau (KV borné à la fenêtre glissante).
 # Numérique : au bit d'un seul tenant quand le cache KV rend ses K/V exactement (16 bits) ; en int8 les morceaux relisent
 # des K/V quantifiés, comme une reprise après le cache de préfixe. Déclaré au régime (« prefill=…(morceaux@N) »).
+def _att_relire_kv() -> bool:
+    """lic : le témoin « K/V relus » (attention._RELIRE_KV), pour la ligne de régime."""
+    from . import attention as _a
+    return bool(getattr(_a, "_RELIRE_KV", False))
+
+
 def _lire_morceau() -> int:
     try:
         return max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU", "0") or 0))
@@ -967,7 +973,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "chemin_moe": chemin_moe,
             # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
-            "prefill": kernels.prefill_regime() + self._prefill_coupe_texte() + self._prefill_morceau_texte(),
+            "prefill": kernels.prefill_regime() + self._prefill_coupe_texte() + self._prefill_morceau_texte()
+                       + ("(relu)" if _att_relire_kv() else ""),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             # pièce 139 : « cublas+bf16(origine fp8 ×233) » quand des int8 ré-encodés du fp8 passent en déquant bf16
             "prefill_int8": kernels.prefill_int8_regime() + (

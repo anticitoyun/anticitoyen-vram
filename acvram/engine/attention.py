@@ -56,6 +56,8 @@ __all__ = ["Attention", "MLP", "MLP2", "SEUIL_FUSION", "_ROPE_KV", "_multi_proje
 # stable et mesure, au-dela il faudrait le mesurer par modele et par taille.
 # `ACVRAM_SEUIL_FUSION` permet de l'explorer sans toucher au code.
 SEUIL_FUSION = int(os.environ.get("ACVRAM_SEUIL_FUSION", "256"))
+# lic (01/10) : 1 = le préfill d'un seul tenant relit ses K/V depuis le cache (témoin, régime `prefill=…(relu)`) ; défaut 0
+_RELIRE_KV = os.environ.get("ACVRAM_PREFILL_RELIRE_KV", "0") == "1"
 # a5v : tranche de lignes du MLP dense au préfill long ; 0 = jamais (témoin). Engagée SEULEMENT au-delà de `_MLP_SEUIL`.
 _MLP_MORCEAU = int(os.environ.get("ACVRAM_MLP_MORCEAU", "4096"))
 _MLP_SEUIL: Optional[int] = None
@@ -498,7 +500,9 @@ class Attention(nn.Module):
         for i, qlen in enumerate(batch.query_lens):
             end = start + qlen
             offset = batch.seq_lens[i] - qlen
-            if cache is not None and offset > 0:
+            # lic (01/10, ACVRAM_PREFILL_RELIRE_KV=1, témoin hors défaut) : un seul tenant relit aussi ses propres K/V
+            # depuis le cache (quantifiés), comme tout morceau après le premier — sépare « format du cache » et « chemin ».
+            if cache is not None and (offset > 0 or _RELIRE_KV):
                 # Une partie de cette séquence est déjà en cache : un préfixe
                 # servi, ou un morceau antérieur. On la relit et on masque selon
                 # le décalage absolu de la requête.

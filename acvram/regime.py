@@ -398,6 +398,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
+    Variable("PREFILL_RELIRE_KV", "0", ("acvram.engine.attention", "_RELIRE_KV"), "1",
+             "lic (01/10, témoin, défaut 0) : 1 = le préfill d'un seul tenant relit ses propres K/V depuis le cache (quantifiés), comme "
+             "tout morceau après le premier — sépare le format du cache du chemin par morceaux ; déclaré « prefill=…(relu) »"),
     Variable("PREFILL_MORCEAU", "0", ("acvram.engine.runner", "_PREFILL_MORCEAU"), None,
              "kv31b levier 2 étape 1 (30/09, OPT-IN, défaut 0 = un seul tenant) : préfill de l'attention par morceaux de N jetons "
              "d'invite, lots passés couche par couche (forward_tranches) ; au bit d'un seul tenant sous les mêmes chemins (morceau ≥ 128 "
