@@ -39,7 +39,7 @@ verifier_tete() {
 
 case "${1:-}" in
   convertir)
-    ech="${2:?convertir <max6|4sur6|balayage>}"; verifier_tete
+    ech="${2:?convertir <max6|4sur6|balayage|balayage-w>}"; verifier_tete
     dest="$RACINE/$(nom_de "$ech")"
     [ -e "$dest" ] && { echo "ÉCHEC : $dest existe déjà (pas d'écrasement)"; exit 3; }
     releve "debut-convertir-$ech"
@@ -51,7 +51,7 @@ case "${1:-}" in
     verifier_tete
     [ "$(sha256sum "$CORPUS" | cut -c1-64)" = "$CORPUS_SHA" ] || { echo "ÉCHEC : corpus ≠ sha256 du scellé"; exit 4; }
     releve "debut-evaluer"; rc=0
-    for ech in max6 4sur6 balayage max6-t; do          # max6-t : témoin de l'instrument, max6 rechargé et rejoué
+    for ech in max6 balayage-w 4sur6 balayage max6-t; do          # max6-t : témoin de l'instrument, max6 rechargé et rejoué
       d="$RACINE/$(nom_de "${ech%-t}")"; [ -f "$d/acvram_manifest.json" ] || { echo "ÉCHEC : $d absent"; exit 3; }
       "$DEPOT/outils/carte.sh" "$PY" -m acvram.cli eval "$d" --corpus "$CORPUS" --window 2048 --stride 2048 \
         --min-context 0 --max-tokens "$MAX_TOKENS" --device cuda:0 --json > "$SORTIE/eval-$ech.json" 2> "$SORTIE/eval-$ech.err" \
@@ -68,7 +68,9 @@ print("TÉMOIN max6 = max6-t AU BIT" if ok else "TÉMOIN max6 ≠ max6-t : S2-S4
 sys.exit(0 if ok else 6)
 PYEOF
       [ $? -eq 0 ] || exit 6               # chef 01/10 : témoin ≠ → le bootstrap ne tourne pas, aucun chiffre S2-S4 à citer
-      "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-max6.json" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
+      # chef 01/10 (bd8 d'poste6, H1-H4) : balayage-w contre max6 d'abord
+      "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-max6.json" "$SORTIE/eval-balayage-w.json" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
+      "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-balayage.json" "$SORTIE/eval-balayage-w.json" --tirages 20000
       "$PY" "$ICI/ppl-appariee-bootstrap.py" "$SORTIE/eval-4sur6.json" "$SORTIE/eval-balayage.json" --tirages 20000
       # contrôle gratuit : la conversion max6 neuve contre l'alias Qwen2.5-Coder-7B-nvfp4 existant (mêmes options ?)
       for f in "$RACINE/Qwen2.5-Coder-7B-nvfp4"/acvram-0000*.safetensors; do sha256sum "$f" | cut -c1-16; done | sort | md5sum
