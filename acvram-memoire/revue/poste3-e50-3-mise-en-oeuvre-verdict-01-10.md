@@ -70,4 +70,17 @@ avant toute campagne — c'est le premier test réel de ce qui est écrit ici.**
 
 **Total : 35/35 verts**, suite GUI/parc élargie rejouée sans régression.
 
+## Correctif chef (après relecture, chargement réel avec le venv figé de poste2)
+
+Confirmé exactement ce que je craignais, dit plus haut : `gsm8k_e50.yaml` et
+`humaneval_e50.yaml` levaient `HfUriError: Repository id must be 'namespace/name', got
+'gsm8k'`/`'openai_humaneval'` au premier chargement réel (`travail/poste2-275-figee/.venv-panel`,
+le vrai lm-eval de la campagne 275). Corrigé : `dataset_path: openai/gsm8k` et
+`openai/openai_humaneval`. `tests/test_qualite_e50_taches_chargent.py` (3 cas, SAUTE si ce venv
+précis est absent) charge RÉELLEMENT les 5 tâches (`TaskManager(include_path=...)
+.load_task_or_group`, `eval_docs`, `doc_to_text` du 1er document — ex. GSM8K 1 319 docs,
+HumanEval 164, MMLU 100-1 534 selon le sujet) et casse sur l'ancien `dataset_path` (rejoué dans
+une copie isolée des yaml, vérifié : l'ancien lève `HfUriError`, le nouveau non). 38/38 verts au
+total, aucune prise.
+
 verdict: acvram-memoire/revue/poste3-e50-3-mise-en-oeuvre-verdict-01-10.md — 5 yaml e50, qualite-e50.sh (--simule vérifié, --executer écrit mais honnêtement non exercé, .venv-panel absent), bac-a-sable-humaneval.sh (10/10, cassant vérifié, piège $HOME tmpfs réinscriptible trouvé et corrigé), barème/extraction/score pass@1 testés sans lm-eval ; écriture exclusivement par parc.py:ecrire_note ; 35/35, aucune prise

@@ -8,8 +8,9 @@
 # interne du paquet. `metric_list` reste vide à dessein : `exact_match`/`pass_at_k` natifs de
 # lm-eval appelleraient leur propre exécution non sandboxée (`confirm_run_unsafe_code`),
 # précisément ce que REGLES § 6 et la précision chef du 01/10 interdisent.
+# chef (01/10) : même correction que gsm8k_e50.yaml — openai/openai_humaneval, id complet.
 task: humaneval_e50
-dataset_path: openai_humaneval
+dataset_path: openai/openai_humaneval
 output_type: generate_until
 test_split: test
 doc_to_text: "{{prompt}}"

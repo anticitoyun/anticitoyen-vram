@@ -4,8 +4,12 @@
 # premier essai réel (campagne-qualite-e50.py, poste2/poste1) avant toute mesure publiée.
 # 0-shot CoT, max_gen_toks 768 figé (méthode § 1-2) ; le NOM (gsm8k_e50, pas gsm8k) isole le
 # régime — un score e50 ne se mélange jamais à un score d'une autre pièce.
+# chef (01/10, chargé avec le vrai venv lm-eval de poste2, travail/poste2-275-figee/.venv-panel) :
+# le huggingface_hub installé ici exige un id complet « namespace/name » — « gsm8k » seul lève
+# HfUriError. Corrigé en openai/gsm8k ; voir tests/test_qualite_e50_taches_chargent.py (charge
+# réellement les 5 tâches avec ce venv, casse sur l'ancien dataset_path).
 task: gsm8k_e50
-dataset_path: gsm8k
+dataset_path: openai/gsm8k
 dataset_name: main
 output_type: generate_until
 training_split: train
