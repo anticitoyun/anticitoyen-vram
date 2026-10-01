@@ -77,6 +77,15 @@ différents (`79bd73086` / `972642262`, diff non vide sur `acvram/`, voir ci-des
 chacun TENU pris séparément, mais aucun des deux modèles n'a ses 4 tâches + PPL sur un seul et
 même commit. Pas de « 12/12 », pas de verdict mixte-27B ni 4B pour l'instant.
 
+**Isolation du worktree vérifiée (piège trouvé par poste1, 01/10)** : `prise-tache-275.sh:6`
+(`cd "$(dirname "$0")/../.."`) place le cwd sur le worktree AVANT tout `$PY -m acvram.cli` —
+Python ajoute le cwd en tête de `sys.path` pour `-m`, donc `import acvram` résout dans le
+worktree, jamais dans l'arbre principal, même si `$PY` pointe sur le venv partagé. Vérifié
+empiriquement : `cd poste2-275-figee && $PY -c "import acvram; print(acvram.__file__)"` →
+`.../poste2-275-figee/acvram/__init__.py`. Même mécanisme pour le rejeu de 07:08 (`rejeu5.sh`,
+copie conforme de `prise-tache-275.sh`) et pour le complément en cours (`completer-mixte-4b.sh`,
+PPL copiée verbatim de `qualite.sh:36-41`, même `cd` hérité).
+
 **Reste à faire** (décision chef) : rejouer mixte-27B (3/4 déjà connues sous `79bd73086`,
 college_computer_science sous `972642262` — soit rejouer les 4 sous le MÊME commit, soit accepter
 qu'une revue nomme les 6 commits intermédiaires comme sans effet sur ces 3 modèles avant de les

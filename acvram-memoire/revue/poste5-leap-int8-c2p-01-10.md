@@ -2,6 +2,7 @@
 * instrument : `tests/test_gdn_etat_int8.py` (C2′ : têtes sans bascule à la borne stricte, têtes avec bascule à part) + `outils/gpu/mesure/banc-gdn-recurrence.py --bras int8` ; prise `scratchpad/poste5-int8-01-10/prise.sh 7df61d4f7`, sortie `prise2.txt`, `banc-int8.json`
 * commit : 7df61d4f7 (HEAD asserté par la prise et par le banc)
 * régime : carte 0 (RTX 5090), `carte.sh` mesure, cpu-safe 85, horloge non relevée (diagnostic de noyau) ; avant/après : sur la 5090 (bus 00000000:01:00.0) aucun autre PID ; llama-server permanent 4436 et leann-core 386005 (serveur d'embeddings bge-m3, 2,7 Gio) sur la 3080 Ti (bus 00000000:02:00.0, relevé `--query-compute-apps=pid,gpu_bus_id`) : **aucune contamination du banc** (rectification chef, vérifiée ; le premier relevé ne disait pas le bus)
+* arbre importé : poste5-leap, prouvé deux fois — `prise.sh` lance depuis la racine du worktree (cd dirname/../..) sans ACVRAM_ARBRE_LIBRE, et la garde d'import (acvram/__init__.py:45-80) REFUSE un acvram d'un autre arbre que celui du cwd ; `gdn_etat_int8` (importé par les tests et le banc) n'existe pas dans l'arbre principal
 * scellé : C2′ (revue/poste5-leap-int8-prise-01-10.md, accepté par chef) ; banc : revue/poste5-leap-int8-scelle-01-10.md § 3
 * mesuré : 10/10 tests ; µs/couche ci-dessous (médiane = pas sans gel, moyenne = gel amorti, les 48 états gelant ensemble 1 rejeu sur 16)
 * verdict : C2′ **tenu**, avec la borne complétée APRÈS l'échec ; **GO banc** (moyenne b=12 29,14 ≤ 30) ; prédiction de temps FAUSSE ; b=1 plus lent, comme prévu
