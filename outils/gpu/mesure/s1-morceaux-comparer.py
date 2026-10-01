@@ -33,8 +33,11 @@ def lire(base: Path, bras: str) -> dict:
             continue
         plat.append(sorted(((hashlib.sha256(k.encode()).hexdigest()[:12], float(v)) for k, v in pos.items()),
                            key=lambda kv: (-kv[1], kv[0])))
-    exil = sum(int(x) for x in re.findall(r"plan réajusté : (\d+) MLP de plus en RAM hôte", log))
     regime = next((l for l in log.splitlines() if l.startswith("[acvram] régime")), "")
+    # `couches_exilées=8/60` du régime (état final), pas la somme des « N MLP de plus » (chaque plan remplace le précédent :
+    # 15 puis 8 lisaient 23 le 01/10 pour 8 exilés) ; repli sur la somme si la ligne de régime manque
+    m_ex = re.search(r"couches_exilées=(\d+)/", regime)
+    exil = int(m_ex.group(1)) if m_ex else sum(int(x) for x in re.findall(r"plan réajusté : (\d+) MLP de plus en RAM hôte", log))
     return {
         "n": len(toks),
         "sha_ids": hashlib.sha256("\x1f".join(toks).encode()).hexdigest()[:16],
