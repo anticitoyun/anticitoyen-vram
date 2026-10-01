@@ -410,6 +410,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
+    Variable("HYBRIDE_PAR_RECURRENCE", "0", ("acvram.engine.runner", "_HYBRIDE_PAR_RECURRENCE"), "1",
+             "g9m (01/10, défaut 0 = ancien comportement) : 1 = un modèle n'est hybride (instantanés, coupe du préfill à 256, décodage "
+             "sans lot spéculatif) que s'il porte un état récurrent — gemma-3/4 reprennent alors comme un dense (cache de préfixe servi) ; "
+             "change la sortie de gemma (témoin reprise 0,144) : bascule du défaut sur la garde qualité de poste2"),
     Variable("PREFILL_RELIRE_KV", "0", ("acvram.engine.attention", "_RELIRE_KV"), "1",
              "lic (01/10, témoin, défaut 0) : 1 = le préfill d'un seul tenant relit ses propres K/V depuis le cache (quantifiés), comme "
              "tout morceau après le premier — sépare le format du cache du chemin par morceaux ; déclaré « prefill=…(relu) »"),
