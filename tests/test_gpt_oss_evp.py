@@ -231,3 +231,184 @@ def test_mxfp4_vers_nvfp4_au_bit_de_transformers_sur_le_20b():
             for li in lignes:
                 t = mxfp4_vers_nvfp4(b[e, li].contiguous(), s[e, li].contiguous())
                 assert torch.equal(dequantize_nvfp4(t, torch.float32), ref[li]), (proj, e, li)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Bout en bout : point de contrôle gpt-oss JOUET en MXFP4 → convertisseur (passage direct) → chargeur → logits, contre
+# transformers GptOssForCausalLM aux mêmes poids (MXFP4 déquantifié), fp32 des deux côtés, processeur.
+
+def _jouet_mxfp4(d):
+    import json
+    from safetensors.torch import save_file
+    g = torch.Generator().manual_seed(5)
+    H, I, L, NH, NKV, HD, E, V = 128, 128, 2, 4, 2, 64, 4, 97
+    cfg = {"architectures": ["GptOssForCausalLM"], "model_type": "gpt_oss", "hidden_size": H, "intermediate_size": I,
+           "num_hidden_layers": L, "num_attention_heads": NH, "num_key_value_heads": NKV, "head_dim": HD,
+           "num_local_experts": E, "num_experts_per_tok": 2, "experts_per_token": 2, "vocab_size": V,
+           "max_position_embeddings": 4096, "rms_norm_eps": 1e-5, "rope_theta": 150000.0, "attention_bias": True,
+           "sliding_window": 8, "layer_types": ["sliding_attention", "full_attention"], "swiglu_limit": 7.0,
+           "rope_scaling": {"rope_type": "yarn", "factor": 32.0, "beta_fast": 32.0, "beta_slow": 1.0,
+                            "original_max_position_embeddings": 4096, "truncate": False},
+           "tie_word_embeddings": False, "torch_dtype": "bfloat16", "eos_token_id": 96, "pad_token_id": 95,
+           "quantization_config": {"quant_method": "mxfp4", "modules_to_not_convert": [
+               "model.layers.*.self_attn", "model.layers.*.mlp.router", "model.embed_tokens", "lm_head"]}}
+    json.dump(cfg, open(d / "config.json", "w"))
+
+    def bf(*s, k=0.05):
+        return (torch.randn(*s, generator=g) * k).to(torch.bfloat16)
+
+    def mx(*s):
+        return (torch.randint(0, 256, (*s, 16), generator=g, dtype=torch.uint8),
+                torch.randint(118, 124, s, generator=g, dtype=torch.uint8))
+    sd = {"model.embed_tokens.weight": bf(V, H, k=0.5), "model.norm.weight": bf(H, k=1.0) + 1,
+          "lm_head.weight": bf(V, H, k=0.2)}
+    for i in range(L):
+        p = f"model.layers.{i}."
+        for n, (o, i_) in {"q": (NH * HD, H), "k": (NKV * HD, H), "v": (NKV * HD, H), "o": (H, NH * HD)}.items():
+            sd[p + f"self_attn.{n}_proj.weight"], sd[p + f"self_attn.{n}_proj.bias"] = bf(o, i_), bf(o)
+        sd[p + "self_attn.sinks"] = bf(NH, k=1.0)
+        sd[p + "mlp.router.weight"], sd[p + "mlp.router.bias"] = bf(E, H, k=0.3), bf(E, k=0.3)
+        b, s = mx(E, 2 * I, H // 32)
+        sd[p + "mlp.experts.gate_up_proj_blocks"], sd[p + "mlp.experts.gate_up_proj_scales"] = b, s
+        sd[p + "mlp.experts.gate_up_proj_bias"] = bf(E, 2 * I, k=0.5)
+        b, s = mx(E, H, I // 32)
+        sd[p + "mlp.experts.down_proj_blocks"], sd[p + "mlp.experts.down_proj_scales"] = b, s
+        sd[p + "mlp.experts.down_proj_bias"] = bf(E, H)
+        sd[p + "input_layernorm.weight"] = bf(H, k=0.1) + 1
+        sd[p + "post_attention_layernorm.weight"] = bf(H, k=0.1) + 1
+    save_file(sd, str(d / "model.safetensors"))
+    json.dump({"weight_map": {k: "model.safetensors" for k in sd}}, open(d / "model.safetensors.index.json", "w"))
+    return cfg, sd
+
+
+def _hf_depuis_jouet(cfg, sd):
+    from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
+    from acvram.quant.mxfp4 import mxfp4_dequant
+    c = GptOssConfig(**{k: v for k, v in cfg.items() if k not in ("quantization_config", "architectures",
+                                                                    "torch_dtype", "model_type")})
+    c._attn_implementation = "eager"
+    hf = GptOssForCausalLM(c).float().eval()
+    etat = {}
+    for k, v in sd.items():
+        if k.endswith("_scales"):
+            continue
+        if k.endswith("_blocks"):
+            base = k[: -len("_blocks")]
+            E = v.shape[0]
+            w = torch.stack([mxfp4_dequant(v[e], sd[base + "_scales"][e]) for e in range(E)])   # [E, out, in]
+            etat[base] = w.transpose(1, 2).contiguous()                                        # x @ W
+            continue
+        etat[k] = v.float()
+    manquants, inattendus = hf.load_state_dict(etat, strict=False)
+    assert not inattendus and all("rotary" in k for k in manquants), (manquants, inattendus)
+    return hf
+
+
+@pytest.fixture(scope="module")
+def jouet_oss(tmp_path_factory):
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import LayerPlacement, Plan, Tier
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+    d = tmp_path_factory.mktemp("gpt-oss-jouet")
+    cfg, sd = _jouet_mxfp4(d)
+    spec = load_model_spec(str(d), "gpt-oss-jouet")
+    GIB = 2 ** 30
+    tier = Tier(name="cpu-test", kind="host", device_index=-1, capacity=8 * GIB, weight_format="bf16",
+                kv_format="bf16", read_bandwidth=50.0, link_bandwidth=20.0)
+    couches = [LayerPlacement(index=i, exec_device="cpu-test", attn_storage="cpu-test", mlp_storage="cpu-test",
+                              fmt="bf16", attn_bytes=1, mlp_bytes=1, mlp_active_bytes=0, is_moe=True)
+               for i in range(spec.num_layers)]
+    kv = 2 * spec.num_layers * spec.num_key_value_heads * spec.head_dim * 2
+    plan = Plan(model="gpt-oss-jouet", tiers=[tier], layers=couches, embed_device="cpu-test",
+                lm_head_device="cpu-test", kv_bytes_per_token=kv, kv_budget={"cpu-test": kv * 4096})
+    out = str(tmp_path_factory.mktemp("acvram-oss"))
+    # autoriser_grossissement : sur un jouet de 0,7 Mo, l'en-tête safetensors (77 tenseurs) fait à lui seul +2 %
+    convert_checkpoint(str(d), plan, ConversionOptions(out_dir=out, passage_direct=True, autoriser_grossissement=True),
+                       spec=spec)
+    return cfg, sd, out
+
+
+def _logits_oss(model, prompt):
+    from acvram.engine.model import ForwardBatch
+    from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
+    n = len(prompt)
+    alloc = BlockAllocator(model.caches[0].cfg.num_blocks)
+    blocks = alloc.allocate((n + BLOCK_SIZE - 1) // BLOCK_SIZE + 1)
+    slots = torch.tensor([blocks[i // BLOCK_SIZE] * BLOCK_SIZE + i % BLOCK_SIZE for i in range(n)])
+    batch = ForwardBatch(torch.tensor(prompt), torch.arange(n), [n], [n], [torch.tensor(blocks)], slots, True)
+    with torch.no_grad():
+        return model(batch)[0].float()
+
+
+def test_jouet_converti_formats_et_chargement(jouet_oss):
+    import json
+    import os
+    from acvram.engine.attention import Attention
+    from acvram.engine.loader import load_model
+    _, _, out = jouet_oss
+    m = json.load(open(os.path.join(out, "acvram_manifest.json")))["tensors"]
+    assert m["model.layers.0.mlp.experts.3.gate_proj.weight"]["format"] == "nvfp4"
+    assert m["model.layers.0.mlp.experts.3.gate_proj.weight"].get("passage_direct") is True
+    assert "model.layers.1.mlp.gate.bias" in m and "model.layers.1.self_attn.sinks" in m
+    loaded = load_model(out, dtype=torch.float32, device_override="cpu")
+    attn = [x for x in loaded.model.modules() if isinstance(x, Attention)]
+    assert [a.window for a in attn] == [8, 0] and all(a.sinks is not None for a in attn)
+
+
+@pytest.mark.parametrize("n", [5, 20])
+def test_jouet_logits_contre_transformers(jouet_oss, n):
+    """n = 20 > fenêtre 8 : la couche glissante et le puits comptent. Témoin : sans puits, les logits s'écartent."""
+    from acvram.engine.attention import Attention
+    from acvram.engine.loader import load_model
+    cfg, sd, out = jouet_oss
+    torch.manual_seed(n)
+    prompt = torch.randint(0, 95, (n,)).tolist()
+    hf = _hf_depuis_jouet(cfg, sd)
+    with torch.no_grad():
+        ref = hf(input_ids=torch.tensor([prompt]), use_cache=False).logits[0, -1].float()
+    loaded = load_model(out, dtype=torch.float32, device_override="cpu")
+    y = _logits_oss(loaded.model, prompt)
+    ecart = float((y - ref).abs().max() / ref.abs().max())
+    assert ecart < 1e-4, ecart
+    for a in loaded.model.modules():
+        if isinstance(a, Attention):
+            a.sinks = None
+    assert float((_logits_oss(loaded.model, prompt) - ref).abs().max() / ref.abs().max()) > 1e-3
+
+
+def test_jouet_pas_de_decodage_contre_transformers(jouet_oss):
+    """Préfill de 19 jetons puis UN pas de décodage par le cache paginé (chemin `_decode` → puits à formes fixes) :
+    logits du 20e jeton == transformers sur les 20 jetons."""
+    from acvram.engine.loader import load_model
+    from acvram.engine.model import ForwardBatch
+    from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
+    cfg, sd, out = jouet_oss
+    torch.manual_seed(7)
+    prompt = torch.randint(0, 95, (20,)).tolist()
+    hf = _hf_depuis_jouet(cfg, sd)
+    with torch.no_grad():
+        ref = hf(input_ids=torch.tensor([prompt]), use_cache=False).logits[0, -1].float()
+    model = load_model(out, dtype=torch.float32, device_override="cpu").model
+    alloc = BlockAllocator(model.caches[0].cfg.num_blocks)
+    blocks = alloc.allocate(3)
+    slot = lambda i: blocks[i // BLOCK_SIZE] * BLOCK_SIZE + i % BLOCK_SIZE          # noqa: E731
+    n = 19
+    with torch.no_grad():
+        model(ForwardBatch(torch.tensor(prompt[:n]), torch.arange(n), [n], [n], [torch.tensor(blocks)],
+                           torch.tensor([slot(i) for i in range(n)]), True))
+        y = model(ForwardBatch(torch.tensor(prompt[n:]), torch.tensor([n]), [n + 1], [1], [torch.tensor(blocks)],
+                               torch.tensor([slot(n)]), False))[0].float()
+    ecart = float((y.reshape(-1) - ref).abs().max() / ref.abs().max())
+    # le cache du plan jouet est bf16 : le pas de décodage relit K/V arrondis (le préfill garde les siens en fp32) —
+    # mesuré 8,8e-4 ; sans puits 0,129 (le témoin d'en dessous)
+    assert model.caches[0].cfg.dtype == "bf16"
+    from acvram.engine.attention import Attention
+    for a in model.modules():
+        if isinstance(a, Attention):
+            a.sinks = None
+    with torch.no_grad():
+        y0 = model(ForwardBatch(torch.tensor(prompt[n:]), torch.tensor([n]), [n + 1], [1], [torch.tensor(blocks)],
+                                torch.tensor([slot(n)]), False))[0].float()
+    assert ecart < 2e-3, ecart
+    assert float((y0.reshape(-1) - ref).abs().max() / ref.abs().max()) > 5e-2
