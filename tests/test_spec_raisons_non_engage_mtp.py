@@ -8,6 +8,7 @@ import types
 import torch
 
 from acvram.engine import runner as runner_mod
+from acvram.engine.model import ACVRamModel
 from acvram.engine.speculative import MTPProposer, NGramProposer, Proposal, _DraftState
 from test_mla_glue_c15 import _jouet
 
@@ -288,4 +289,88 @@ def test_amorcage_reussit_apres_extension_dun_pas_graphe():
     assert p._amorcer(seq, _DraftState()) is False
     eng._nourrir_mtp_prefill(seq)   # le pas qui vient de produire le 2e jeton nourrit le préfill
     assert modele._mtp_prefill.shape[0] == 4
+    assert p._amorcer(seq, _DraftState()) is True
+
+
+# -- correctif (2), 01/10 : préfill en plusieurs passes CONCATÈNE, n'écrase plus -----
+
+class _NormFactice:
+    def __init__(self, h):
+        self.weight = torch.zeros(h)
+
+    def __call__(self, x):
+        return x
+
+
+def _lot_prefill(seq_id, debut, n):
+    return types.SimpleNamespace(
+        is_prefill=True, seq_ids=[seq_id], positions=torch.arange(debut, debut + n),
+        last_token_indices=lambda: torch.tensor([n - 1]))
+
+
+def test_sortie_concatene_prefill_deux_passes_meme_sequence_contigue():
+    """chef (01/10, après le bras long refusé, proposed_tokens=0) : un préfill coupé en
+    plusieurs passes (frontière d'instantané, prompt > _pas_insta) appelait `_sortie` une fois
+    par morceau — une AFFECTATION y écrasait les morceaux précédents. Deux passes contiguës de
+    la MÊME séquence doivent maintenant CONCATÉNER."""
+    H = 8
+    modele = types.SimpleNamespace(
+        norm=_NormFactice(H), mtp=object(), _mtp_prefill=None, _mtp_prefill_seq_id=None,
+        _mtp_prefill_releves=[], _mtp_normalise=lambda: False,
+        _garder_hidden=lambda *a, **k: None, _tete=lambda x: x, _logits_finaux=lambda x: x)
+    sortie = types.MethodType(ACVRamModel._sortie, modele)
+
+    sortie(torch.randn(3, H), None, _lot_prefill(seq_id=1, debut=0, n=3))
+    assert modele._mtp_prefill.shape[0] == 3
+    assert modele._mtp_prefill_releves[-1]["evenement"] == "ecriture"
+
+    sortie(torch.randn(2, H), None, _lot_prefill(seq_id=1, debut=3, n=2))   # continue à la position 3
+    assert modele._mtp_prefill.shape[0] == 5   # concaténé, PAS écrasé (serait 2 sans le correctif)
+    assert modele._mtp_prefill_releves[-1]["evenement"] == "concatenation"
+
+
+def test_sortie_ecrase_si_sequence_differente():
+    H = 8
+    modele = types.SimpleNamespace(
+        norm=_NormFactice(H), mtp=object(), _mtp_prefill=None, _mtp_prefill_seq_id=None,
+        _mtp_prefill_releves=[], _mtp_normalise=lambda: False,
+        _garder_hidden=lambda *a, **k: None, _tete=lambda x: x, _logits_finaux=lambda x: x)
+    sortie = types.MethodType(ACVRamModel._sortie, modele)
+
+    sortie(torch.randn(3, H), None, _lot_prefill(seq_id=1, debut=0, n=3))
+    sortie(torch.randn(4, H), None, _lot_prefill(seq_id=2, debut=0, n=4))   # autre séquence
+    assert modele._mtp_prefill.shape[0] == 4   # repart à zéro, pas 7
+    assert modele._mtp_prefill_releves[-1]["evenement"] == "ecriture"
+
+
+def test_sortie_ecrase_si_coupe_non_contigue():
+    H = 8
+    modele = types.SimpleNamespace(
+        norm=_NormFactice(H), mtp=object(), _mtp_prefill=None, _mtp_prefill_seq_id=None,
+        _mtp_prefill_releves=[], _mtp_normalise=lambda: False,
+        _garder_hidden=lambda *a, **k: None, _tete=lambda x: x, _logits_finaux=lambda x: x)
+    sortie = types.MethodType(ACVRamModel._sortie, modele)
+
+    sortie(torch.randn(3, H), None, _lot_prefill(seq_id=1, debut=0, n=3))
+    sortie(torch.randn(2, H), None, _lot_prefill(seq_id=1, debut=5, n=2))   # trou entre 3 et 5
+    assert modele._mtp_prefill.shape[0] == 2   # pas contigu : repart à zéro
+
+
+def test_amorcage_reussit_apres_prefill_en_deux_passes():
+    """Bout en bout : préfill coupé en deux (frontière d'instantané simulée), amorçage réussi
+    directement après — plus besoin d'un pas supplémentaire pour rattraper l'écart."""
+    H = 8
+    cache = types.SimpleNamespace(cfg=types.SimpleNamespace(num_blocks=8))
+    modele = types.SimpleNamespace(
+        norm=_NormFactice(H), mtp=_TeteFactice(cache), _mtp_prefill=None, _mtp_prefill_seq_id=None,
+        _mtp_prefill_releves=[], _mtp_normalise=lambda: False,
+        _garder_hidden=lambda *a, **k: None, _tete=lambda x: x, _logits_finaux=lambda x: x,
+        embed_tokens=torch.randn(10, H))
+    sortie = types.MethodType(ACVRamModel._sortie, modele)
+    sortie(torch.randn(3, H), None, _lot_prefill(seq_id=1, debut=0, n=3))    # 1re moitié de l'invite
+    sortie(torch.randn(2, H), None, _lot_prefill(seq_id=1, debut=3, n=2))    # 2e moitié, contiguë
+    assert modele._mtp_prefill.shape[0] == 5
+
+    p = MTPProposer(modele, max_model_len=4096)
+    seq = _seq(ids=(1, 2, 3, 4, 5, 6), seq_id=1)   # invite de 5 jetons, len(ids)-1=5 == taille accumulée
     assert p._amorcer(seq, _DraftState()) is True

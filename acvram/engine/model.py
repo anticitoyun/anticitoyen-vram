@@ -219,11 +219,29 @@ class ACVRamModel(nn.Module):
                 # Le brouillon MTP a besoin du contexte entier pour amorcer son
                 # propre cache : au prefill on garde tous les etats, pas
                 # seulement celui du dernier jeton.
-                self._mtp_prefill = etat.detach()
-                self._mtp_prefill_seq_id = (batch.seq_ids[0] if batch.seq_ids
-                                            and len(batch.seq_ids) == 1 else None)
+                #
+                # chef (01/10, après le bras long refusé par sa garde, proposed_tokens=0) :
+                # un préfill coupé en plusieurs passes (frontière d'instantané, runner.py
+                # ~1930-1948 ; morceaux, _prefill_morceaux) appelle `forward()` une fois PAR
+                # MORCEAU — une AFFECTATION ici écrasait les morceaux précédents, ne gardant
+                # que le dernier (prompt > _pas_insta=256, §9/§12 du scellé mtp). On CONCATÈNE
+                # quand cette passe CONTINUE la même séquence au même point où la précédente
+                # s'est arrêtée (même seq_id, position de départ == taille déjà accumulée) ;
+                # sinon (nouvelle séquence, ou coupe non contiguë) on repart à zéro comme avant.
+                seq_id = (batch.seq_ids[0] if batch.seq_ids
+                         and len(batch.seq_ids) == 1 else None)
+                debut = int(batch.positions[0].item()) if batch.positions.numel() else 0
+                if (seq_id is not None and seq_id == self._mtp_prefill_seq_id
+                        and self._mtp_prefill is not None
+                        and debut == self._mtp_prefill.shape[0]):
+                    self._mtp_prefill = torch.cat([self._mtp_prefill, etat.detach()], dim=0)
+                    evenement = "concatenation"
+                else:
+                    self._mtp_prefill = etat.detach()
+                    evenement = "ecriture"
+                self._mtp_prefill_seq_id = seq_id
                 self._mtp_prefill_releves.append({
-                    "evenement": "ecriture", "taille": int(etat.shape[0]),
+                    "evenement": evenement, "taille": int(self._mtp_prefill.shape[0]),
                     "seq_ids": list(batch.seq_ids) if batch.seq_ids is not None else None})
             self._garder_hidden(etat[(batch.last_token_indices() if logits_positions
                                       is None else logits_positions).to(etat.device)])
