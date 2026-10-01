@@ -1481,6 +1481,7 @@ def _sans_marlin(calcul):
 # levier 2 (poste6 01/10) : créneaux d'anneau réservés par appareil (séquences simultanées sous l'anneau), posés par
 # `_kv_blocks_per_device`, lus à la création des caches des couches à fenêtre
 ANNEAU_SEQS: dict = {}
+_KV_ANNEAU_MODE = (os.environ.get("ACVRAM_KV_ANNEAU") or "auto").strip().lower()      # auto | 1 | 0 (regime.VARIABLES)
 
 
 def _anneau_couche(spec: ModelSpec, i: int) -> int:
@@ -1499,7 +1500,7 @@ def _poser_anneau(spec: ModelSpec, plan: Plan, manifest: dict, dev, max_model_le
                   embed_charge: bool = False) -> int:
     """Levier 2 : `ACVRAM_KV_ANNEAU` = auto (défaut : l'anneau n'est pris QUE si le KV plein d'une séquence de `max_model_len` ne
     tient pas — rien ne change pour les contextes qui tenaient), 1 (toujours, bras de mesure), 0 (jamais). Pose `spec.kv_anneau` = R."""
-    mode = (os.environ.get("ACVRAM_KV_ANNEAU") or "auto").strip().lower()
+    mode = _KV_ANNEAU_MODE
     R = spec.anneau_R()
     spec.kv_anneau = 0
     if not R or mode in ("0", "off", "non"):
