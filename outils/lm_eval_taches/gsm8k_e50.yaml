@@ -1,0 +1,48 @@
+# e50.3 § 7 (poste3, 01/10) — gsm8k_e50, dérivée du schéma public lm-eval (gsm8k/gsm8k_cot_zeroshot,
+# `output_type: generate_until`, filtres strict-match/flexible-extract), PAS testée en direct ici :
+# `.venv-panel` n'existe pas sur ce poste (aucune prise, aucun lm-eval installé) — à valider au
+# premier essai réel (campagne-qualite-e50.py, poste2/poste1) avant toute mesure publiée.
+# 0-shot CoT, max_gen_toks 768 figé (méthode § 1-2) ; le NOM (gsm8k_e50, pas gsm8k) isole le
+# régime — un score e50 ne se mélange jamais à un score d'une autre pièce.
+task: gsm8k_e50
+dataset_path: gsm8k
+dataset_name: main
+output_type: generate_until
+training_split: train
+test_split: test
+doc_to_text: "Question: {{question}}\nAnswer: Let's think step by step."
+doc_to_target: "{{answer}}"
+filter_list:
+  - name: "strict-match"
+    filter:
+      - function: "regex"
+        regex_pattern: "#### (\\-?[0-9\\.\\,]+)"
+      - function: "take_first"
+  - name: "flexible-extract"
+    filter:
+      - function: "regex"
+        regex_pattern: "(-?[$0-9.,]{2,})|(-?[0-9]+)"
+        group_select: -1
+      - function: "take_first"
+generation_kwargs:
+  until:
+    - "Question:"
+    - "</s>"
+    - "<|im_end|>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 768
+num_fewshot: 0
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+    regexes_to_ignore:
+      - ","
+      - "\\$"
+      - "(?s).*#### "
+      - "\\.$"
+metadata:
+  version: 1.0

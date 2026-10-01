@@ -1,0 +1,39 @@
+# e50.3 § 7 (poste3, 01/10) — voir mmlu_e50_hsm.yaml pour la justification (0-shot, max_gen_toks
+# 768 figé, nom e50 jamais mélangé à v275).
+dataset_path: cais/mmlu
+dataset_name: professional_law
+description: "The following are multiple choice questions (with answers) about professional law.\n\n"
+task: mmlu_e50_law
+task_alias: professional_law_e50
+validation_split: validation
+test_split: test
+fewshot_config:
+  sampler: first_n
+output_type: generate_until
+doc_to_text: "{% if choices is defined%}Q: {{question.strip()}}\n(A) {{choices[0]}} (B) {{choices[1]}} (C) {{choices[2]}} (D) {{choices[3]}}\nA: Let's think step by step.{% else %}Q: {{ question.strip() }}\nA:{% endif %}"
+doc_to_target: "{{['(A)', '(B)', '(C)', '(D)'][answer] if answer is defined else target}}"
+filter_list:
+  - name: "get-answer-v275"
+    filter:
+      - function: "regex"
+        regex_pattern: "(?i)answer[^A-D]{0,25}([A-D])"
+        group_select: -1
+      - function: "uppercase"
+      - function: "map"
+        mapping_dict: {"A": "(A)", "B": "(B)", "C": "(C)", "D": "(D)"}
+        default_value: "[invalid]"
+generation_kwargs:
+  until:
+    - "</s>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 768
+num_fewshot: 0
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+metadata:
+  version: 1.0
