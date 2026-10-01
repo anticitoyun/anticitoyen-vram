@@ -22,6 +22,29 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 PAS = 64
 PLAGES = ("p81:prefill8k", "p81:decode_b1", "p81:decode_b12")
+# chef 01/10 : « nom contient kda » sous-comptait le préfill. `chunk_kda` de fla 0.5.2 lance aussi des noyaux génériques,
+# relevés par exécution sous TRITON_INTERPRET et par le source (chunk_fwd.py → common/chunk_delta_h, gla/chunk, utils, modules/l2norm).
+# Dans Kimi-Linear, seul chunk_kda appelle fla au préfill : ces noms y sont du KDA. tests/test_kda_part_p81.py vérifie que chacun
+# existe encore dans le fla installé (une mise à jour qui renomme casse le test, pas la mesure en silence).
+NOYAUX_FLA_SANS_KDA = ("l2norm_fwd_kernel", "chunk_local_cumsum_vector_kernel",
+                       "chunk_gated_delta_rule_fwd_kernel_h_blockdim64", "chunk_gla_fwd_kernel_o")
+
+
+def verifier_regime(model_type: str, layer_types) -> None:
+    """REGLES § 6 (chef 01/10) : NOYAUX_FLA_SANS_KDA ne vaut que sans GDN — chunk_gated_delta_rule_fwd_kernel_h et
+    l2norm_fwd_kernel servent aussi les couches GDN. `layer_types` seul ne distingue pas : Kimi et Qwen3.5/Next déclarent
+    tous deux `linear_attention` ; le chargeur n'en fait du KDA que pour model_type « kimi_linear » (loader.py:778-784).
+    Refus (SystemExit) pour tout autre model_type ou tout type de couche hors {linear_attention, full_attention}."""
+    types = set(layer_types or ())
+    hors = sorted(types - {"linear_attention", "full_attention"})
+    if model_type != "kimi_linear" or hors or "linear_attention" not in types:
+        raise SystemExit(f"kda-part-p81 : régime refusé — model_type={model_type!r}, types hors KDA/MLA {hors} : la liste "
+                         f"de noyaux fla compterait du GDN ou autre récurrence comme du KDA")
+
+
+def est_kda(nom: str) -> bool:
+    n = nom.lower()
+    return "kda" in n or any(k in n for k in NOYAUX_FLA_SANS_KDA)
 
 
 def piloter() -> int:
@@ -33,6 +56,9 @@ def piloter() -> int:
     if not torch.cuda.is_available():
         sys.exit("kda-part-p81 : carte requise (sous outils/carte.sh)")
     modele = os.environ["ACVRAM_MODELE_MESURE"]
+    from acvram.engine.config import load_model_spec
+    spec = load_model_spec(modele)
+    verifier_regime(spec.model_type, spec.layer_types)        # avant tout chargement sur la carte
     ctx, b_max = 8192 + 256, 12
     loaded = load_model(modele, dtype=torch.bfloat16, max_model_len=ctx, max_concurrent_seqs=b_max)
     vocab = getattr(getattr(loaded, "spec", None), "vocab_size", 0) or 32000
@@ -92,13 +118,19 @@ def analyser(chemin: str, sortie_json: str = "") -> dict:
     res = {}
     for plage in PLAGES:
         tot = kda = 0.0
+        par_noyau: dict = {}
         for l in corps:
             if l[c_plage].lstrip(":").strip() != plage:
                 continue
             t = float(l[c_tot]) / 1e6          # ns → ms
             tot += t
-            if "kda" in l[c_nom].lower():
+            par_noyau[l[c_nom]] = par_noyau.get(l[c_nom], 0.0) + t
+            if est_kda(l[c_nom]):
                 kda += t
+        if tot:
+            print(f"--- {plage} : 20 premiers noyaux (ms, classe)")
+            for nom, t in sorted(par_noyau.items(), key=lambda x: -x[1])[:20]:
+                print(f"  {t:9.3f}  {'KDA  ' if est_kda(nom) else 'autre'}  {nom[:110]}")
         n = 1 if plage == PLAGES[0] else PAS
         res[plage] = {"gpu_ms": round(tot, 3), "kda_ms": round(kda, 3), "part_kda": round(kda / tot, 4) if tot else None,
                       "kda_ms_par_pas": round(kda / n, 4), "gpu_ms_par_pas": round(tot / n, 4)}
