@@ -259,8 +259,17 @@ class ChannelScaler:
 # --------------------------------------------------------------------------
 
 
+_SANS_STATS_DIT = False     # balayage-w : repli balayage d'un tenseur sans statistiques, dit une fois
+
+
 def _quant_dequant(w: torch.Tensor, fmt: str, group_size: Optional[int]) -> torch.Tensor:
-    t = formats.quantize(w, fmt, group_size=group_size)
+    # 11e, option A (chef 01/10) : la recherche AWQ se fait TOUJOURS en max6, quelle que soit l'échelle de bloc
+    # réglée (`nvfp4.regler_echelle`) — seule la quantification finale (`quantize_with_calibration`) applique la règle et
+    # son importance. Deux raisons : (B1) balayage-w exige une importance que la grille n'a pas (ValueError au premier
+    # tenseur, test_balayage_w_awq_11e) ; (B2) balayage coûte ×10 par appel, × n_grid+1 dans la grille. Les scalers AWQ
+    # sont ainsi les mêmes au bit entre les quatre règles : la règle d'échelle est isolée, comme H-Scale qui affine après
+    # coup (test_grille_awq_max6_11e : égalité au bit sur un vrai tenseur, et sentinelle sur l'échelle passée ici).
+    t = formats.quantize(w, fmt, group_size=group_size, **({"echelle": "max6"} if fmt == "nvfp4" else {}))
     return formats.dequantize(t, torch.float32)
 
 
@@ -621,12 +630,20 @@ def quantize_with_calibration(
             # le poids quantifié w·s voit vraiment. On n'a que E|x_j| (ActStats.mean_abs) : (E|x|/s)² est un proxy
             # nommé (E[x²] ≥ (E|x|)²), constant par tenseur en facteur — seul le rapport entre entrées compte.
             if stats is None:
-                raise ValueError("--echelle balayage-w exige des statistiques d'activation (calibration AWQ) : "
-                                 "aucune pour ce tenseur")
-            imp = stats.mean_abs.to(w.device, torch.float32).reshape(-1)
-            if scaler.scale is not None:
-                imp = imp / scaler.scale.to(w.device, torch.float32).reshape(-1)
-            supplement["importance"] = imp ** 2
+                # Un tenseur hors calibration (tête, projections non relevées) : pas d'importance → balayage (MSE), la
+                # même famille sans la pondération, dit UNE fois par processus (11e option A, B1 : lever ici perdait toute
+                # la conversion au premier tenseur sans statistiques).
+                supplement["echelle"] = "balayage"
+                global _SANS_STATS_DIT
+                if not _SANS_STATS_DIT:
+                    _SANS_STATS_DIT = True
+                    print("[acvram] échelle balayage-w : tenseur sans statistiques d'activation → balayage (MSE) pour "
+                          "celui-ci et les suivants dans le même cas (dit une fois)", flush=True)
+            else:
+                imp = stats.mean_abs.to(w.device, torch.float32).reshape(-1)
+                if scaler.scale is not None:
+                    imp = imp / scaler.scale.to(w.device, torch.float32).reshape(-1)
+                supplement["importance"] = imp ** 2
     qt = formats.quantize(w_eff, fmt, group_size=group_size,
                           **({"table": table} if fmt == "q3n" else {}),
                           **({"symmetric": symmetric} if fmt == "int8" else {}),
