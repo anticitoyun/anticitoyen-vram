@@ -1906,7 +1906,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     # Première passe jusqu'à la frontière, instantané, puis le
                     # reste : le point de reprise est ainsi le même d'une requête à
                     # l'autre tant que l'invite partage ses premiers jetons.
-                    self.model(self._build_batch([seq], prefill=True, limite=coupe))
+                    # Levier 2 étape 1 : cette passe aussi par morceaux — c'est elle qui porte presque toute l'invite
+                    # d'un modèle à couches typées (gemma-4 : frontière à 7 936 sur 7 953, preuve S1 du 01/10 :
+                    # prefill_morceaux restait à 0, deux seuls tenants comparés) ; les logits de la frontière ne servent pas.
+                    if self._prefill_morceaux(seq, coupe) is None:
+                        self.model(self._build_batch([seq], prefill=True, limite=coupe))
                     self._photographier(seq, coupe)
                     seq.cached_len = coupe
                     seq.prefill_len = coupe

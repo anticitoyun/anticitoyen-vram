@@ -302,6 +302,13 @@ class ACVRamModel(nn.Module):
         if _SYNC_COUCHES or (self.mtp is not None and mtp_lue) or any(
                 b.images is not None or b.deepstack is not None for b in batches):
             return False
+        # Poids en flux depuis la RAM hôte (MLP exilés) : `prefetch()` est lancé une fois par couche, mais chaque tranche
+        # résout et RELÂCHE son créneau du bassin partagé (layers.QuantLinear.forward) — la seconde tranche d'une même
+        # couche reprend un créneau déjà réattribué : S1 du 01/10 sur gemma-4-31B à 8/60 MLP exilés, `down_proj` servi
+        # avec un poids de forme gate/up (mat1 4096×21504, mat2 5376×21504). Repli : une tranche après l'autre par
+        # `forward`, qui refait le cycle complet prefetch/wait/release à chaque passe (chemin de tout préfill ordinaire).
+        if any(isinstance(m, QuantLinear) and m.streamed is not None for m in self.modules()):
+            return False
         return not (kernels.prefill_compact("residu") and all(
             type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
             and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers))
