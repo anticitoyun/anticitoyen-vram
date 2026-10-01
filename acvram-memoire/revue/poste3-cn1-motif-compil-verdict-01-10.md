@@ -47,4 +47,12 @@ processus de compilation en cours ». Correctif restauré (`git stash pop`) : 8/
 (3, +1 neuf) : 8/8. Suite élargie (`-k "carte_libre or carte_ticket or verrou"`, 58 cas) sous
 `CUDA_VISIBLE_DEVICES=""` : 58 passed, 1 skipped — aucune régression.
 
+## Écart (chef, relu après coup)
+
+Les 58 tests et le leurre « ninja » ont tourné (~08:05) pendant la prise `nsys` d'poste1, carte
+déjà tenue — vérifié après coup : `CUDA_VISIBLE_DEVICES=""` + aucune allocation GPU réelle de
+cette suite rendent le résultat valide quand même (pure CPU, aucun croisement avec sa mesure),
+mais je n'avais pas regardé `carte.sh`/`nvidia-smi` avant de lancer. À faire systématiquement
+avant tout test, même CPU seul, avant de lancer.
+
 verdict: acvram-memoire/revue/poste3-cn1-motif-compil-verdict-01-10.md — cause : le pgrep de détection de compilation de carte-libre.sh (3e critère, rc=2) n'était isolé par aucune variable ; MOTIF_COMPIL ajoutée et neutralisée dans les deux tests concernés ; contrôle de fuite (leurre « ninja » tournant pendant les tests + test dédié sans l'isolation, rc=2 exigé) ; cassant vérifié par git stash ; 58/58 sous CUDA_VISIBLE_DEVICES=""
