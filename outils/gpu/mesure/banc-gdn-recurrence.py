@@ -16,6 +16,7 @@ import triton.language as tl
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 from acvram.engine import gdn as G                                   # noqa: E402
 from acvram.engine.gdn_tuiles import recurrence_tuiles               # noqa: E402
+from acvram.engine import gdn_etat_int8 as E8                        # noqa: E402
 
 COUCHES, K, V, H = 48, 128, 128, 16
 
@@ -48,7 +49,7 @@ def chrono(fns, rep):
     for _ in range(rep):
         a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         a.record(); g.replay(); b.record(); torch.cuda.synchronize(); ts.append(a.elapsed_time(b) * 1e3 / len(fns))
-    return statistics.median(ts), statistics.pstdev(ts)
+    return statistics.median(ts), statistics.pstdev(ts), statistics.fmean(ts)
 
 
 def main():
@@ -56,6 +57,8 @@ def main():
     ap.add_argument("--attendu", required=True, help="commit exigé de l'arbre (refus rc 65 sinon)")
     ap.add_argument("--lots", default="1,2,8,12,16"); ap.add_argument("--hv", type=int, default=48)
     ap.add_argument("--rep", type=int, default=200); ap.add_argument("--json")
+    ap.add_argument("--bras", default="fla,tuiles2,tuiles4,plancher_rw,plancher_r",
+                    help="liste ; « int8 » = état INT8 par fenêtre (gdn_etat_int8)")
     a = ap.parse_args()
     tete = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
                           cwd=os.path.dirname(__file__)).stdout.strip()
@@ -87,16 +90,23 @@ def main():
             "plancher_r": [lambda S=S: _lecture_kernel[(V // 8, b * a.hv)](S, out, K=K, V=V, BV=8, num_warps=1)
                            for S in etats],
         }
+        # état INT8 par fenêtre (LeapQuant, opt-in) : 48 états compressés distincts, gelés depuis les mêmes S ; les
+        # rejeux font tourner les fenêtres (un gel tous les P rejeux, toutes têtes ensemble) : médiane = pas sans
+        # gel, moyenne = pas amorti
+        e8 = []
+        for S in etats:
+            e = E8.nouvel_etat(b, a.hv, H, K, V, device=dev); E8.geler(e, S); e8.append(e)
+        bras["int8"] = [lambda e=e: E8.pas(e, q, k, v, gb, bb, A, dt) for e in e8]
         ligne = {"au_bit": bits, "octets_lus_par_couche": b * a.hv * K * V * 4}
-        for nom in ("fla", "tuiles2", "tuiles4", "plancher_rw", "plancher_r", "fla"):   # fla deux fois : dérive
-            m, s = chrono(bras[nom], a.rep)
-            ligne.setdefault(nom, []).append({"us": round(m, 3), "sigma": round(s, 3)})
+        for nom in ["fla"] + a.bras.split(",") + ["fla"]:          # fla encadre : dérive
+            m, s, moy = chrono(bras[nom], a.rep)
+            ligne.setdefault(nom, []).append({"us": round(m, 3), "sigma": round(s, 3), "moyenne": round(moy, 3)})
         res["lots"][b] = ligne
         f = ligne["fla"]
-        print(f"b={b:2d} fla {f[0]['us']:.2f}/{f[1]['us']:.2f} µs ; tuiles2 {ligne['tuiles2'][0]['us']:.2f} ; "
-              f"tuiles4 {ligne['tuiles4'][0]['us']:.2f} ; plancher r+w {ligne['plancher_rw'][0]['us']:.2f} ; "
-              f"lecture {ligne['plancher_r'][0]['us']:.2f} ; au bit {bits}", flush=True)
-        del etats; torch.cuda.empty_cache()
+        print(f"b={b:2d} " + " ; ".join(f"{nom} {'/'.join(str(x['us']) for x in ligne[nom])} (moy "
+              f"{'/'.join(str(x['moyenne']) for x in ligne[nom])})" for nom in ligne if isinstance(ligne[nom], list))
+              + f" µs ; au bit {bits}", flush=True)
+        del etats, e8, bras; torch.cuda.empty_cache()
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
     print("FIN banc-gdn-recurrence", flush=True)

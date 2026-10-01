@@ -26,6 +26,7 @@ import torch.nn.functional as F
 from .lot_etats import nouveau_static, redistribuer, tranches
 
 __all__ = ["GatedDeltaNet", "gdn_available", "gdn_regime"]
+_CLES_INT8 = ("Z", "B", "C", "kc", "uc", "bk", "bw", "bg", "n")     # gdn_etat_int8.nouvel_etat
 
 # ACVRAM_GDN = fla (défaut) | torch : la récurrence par les noyaux Triton de
 # flash-linear-attention (`chunk_gated_delta_rule` au prefill,
@@ -43,6 +44,11 @@ _GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
 # lieu d'une, corps de fla recopié ; même suite d'instructions flottantes que fla (PTX sm_120 comparé à sec), égalité
 # au bit vérifiée sur carte par tests/test_gdn_tuiles_au_bit.py. 0 = fla (défaut) ; 2 ou 4 = J.
 _GDN_TUILES = int(os.environ.get("ACVRAM_GDN_TUILES", "0"))
+# LeapQuant (01/10, opt-in, la SORTIE CHANGE) : état de décodage gelé en INT8 par fenêtre de P jetons
+# (gdn_etat_int8.py) — 1 o/élément lu par pas au lieu de 4 lus + 4 écrits. fp32 = défaut (fla en place).
+_ETAT_GDN = os.environ.get("ACVRAM_ETAT_GDN", "fp32")
+if _ETAT_GDN not in ("fp32", "int8"):
+    raise ValueError(f"ACVRAM_ETAT_GDN={_ETAT_GDN} : fp32 (défaut) ou int8")
 if _GDN_TUILES not in (0, 1, 2, 4, 8, 16):
     raise ValueError(f"ACVRAM_GDN_TUILES={_GDN_TUILES} : 0 (fla), 1, 2, 4, 8 ou 16 (diviseur des 16 tuiles de V=128)")
 # Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
@@ -128,7 +134,11 @@ def gdn_regime() -> str:
         return "torch(fla absent)"
     if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
         return "torch(sans carte)"
-    return "fla" + (f" tuiles={_GDN_TUILES}" if _GDN_TUILES else "") + _ab_texte()
+    etat = ""
+    if _ETAT_GDN == "int8":
+        from . import gdn_etat_int8 as E8
+        etat = f" etat=int8(P={E8.P},R={E8.R})"
+    return "fla" + (f" tuiles={_GDN_TUILES}" if _GDN_TUILES else "") + etat + _ab_texte()
 
 
 def _ab_texte() -> str:
@@ -485,6 +495,18 @@ class GatedDeltaNet(nn.Module):
         """Un créneau = des VUES dans un tampon groupé (`lot_etats`) : les
         créneaux 0..b-1 forment des tranches contiguës, `decode_static_batch`
         sert le lot en un lancement sans rassembler ni redistribuer."""
+        if _ETAT_GDN == "int8":
+            # LeapQuant : le créneau porte l'état compressé (gdn_etat_int8.nouvel_etat, sans l'axe des créneaux) ;
+            # aucune clé "S" : un chemin qui lirait l'état fp32 directement casse au lieu de lire un état périmé.
+            if torch.device(device).type != "cuda":
+                raise RuntimeError("ACVRAM_ETAT_GDN=int8 : noyaux Triton, carte requise")
+            from . import gdn_etat_int8 as E8
+            gabarit = E8.nouvel_etat(1, self.nv, self.nk, self.dk, self.dv, device="meta")
+            formes = {"conv": (self.conv_dim, self.kernel - 1)}
+            formes.update({c: tuple(t.shape[1:]) for c, t in gabarit.items()})
+            st = nouveau_static(self, device, formes, {c: t.dtype for c, t in gabarit.items()})
+            st["C"].fill_(1.0)
+            return st
         st = nouveau_static(self, device, {"conv": (self.conv_dim, self.kernel - 1),
                                            "S_": (self.nv, self.dk, self.dv)})
         st["S"] = st.pop("S_").unsqueeze(0)             # [1, nv, dk, dv], la forme de l'état fonctionnel
@@ -492,6 +514,22 @@ class GatedDeltaNet(nn.Module):
 
     @staticmethod
     def static_load(st: dict, etat) -> None:
+        if "Z" in st:
+            from . import gdn_etat_int8 as E8
+            vue = {c: st[c].unsqueeze(0) for c in _CLES_INT8}
+            if etat is None:
+                st["conv"].zero_()
+                for c in _CLES_INT8:
+                    st[c].zero_()
+                st["C"].fill_(1.0)
+            elif len(etat) > 2 and etat[2] is not None:      # export d'un créneau INT8 : aller-retour exact
+                st["conv"].copy_(etat[0])
+                for c in _CLES_INT8:
+                    st[c].copy_(etat[2][c])
+            else:                                            # état fp32 (préfill, chemin eager) : gelé ici
+                st["conv"].copy_(etat[0])
+                E8.geler(vue, etat[1].to(torch.float32).reshape(1, *st["Z"].shape))
+            return
         if etat is None:
             st["conv"].zero_(); st["S"].zero_()
             return
@@ -499,9 +537,16 @@ class GatedDeltaNet(nn.Module):
 
     @staticmethod
     def static_export(st: dict) -> tuple:
+        if "Z" in st:
+            # (conv, S fp32 reconstruit pour qui lit un état fonctionnel, copie compressée pour le rechargement)
+            from . import gdn_etat_int8 as E8
+            vue = {c: st[c].unsqueeze(0) for c in _CLES_INT8}
+            return (st["conv"].clone(), E8.etat_fp32(vue), {c: st[c].clone() for c in _CLES_INT8})
         return (st["conv"].clone(), st["S"].clone())
 
     def decode_static(self, x: torch.Tensor, st: dict) -> torch.Tensor:
+        if "Z" in st:
+            return self.decode_static_batch(x, [st])
         y, (conv, S) = self.forward(x, (st["conv"], st["S"]))
         st["conv"].copy_(conv)
         st["S"].copy_(S.to(torch.float32))
@@ -563,11 +608,27 @@ class GatedDeltaNet(nn.Module):
         y = self.out_proj(y.to(h.dtype))
         return y, [(conv_state[i].clone(), S_new[i:i + 1].to(torch.float32)) for i in range(b)]
 
+    def _decode_int8(self, h: torch.Tensor, statics: list, b: int) -> torch.Tensor:
+        """LeapQuant : mêmes projections, convolution et norme que la voie fp32 ; seule la récurrence change."""
+        from . import gdn_etat_int8 as E8
+        g_, contigu = tranches(self, statics, b, ("conv",) + _CLES_INT8)
+        q, k, v, g, beta, z, brutes = self._lot_projete(h, g_["conv"], portes_brutes=_GDN_PORTES_NOYAU) \
+            if _GDN_PORTES_NOYAU else self._lot_projete(h, g_["conv"]) + (False,)
+        et = {c: g_[c] for c in _CLES_INT8}
+        core = (E8.pas(et, q, k, v, g, beta, self.a_log, self.dt_bias) if brutes
+                else E8.pas(et, q, k, v, g, beta))
+        if not contigu:
+            redistribuer(statics, b, g_)
+        y = self._norm_gated(core.reshape(-1, self.dv), z.view(b, self.nv, self.dv), h.dtype).reshape(b, self.value_dim)
+        return self.out_proj(y.to(h.dtype))
+
     def decode_static_batch(self, h: torch.Tensor, statics: list) -> torch.Tensor:
         """Chemin à formes fixes pour ``b`` créneaux : états lus et écrits
         dans les tranches contiguës du tampon groupé (aucune copie si les
         créneaux 0..b-1 vivent dans le même lot), un lancement de fla."""
         b = h.shape[0]
+        if "Z" in statics[0]:
+            return self._decode_int8(h, statics, b)
         g_, contigu = tranches(self, statics, b, ("conv", "S_"))
         conv_state, S = g_["conv"], g_["S_"]
         en_place = _GDN_ETAT_EN_PLACE and S.is_cuda and S.is_contiguous()

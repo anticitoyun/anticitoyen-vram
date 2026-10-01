@@ -335,6 +335,11 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_ETAT_EN_PLACE", "1", ("acvram.engine.gdn", "_GDN_ETAT_EN_PLACE"), "0",
              "pièce 156 F4 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, la récurrence fla écrit son état final dans le "
              "tampon statique (h0 = ht) au lieu d'une allocation suivie d'une copie de 25 Mo par couche (b=8, Qwen3.8)"),
+    Variable("ETAT_GDN", "fp32", ("acvram.engine.gdn", "_ETAT_GDN"), "fp32",
+             "LeapQuant (01/10, opt-in, la SORTIE CHANGE) : int8 = état de décodage GDN gelé en INT8 par fenêtre "
+             "(gdn_etat_int8.py : compensateurs, lissage, tampon fp16) ; fp32 = récurrence fla en place"),
+    Variable("ETAT_GDN_FENETRE", "16", ("acvram.engine.gdn_etat_int8", "P"), None,
+             "LeapQuant : jetons par fenêtre de l'état INT8 (puissance de 2, article : 16) ; lu par gdn_etat_int8"),
     Variable("GDN_TUILES", "0", ("acvram.engine.gdn", "_GDN_TUILES"), "0",
              "I5 (30/09, opt-in tant que non mesuré) : J = 2 ou 4 tuiles de valeurs par programme dans la récurrence GDN "
              "du décodage (gdn_tuiles.py, corps de fla recopié, PTX sm_120 = fla × J) ; 0 = noyau fla ; au bit (test I5)"),
