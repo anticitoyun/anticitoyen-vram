@@ -30,6 +30,18 @@ NOYAUX_FLA_SANS_KDA = ("l2norm_fwd_kernel", "chunk_local_cumsum_vector_kernel",
                        "chunk_gated_delta_rule_fwd_kernel_h_blockdim64", "chunk_gla_fwd_kernel_o")
 
 
+def verifier_regime(model_type: str, layer_types) -> None:
+    """REGLES § 6 (chef 01/10) : NOYAUX_FLA_SANS_KDA ne vaut que sans GDN — chunk_gated_delta_rule_fwd_kernel_h et
+    l2norm_fwd_kernel servent aussi les couches GDN. `layer_types` seul ne distingue pas : Kimi et Qwen3.5/Next déclarent
+    tous deux `linear_attention` ; le chargeur n'en fait du KDA que pour model_type « kimi_linear » (loader.py:778-784).
+    Refus (SystemExit) pour tout autre model_type ou tout type de couche hors {linear_attention, full_attention}."""
+    types = set(layer_types or ())
+    hors = sorted(types - {"linear_attention", "full_attention"})
+    if model_type != "kimi_linear" or hors or "linear_attention" not in types:
+        raise SystemExit(f"kda-part-p81 : régime refusé — model_type={model_type!r}, types hors KDA/MLA {hors} : la liste "
+                         f"de noyaux fla compterait du GDN ou autre récurrence comme du KDA")
+
+
 def est_kda(nom: str) -> bool:
     n = nom.lower()
     return "kda" in n or any(k in n for k in NOYAUX_FLA_SANS_KDA)
@@ -44,6 +56,9 @@ def piloter() -> int:
     if not torch.cuda.is_available():
         sys.exit("kda-part-p81 : carte requise (sous outils/carte.sh)")
     modele = os.environ["ACVRAM_MODELE_MESURE"]
+    from acvram.engine.config import load_model_spec
+    spec = load_model_spec(modele)
+    verifier_regime(spec.model_type, spec.layer_types)        # avant tout chargement sur la carte
     ctx, b_max = 8192 + 256, 12
     loaded = load_model(modele, dtype=torch.bfloat16, max_model_len=ctx, max_concurrent_seqs=b_max)
     vocab = getattr(getattr(loaded, "spec", None), "vocab_size", 0) or 32000

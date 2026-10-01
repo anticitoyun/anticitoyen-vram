@@ -57,3 +57,39 @@ def test_les_noms_fla_existent_dans_le_fla_installe(m):
                 defs |= set(re.findall(r"^def (\w+)\(", open(os.path.join(d, f), encoding="utf-8").read(), re.M))
     absents = [n for n in m.NOYAUX_FLA_SANS_KDA if n not in defs]
     assert not absents, f"noyaux fla renommés ou retirés : {absents} — refaire l'inventaire (kda-part-p81.py)"
+
+
+@pytest.mark.parametrize("model_type, types, accepte", [
+    ("kimi_linear", ["linear_attention"] * 3 + ["full_attention"], True),
+    ("qwen3_next", ["linear_attention"] * 3 + ["full_attention"], False),      # GDN : mêmes layer_types que Kimi
+    ("qwen3_5_text", ["linear_attention", "full_attention"], False),
+    ("kimi_linear", ["linear_attention", "full_attention", "mamba"], False),  # autre récurrence
+    ("kimi_linear", ["full_attention"], False),                               # aucun KDA : part nulle par construction
+])
+def test_le_regime_refuse_tout_ce_qui_n_est_pas_kda_mla(m, model_type, types, accepte):
+    """REGLES § 6 : la liste de noyaux fla ne vaut que pour un modèle KDA + MLA sans GDN."""
+    if accepte:
+        m.verifier_regime(model_type, types)
+    else:
+        with pytest.raises(SystemExit, match="régime refusé"):
+            m.verifier_regime(model_type, types)
+
+
+@pytest.mark.parametrize("dossier, accepte", [
+    ("Kimi-Linear-35B-kda-nvfp4", True),
+    ("Agents-A1-4B-kimi-nvfp4", False),       # « kimi » dans le nom, GDN (qwen3_5_text) dans la config
+])
+def test_le_regime_sur_les_convertis_du_parc(m, dossier, accepte):
+    from acvram.engine.config import load_model_spec
+    import sys
+    sys.path.insert(0, str(OUTIL.parents[2]))           # outils/
+    from racine_modeles import racine_modeles
+    chemin = os.path.join(os.environ.get("ACVRAM_PARC") or racine_modeles(), dossier)
+    if not os.path.isfile(f"{chemin}/config.json"):
+        pytest.skip(f"{dossier} absent")
+    spec = load_model_spec(chemin)
+    if accepte:
+        m.verifier_regime(spec.model_type, spec.layer_types)
+    else:
+        with pytest.raises(SystemExit, match="régime refusé"):
+            m.verifier_regime(spec.model_type, spec.layer_types)
