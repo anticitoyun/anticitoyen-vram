@@ -68,7 +68,16 @@ case "${1:-}" in
   analyser)
     { "$PY" - "$SORTIE/eval-max6.json" "$SORTIE/eval-max6-t.json" <<'PYEOF'
 import json, sys
-a, b = (json.load(open(c)) for c in sys.argv[1:3])
+def lire(c):                               # en-tête d'acvram eval avant le JSON (11e, 01/10) : même lecture que le bootstrap
+    L = open(c, encoding="utf-8").read().split("\n")
+    for i, l in enumerate(L):
+        if l.lstrip().startswith(("[", "{")):
+            try:
+                return json.loads("\n".join(L[i:]))
+            except json.JSONDecodeError:
+                continue
+    sys.exit(f"{c} : aucun JSON")
+a, b = (lire(c) for c in sys.argv[1:3])
 a, b = (x[0] if isinstance(x, list) else x for x in (a, b))
 ok = a["par_fenetre"] == b["par_fenetre"] and len(a["par_fenetre"]) > 0
 print("TÉMOIN max6 = max6-t AU BIT" if ok else "TÉMOIN max6 ≠ max6-t : S2-S4 INVALIDES (bruit d'instrument), aucun chiffre calculé")
