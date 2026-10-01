@@ -10,6 +10,7 @@ models/
 *.safetensors
 *.gguf
 .pytest_cache/
+scratchpad/qualite-e50-*/   # e50.3 : sortie jetable de outils/qualite-e50.sh --executer (tests compris)
 
 # credentials -- never commit these
 vacancesgitlab
