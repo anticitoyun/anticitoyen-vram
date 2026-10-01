@@ -16,6 +16,7 @@ mémoire vive un endroit raisonnable pour garder les 120 autres.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
@@ -121,6 +122,10 @@ class ACVRamModel(nn.Module):
         self._mtp_hidden: Optional[torch.Tensor] = None
         self._mtp_hidden_n: int = 0
         self._mtp_prefill: Optional[torch.Tensor] = None
+        # chef (01/10, pièce mtp) : _mtp_prefill est une AFFECTATION (pas une
+        # concaténation) à chaque préfill — les 4 dernières tailles écrites, pour voir
+        # si un préfill en plusieurs passes (frontière d'instantané, morceaux) l'écrase.
+        self._mtp_prefill_releves: deque = deque(maxlen=4)
 
     @torch.inference_mode()
     def forward(self, batch: ForwardBatch, return_hidden: bool = False,
@@ -213,6 +218,7 @@ class ACVRamModel(nn.Module):
                 # propre cache : au prefill on garde tous les etats, pas
                 # seulement celui du dernier jeton.
                 self._mtp_prefill = etat.detach()
+                self._mtp_prefill_releves.append({"evenement": "ecriture", "taille": int(etat.shape[0])})
             self._garder_hidden(etat[(batch.last_token_indices() if logits_positions
                                       is None else logits_positions).to(etat.device)])
         # La vérification spéculative et la perplexité ont toutes deux besoin

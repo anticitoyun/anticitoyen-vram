@@ -481,6 +481,10 @@ class MTPProposer:
                                         enable_prefix_cache=False)
         self.state: dict[int, _DraftState] = {}
         self._ligne = 0            # ligne du dernier lot vérifié à reprendre
+        # chef (01/10, pièce mtp, après l'essai court où "amorcage" domine sans que
+        # sans_hidden apparaisse) : les 4 derniers échecs d'amorçage, avec la cause exacte
+        # et les tailles en jeu — exposés via EngineStats.source_speculateur, pas un print.
+        self._amorcage_echecs: deque = deque(maxlen=4)
 
     def _ensure_blocks(self, st: _DraftState, needed_tokens: int) -> bool:
         need = (needed_tokens + self.block_size - 1) // self.block_size
@@ -533,9 +537,15 @@ class MTPProposer:
         hs = getattr(self.model, "_mtp_prefill", None)
         ids = seq.all_ids
         if hs is None or hs.shape[0] < len(ids) - 1:
+            self._amorcage_echecs.append({
+                "cause": "prefill_absent" if hs is None else "prefill_court",
+                "hs_shape0": None if hs is None else int(hs.shape[0]),
+                "len_ids": len(ids), "len_ids_moins_1": len(ids) - 1})
             return False
         n = len(ids) - 1
         if not self._ensure_blocks(st, n + 8):
+            self._amorcage_echecs.append({"cause": "blocs_epuises", "hs_shape0": int(hs.shape[0]),
+                                          "len_ids": len(ids), "len_ids_moins_1": len(ids) - 1})
             return False
         emb = self.model.embed_tokens
         toks = torch.tensor(ids[1:n + 1], dtype=torch.long, device=emb.device)

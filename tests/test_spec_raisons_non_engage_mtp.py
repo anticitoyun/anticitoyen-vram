@@ -9,6 +9,7 @@ import torch
 
 from acvram.engine import runner as runner_mod
 from acvram.engine.speculative import MTPProposer, NGramProposer, Proposal
+from test_mla_glue_c15 import _jouet
 
 
 def _seq(max_tokens=256, output_ids=None, ids=(1, 2, 3)):
@@ -120,3 +121,48 @@ def test_runner_k_insuffisant():
     # budget = max_tokens - len(output_ids) - 1 = 2 - 0 - 1 = 1 < spec_k=4
     out = eng._speculative_decode([_seq(max_tokens=2)])
     assert out == "PLAIN" and eng.stats.spec_k_insuffisant == 1
+
+
+# -- compteurs permanents (01/10, après l'essai où "amorcage" domine) -------
+
+def test_mtp_amorcage_echec_prefill_absent_releve_cause_et_tailles():
+    h = torch.zeros(16, 8)
+    p = _mtp(mtp_hidden=h, mtp_prefill=None)
+    p.propose(_seq(ids=(1, 2, 3, 4, 5)), k=4)
+    assert len(p._amorcage_echecs) == 1
+    r = p._amorcage_echecs[-1]
+    assert r == {"cause": "prefill_absent", "hs_shape0": None, "len_ids": 5, "len_ids_moins_1": 4}
+
+
+def test_mtp_amorcage_echec_prefill_court_releve_tailles():
+    h = torch.zeros(16, 8)
+    prefill_court = torch.zeros(2, 8)   # trop court pour len(ids)-1 = 4
+    p = _mtp(mtp_hidden=h, mtp_prefill=prefill_court)
+    p.propose(_seq(ids=(1, 2, 3, 4, 5)), k=4)
+    r = p._amorcage_echecs[-1]
+    assert r == {"cause": "prefill_court", "hs_shape0": 2, "len_ids": 5, "len_ids_moins_1": 4}
+
+
+def test_mtp_amorcage_echecs_bornes_a_4():
+    h = torch.zeros(16, 8)
+    p = _mtp(mtp_hidden=h, mtp_prefill=None)
+    for _ in range(6):
+        p.propose(_seq(ids=(1, 2, 3, 4, 5)), k=4)
+    assert len(p._amorcage_echecs) == 4   # deque(maxlen=4) : casse si la borne disparaît
+
+
+def test_model_mtp_prefill_releves_init_vide_et_borne():
+    m = _jouet(0)
+    assert list(m._mtp_prefill_releves) == []
+    assert m._mtp_prefill_releves.maxlen == 4
+
+
+def test_engine_stats_releves_amorcage_et_mtp_prefill():
+    spec = types.SimpleNamespace(_amorcage_echecs=[{"cause": "prefill_absent"}])
+    modele = types.SimpleNamespace(_mtp_prefill_releves=[{"evenement": "ecriture", "taille": 3}])
+    stats = runner_mod.EngineStats()
+    stats.source_speculateur = lambda: spec
+    stats.source_modele = lambda: modele
+    d = stats.to_dict()
+    assert d["spec_amorcage_echecs"] == [{"cause": "prefill_absent"}]
+    assert d["mtp_prefill_releves"] == [{"evenement": "ecriture", "taille": 3}]

@@ -264,6 +264,18 @@ class EngineStats:
     # graphes désactivés, repliés en eager avant toute capture, ou moteur à
     # sec → trois zéros, qui sont la vérité et non une absence de mesure.
     source_graphes: Any = field(default=None, repr=False, compare=False)
+    # chef (01/10, pièce mtp) : même principe que source_graphes — lus en direct sur le
+    # proposeur et le modèle, jamais recopiés ici (les deques vivent là où l'événement se produit).
+    source_speculateur: Any = field(default=None, repr=False, compare=False)
+    source_modele: Any = field(default=None, repr=False, compare=False)
+
+    def releves_amorcage(self) -> list:
+        spec = self.source_speculateur() if callable(self.source_speculateur) else self.source_speculateur
+        return list(getattr(spec, "_amorcage_echecs", None) or [])
+
+    def releves_mtp_prefill(self) -> list:
+        m = self.source_modele() if callable(self.source_modele) else self.source_modele
+        return list(getattr(m, "_mtp_prefill_releves", None) or [])
 
     def compteurs_graphes(self) -> dict:
         """`graphes_nombre` (graphes vivants), `graphes_captures`, `graphes_replays`."""
@@ -316,6 +328,8 @@ class EngineStats:
             "spec_hybride_hors_graphe": self.spec_hybride_hors_graphe,
             "spec_k_insuffisant": self.spec_k_insuffisant,
             "spec_raisons_non_engage": dict(self.spec_raisons),
+            "spec_amorcage_echecs": self.releves_amorcage(),
+            "mtp_prefill_releves": self.releves_mtp_prefill(),
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),
             "sequences_tronquees_budget": self.sequences_tronquees_budget,
@@ -802,6 +816,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # change encore après ce point (repli, faux runner d'un test), et une
         # référence figée ici aurait rendu les compteurs d'un objet mort.
         self.stats.source_graphes = lambda: self.graphs
+        self.stats.source_speculateur = lambda: self.speculator
+        self.stats.source_modele = lambda: self.model
 
         # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
         # {index_couche: set(experts résidents)} — peuplé depuis les couches
