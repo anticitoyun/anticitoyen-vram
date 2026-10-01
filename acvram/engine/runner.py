@@ -617,7 +617,7 @@ def _mla_core_texte() -> str:
     """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum) ; `flash(fp32)` (C13-c) ;
     puis `mla_prep=grille|temoin` (C14-b geste 3)."""
     from . import mla
-    txt = mla.regime_coeur_texte()
+    txt = " ".join(m for m in (mla.regime_coeur_texte(), mla.regime_causal_texte()) if m)
     return (f" {txt}" if txt else "") + " " + mla.regime_prep_texte() + " " + mla.regime_glue_texte()
 
 

@@ -270,6 +270,7 @@ VARIABLES_LUES = {
     "ACVRAM_PREFILL_A8",
     "ACVRAM_MLA_A8",
     "ACVRAM_MLA_CORE", "ACVRAM_MLA_CORE_VB", "ACVRAM_MLA_CORE_DECODE", "ACVRAM_MLA_CORE_MAX_CLES",
+    "ACVRAM_MLA_CAUSAL",                                         # zzs (01/10) : troncature causale (0 = témoin)
     # C13-c (flash), sondes niveau 2, C15-3d (glue compacte) — 20/09
     "ACVRAM_MLA_FLASH_OPERANDES", "ACVRAM_MLA_FLASH_TUILE",
     "ACVRAM_MLA_ECRIT_TORCH", "ACVRAM_MLA_PREP_TEMOIN", "ACVRAM_MLA_QABS_DEUX_MOITIES",

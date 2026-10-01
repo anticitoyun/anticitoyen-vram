@@ -61,3 +61,19 @@ Mesuré au ht9 (p81:prefill8k, 1 415,9 ms GPU) : sgemm fp32 491,3 ms, tf32 90,4 
   Écart au chemin complet ≤ 2 × celui du témoin à morceaux de 128, contre une référence fp64.
 * Sur carte : E1(a) au bit, ou E2 selon le verdict, avec le bras cassant « troncature à `passe + d1 − 1` » qui doit
   rendre faux.
+
+## Amendement du 01/10 (~15 h 30), AVANT toute mesure sur carte : le témoin de E2
+
+Le témoin « morceaux de 128 » était dégénéré. Dans le chemin complet, chaque produit et chaque softmax porte sur
+`total` clés quelle que soit la taille des morceaux. Changer 256 en 128 ne change donc aucune longueur de somme : sur
+le processeur, A128 = A au bit (mesuré à sec, 300 + 700 jetons). Un témoin nul ne peut rien borner. Il est remplacé par
+**l'erreur d'arrondi du chemin servi contre une référence fp64** (même module, même entrée, tout en fp64) :
+
+* E2, test : max |y_B − y_A| ≤ 2 × max |y_A − y_ref| ET max |y_B − y_ref| ≤ 2 × max |y_A − y_ref|. À sec en fp32
+  (forme réduite) et sur carte en fp32, aux formes de Kimi avec un passé (3 000 + 1 000), au régime servi.
+* E2, bout en bout : inchangé pour les ids (64 jetons gloutons après 8 k et 32 k, témoins A1 = A2 et B1 = B2). Une
+  divergence est publiée avec son premier jeton, et la décision revient au chef ; aucune tolérance n'est inventée après coup.
+* `ACVRAM_MLA_MORCEAU` est retiré : il ne servait que ce témoin.
+* Déjà constaté à sec : sur le processeur, B n'est PAS au bit de A (|B − A| = 1,0e-7 pour max |A| = 0,28), et
+  |B − ref| = |A − ref| = 1,4e-7 : la troncature est aussi juste que le chemin complet. E1 se joue sur la carte, où
+  cuBLAS et le softmax de PyTorch décident.

@@ -114,6 +114,19 @@ def regime_coeur_texte() -> str:
 _MLA_CORE_MAX_CLES = int(os.environ.get("ACVRAM_MLA_CORE_MAX_CLES", "2048"))
 if _MLA_CORE_MAX_CLES <= 0:
     _MLA_CORE_MAX_CLES = 1 << 62                     # « ≤ ∞ clés » : la règle ne bascule jamais en fp32
+# zzs (poste5-zzs-scelle-01-10) : au préfill par morceaux, scores, masque, softmax et produit par V limités aux
+# clés VUES par le morceau (passe + d1) ; 0 = témoin, toutes les clés puis masque (chemin d'avant).
+_MLA_CAUSAL = os.environ.get("ACVRAM_MLA_CAUSAL", "1") == "1"
+
+
+def _cles_vues(cles: int, total: int) -> int:
+    """Clés traitées par un morceau du préfill : celles qu'il VOIT (zzs), ou toutes sous le témoin."""
+    return cles if _MLA_CAUSAL else total
+
+
+def regime_causal_texte() -> str:
+    """Rien au défaut (troncature causale) ; sinon le témoin nommé (REGLES § 4)."""
+    return "" if _MLA_CAUSAL else "mla_causal=0(temoin)"
 
 
 def _regime_coeur(decode: bool = False, vb: bool = False, cles: int | None = None) -> str:
@@ -571,11 +584,14 @@ class MLAttention(nn.Module):
                 dt = _dt_coeur(cles=cles)
                 if dt not in C_dt:
                     C_dt[dt] = cache.to(dt)
-                C32 = C_dt[dt]; V32 = C32[:, :self.rank]
+                # zzs : les clés au-delà de passe + d1 sont masquées pour TOUT le morceau ; les calculer coûtait 36 %
+                # des sgemm fp32 et 86 % des tf32 au préfill de 8 k (poste5-ht9-verdict, poste5-zzs-scelle)
+                vues = _cles_vues(cles, total)
+                C32 = C_dt[dt][:vues]; V32 = C32[:, :self.rank]
                 with _tf32_coeur(cles=cles):
                     sc = torch.einsum('thr,sr->ths', q_eff[d0:d1].to(dt), C32).to(torch.float32) * self.scale
                 pos_q = torch.arange(d0, d1, device=x.device).unsqueeze(-1) + passe
-                sc = sc.masked_fill(pos_k > pos_q.unsqueeze(1), float('-inf'))
+                sc = sc.masked_fill(pos_k[:vues] > pos_q.unsqueeze(1), float('-inf'))
                 with _tf32_coeur(cles=cles):
                     morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1).to(dt), V32))
             o_lat = torch.cat(morceaux) if len(morceaux) != 1 else morceaux[0]
