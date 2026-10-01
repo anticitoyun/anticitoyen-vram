@@ -231,6 +231,17 @@ class EngineStats:
     proposed_tokens: int = 0
     spec_longueurs_melees: int = 0   # pas spéculatifs rendus au décodage simple (pièce 86)
     spec_steps: int = 0
+    # chef (01/10, pièce mtp) : proposed_tokens=0 ne distingue pas "jamais essayé"
+    # de "essayé, rien à proposer" — chaque retour précoce du pas spéculatif compte
+    # ici sous son nom (speculative.py Proposal.raison, ou posé directement ici pour
+    # les gardes du moteur). Compteur permanent, pas un print : un jouet où chaque
+    # branche est forcée doit casser si l'on en retire un.
+    spec_hybride_hors_graphe: int = 0   # runner.py _speculative_decode : len(decodable)!=1 ou graphes off
+    spec_k_insuffisant: int = 0         # runner.py _speculative_decode : hyb, prop non vide mais k < spec_k
+    spec_raisons: dict = field(default_factory=dict)   # proposeur : "longueur", "sans_hidden", "amorcage", "aucun_jeton", "veille", "aucun_match"...
+
+    def compter_raison_vide(self, raison: str) -> None:
+        self.spec_raisons[raison or "inconnue"] = self.spec_raisons.get(raison or "inconnue", 0) + 1
     # Séquences terminées par `_finish_budget_epuise` (budget KV épuisé avant
     # `max_tokens`), jamais par un `EOS`/`max_tokens` normal. Compté pour que
     # `certifie-b12` puisse refuser une cellule où le lot réel a été rogné en
@@ -302,6 +313,9 @@ class EngineStats:
             "accepted_tokens": self.accepted_tokens,
             "proposed_tokens": self.proposed_tokens,
             "spec_longueurs_melees": self.spec_longueurs_melees,
+            "spec_hybride_hors_graphe": self.spec_hybride_hors_graphe,
+            "spec_k_insuffisant": self.spec_k_insuffisant,
+            "spec_raisons_non_engage": dict(self.spec_raisons),
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),
             "sequences_tronquees_budget": self.sequences_tronquees_budget,
@@ -2166,15 +2180,20 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # récurrents reviennent en arrière par l'historique des tampons
             # fixes) ; forme fixe k+1 pour ne capturer qu'un graphe de plus
             if len(decodable) != 1 or self.graphs is None or not self.graphs.enabled:
+                self.stats.spec_hybride_hors_graphe += 1
                 return self._plain_decode(decodable)
             self.graphs.max_ql = self.spec_k + 1
         proposals: dict[int, Proposal] = {}
         for seq in decodable:
             budget = max(0, seq.params.max_tokens - len(seq.output_ids) - 1)
             k = min(self.spec_k, budget)
-            prop = self.speculator.propose(seq, k) if k > 0 else Proposal([])
+            prop = self.speculator.propose(seq, k) if k > 0 else Proposal([], raison="budget_epuise")
             if hyb:
-                if not len(prop) or k < self.spec_k:
+                if not len(prop):
+                    self.stats.compter_raison_vide(prop.raison)
+                    return self._plain_decode(decodable)
+                if k < self.spec_k:
+                    self.stats.spec_k_insuffisant += 1
                     return self._plain_decode(decodable)
                 if len(prop) < k:
                     prop = Proposal(list(prop.tokens) + [prop.tokens[-1]] * (k - len(prop)))

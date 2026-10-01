@@ -110,6 +110,11 @@ class Proposal:
     tokens: list[int]
     # [k, vocabulaire] probabilités du brouillon, ou None sans modèle
     probs: Optional[torch.Tensor] = None
+    # chef (01/10, pièce mtp) : pourquoi une proposition est vide, nommé par le
+    # proposeur lui-même — distingue "jamais essayé" (h absent, amorçage raté) de
+    # "essayé, rien à proposer" (ngram sans répétition), que proposed_tokens=0 seul
+    # ne distingue pas. "" quand non vide ou sans objet.
+    raison: str = ""
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -190,13 +195,13 @@ class NGramProposer:
     def propose(self, seq: Any, k: int) -> Proposal:
         ids = seq.all_ids
         if len(ids) < self.min_ngram + 1 or k <= 0:
-            return Proposal([])
+            return Proposal([], raison="longueur")
         st = self._st(seq)
         self._indexer(st, ids)
         if self.adaptatif:
             if st["veille"] > 0:
                 st["veille"] -= 1
-                return Proposal([])
+                return Proposal([], raison="veille")
             # le pas est compté ici : un pas sans proposition pèse aussi dans
             # le rendement, et c'est le cas le plus fréquent en prose
             st["pas"] += 1
@@ -211,7 +216,7 @@ class NGramProposer:
             nxt = ids[p:p + k]
             if nxt:
                 return Proposal(list(nxt))
-        return Proposal([])
+        return Proposal([], raison="aucun_match")
 
     def commit(self, seq: Any, accepted: list[int]) -> None:
         if not self.adaptatif:
@@ -542,13 +547,13 @@ class MTPProposer:
     def propose(self, seq: Any, k: int) -> Proposal:
         ids = seq.all_ids
         if len(ids) > self.max_model_len:
-            return Proposal([])
+            return Proposal([], raison="longueur")
         h = self._hidden_cible()
         if h is None:
-            return Proposal([])                        # avant le premier pas
+            return Proposal([], raison="sans_hidden")   # avant le premier pas
         st = self.state.setdefault(seq.id, _DraftState())
         if st.length == 0 and len(ids) > 2 and not self._amorcer(seq, st):
-            return Proposal([])
+            return Proposal([], raison="amorcage")
         st.length = min(st.length, len(ids) - 1)
 
         emb = self.model.embed_tokens
@@ -578,7 +583,7 @@ class MTPProposer:
             cur, pos = tok, pos + 1
             st.length = pos
         if not tokens:
-            return Proposal([])
+            return Proposal([], raison="aucun_jeton")
         return Proposal(tokens, None if glouton else torch.stack(probs))
 
     def commit(self, seq: Any, accepted: list[int]) -> None:
