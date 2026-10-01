@@ -15,8 +15,8 @@ TROUVÉ EN ROUTE (balayage libre × fenêtre à sec) : à 29,5 Gio libres, 32 76
 `_reajuster_plan` prenait sa marge sur min(capacité, libre) (5 % de 29,5) et `_borner_kv_par_la_vram` sur la carte entière
 (5 % de 34) : la remontée en VRAM rendait un MLP que la borne refusait 230 Mio plus loin, exil/remontée en boucle,
 « 1 Mio manquants » après 4 tours. Même base de marge des deux côtés désormais : test 3.
-Cassure : remettre `if plancher >= plein: return False` → la case 28,6 Gio / 32 768 refuse (test 4) ; remettre la marge sur
-min(capacité, libre) → test 3 rouge."""
+Cassure : remettre `if plancher >= plein: return False` → les relances (28,0 / 25 600…) refusent (test 4) ; remettre la marge
+sur min(capacité, libre) → test 3 rouge. Chiffres re-dérivés le 30/09 soir après le terme d'attention de la réserve."""
 import contextlib
 import io
 import sys
@@ -62,7 +62,7 @@ def test_a_28_gio_le_refus_reste_mais_la_fenetre_annoncee_monte(monkeypatch, cap
     spec, man, planifier = _preparer(monkeypatch, libre=int(28.1 * G))
     assert not LD._plafonner_mlp_prefill(spec, ctx, planifier(), planifier, man) and spec.mlp_prefill_plafond is None
     msg = _refuse(spec, man, planifier(), ctx)
-    assert msg and "fenêtre qui tient : 31744 jetons" in msg, msg
+    assert msg and "fenêtre qui tient : 25600 jetons" in msg, msg     # 31 744 avant le terme d'attention (démenti par la chauffe)
 
 
 def test_a_33_gio_le_plafond_fait_tenir_le_plancher_kv(monkeypatch, capsys):
@@ -73,13 +73,11 @@ def test_a_33_gio_le_plafond_fait_tenir_le_plancher_kv(monkeypatch, capsys):
     assert _refuse(spec, man, planifier(), ctx), "témoin : la réserve d'un seul tenant devait refuser"
     assert LD._plafonner_mlp_prefill(spec, ctx, p0, planifier, man), "aucun plafond posé"
     c = spec.mlp_prefill_plafond
-    assert c == 4096, c                                               # le plus grand qui tient SANS exiler plus (33)
+    assert c == 4096, c                                               # le plus grand qui tient SANS exiler plus
     plafonnee = LD._reserve_prefill(spec, ctx, man, planifier())
-    assert 4.2 * G <= plafonnee <= 5.0 * G and pleine >= 10.4 * G, (plafonnee / G, pleine / G)
+    assert 8.5 * G <= plafonnee <= 9.5 * G and pleine >= 14 * G, (plafonnee / G, pleine / G)   # terme d'attention compris
     assert _refuse(spec, man, planifier(), ctx) is None, "le refus devait disparaître"
-    assert LD._mlp_exiles(planifier()) == 33
-    spec.mlp_prefill_plafond = 8192
-    assert LD._mlp_exiles(planifier()) > 33 and _refuse(spec, man, planifier(), ctx) is None
+    assert 50 <= LD._mlp_exiles(planifier()) <= 58                    # 55 : le KV et l'attention occupent la place
     spec.mlp_prefill_plafond = c
     assert f"MLP dense par tranches au-delà de {c} jetons" in capsys.readouterr().out
 
@@ -92,20 +90,25 @@ def test_sans_gain_ni_besoin_rien_ne_change(monkeypatch):
 
 
 def test_a_29_5_gio_plus_d_oscillation_exil_remontee(monkeypatch):
-    """29,0 et 30,0 servaient, 29,5 refusait pour « 1 Mio manquants » : les deux marges (exil, borne) sont sur la même base."""
-    spec, man, planifier = _preparer(monkeypatch, libre=int(29.5 * G))
+    """29,0 et 30,0 servaient, 29,5 refusait pour « 1 Mio manquants » : les deux marges (exil, borne) sont sur la même base.
+    Sous la formule avec terme d'attention, 29,5 Gio sert jusqu'à 26 624 (balayage monotone : 28,1 → 25 600, 29,5 → 26 624,
+    30,7 → 28 672, 32,0 → 30 720, 33,6 → 32 768)."""
+    spec, man, planifier = _preparer(monkeypatch, libre=int(29.5 * G), ctx=26624)
     with contextlib.redirect_stdout(io.StringIO()):
-        LD._plafonner_mlp_prefill(spec, 32768, planifier(), planifier, man)
+        LD._plafonner_mlp_prefill(spec, 26624, planifier(), planifier, man)
     p = planifier()
-    assert _refuse(spec, man, p, 32768) is None
+    assert _refuse(spec, man, p, 26624) is None
     assert 50 <= LD._mlp_exiles(p) <= 60
 
 
-def test_a_28_6_gio_la_branche_plancher_tenu_sert(monkeypatch):
-    """La seule case du balayage que la nouvelle branche change : 28,6 Gio, 32 768 — a5v seul n'exile pas moins (60 = 60)
-    et refuse ; la réserve plafonnée fait tenir le plancher → plafond posé, sert (60/60 exilés, le KV occupe la place)."""
-    spec, man, planifier = _preparer(monkeypatch, libre=int(28.6 * G))
-    with contextlib.redirect_stdout(io.StringIO()):
-        assert LD._plafonner_mlp_prefill(spec, 32768, planifier(), planifier, man)
-    assert spec.mlp_prefill_plafond == 4096
-    assert _refuse(spec, man, planifier(), 32768) is None
+def test_la_relance_a_la_fenetre_annoncee_sert_grace_a_la_branche_plancher_tenu(monkeypatch):
+    """Les cases que la nouvelle branche change (balayage avec/sans, pas de 1 024) sont exactement les RELANCES à la fenêtre
+    annoncée : 28,0 Gio / 25 600, 30,0 / 28 672, 32,0 / 31 744 — a5v seul n'exile pas moins (60 = 60) et refuse ; la réserve
+    plafonnée fait tenir le plancher → plafond posé, sert (60/60 exilés, le KV occupe la place). Cassure : `if plancher >= plein:
+    return False` remis → refus."""
+    for libre, ctx in ((28.0, 25600), (30.0, 28672), (32.0, 31744)):
+        spec, man, planifier = _preparer(monkeypatch, libre=int(libre * G), ctx=ctx)
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert LD._plafonner_mlp_prefill(spec, ctx, planifier(), planifier, man), (libre, ctx)
+        assert spec.mlp_prefill_plafond == 4096
+        assert _refuse(spec, man, planifier(), ctx) is None, (libre, ctx)

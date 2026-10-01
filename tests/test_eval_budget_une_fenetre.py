@@ -55,7 +55,7 @@ def test_avec_une_fenetre_le_budget_est_une_fenetre(monkeypatch):
     spec = _spec_31b()
     recu = _options_recues(monkeypatch, max_model_len=2048 + 16, max_concurrent_seqs=1)
     assert recu == {"ctx": 2064, "seqs": 1}                       # 1 × 2 064 × 495 360 o = 0,95 Gio
-    assert _reserve_prefill(spec, 2064, _MANIFEST) < 1 * 2 ** 30    # 0,78 Gio
+    assert _reserve_prefill(spec, 2064, _MANIFEST) < 1.3 * 2 ** 30  # 0,78 Gio + 0,26 de terme d'attention (kv31b, 30/09) = 1,03
     # ordre de grandeur de la falaise : serveur ≈ 4,5 + 2,9 Gio de budget hors poids, évaluation ≈ 0,95 + 0,78
     serveur = min(8 * 9791 * 495360, int(4.5 * 2 ** 30)) + _reserve_prefill(spec, 9791, _MANIFEST)
     evaluation = 2064 * 495360 + _reserve_prefill(spec, 2064, _MANIFEST)

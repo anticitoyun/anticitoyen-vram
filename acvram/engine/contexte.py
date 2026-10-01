@@ -45,6 +45,22 @@ def _ctx_texte(engine) -> str:
     return txt + (f" tranches>{seuil}" if seuil else "")            # d19 : au-delà, sortie non au bit du seul tenant
 
 
+def construire_piles_sur_carte(couches) -> int:
+    """Décide les piles d experts (et leur repack Marlin) des blocs MoE encore indécis (``_stack_state == "?"``) des
+    couches qui vivent sur la carte ; rend le nombre de blocs décidés. Partagée par le chargeur (aym : AVANT le KV) et
+    par la chauffe (ya1 : ce qui reste, p. ex. un moteur construit sans passer par le chargeur)."""
+    from .moe import MoEBlock
+    n = 0
+    for couche in couches:
+        if not _sur_carte(couche):
+            continue
+        for mod in couche.modules():
+            if isinstance(mod, MoEBlock) and mod._stack_state == "?":
+                mod._stack_state = "oui" if mod._try_build_stacks() else "non"
+                n += 1
+    return n
+
+
 def _sur_carte(couche) -> bool:
     """La COUCHE vit sur la carte (``couche.device``, comme graphs.py:474). Pas les paramètres du bloc MoE : les poids
     quantifiés sont des attributs ordinaires de QuantLinear (layers.py:438) — un bloc MoE n a souvent AUCUN paramètre,
@@ -82,6 +98,12 @@ class ChauffeContexte:
         self._avant_essai_de_chauffe()                                   # (3) chaque pas part d un allocateur vide
         seq = self.sequence_de_chauffe(L - 2)
         en_cache = self.stats.cached_prompt_tokens
+        # kv31b : le pic transitoire de la passe (alloué, pas réservé) — ce que la réserve de préfill doit couvrir
+        dev = self.model.embed_tokens.device
+        mesure = torch.cuda.is_available() and dev.type == "cuda"
+        if mesure:
+            torch.cuda.synchronize(dev); torch.cuda.reset_peak_memory_stats(dev)
+            base = torch.cuda.memory_allocated(dev)
         try:
             if prefixe:
                 for _ in self.generate(seq[:2 * BLOCK_SIZE], SamplingParams(max_tokens=1, temperature=0.0)):
@@ -101,6 +123,8 @@ class ChauffeContexte:
             self.stats.cached_prompt_tokens = en_cache
         libre, total = self._libre_apres_chauffe()
         seuil = max(total * 5 // 100, 64 << 20)
+        if mesure:
+            self.pic_chauffe = (L, int(torch.cuda.max_memory_allocated(dev) - base))
         self._oublier_la_chauffe()
         if libre < seuil:                                                # (b) : tenu sans réserve = non tenu
             if torch.cuda.is_available():
@@ -227,6 +251,7 @@ class ChauffeContexte:
         self.graphs = graphes
         self.ctx_demande = n
         self.ctx_tenu = tenu
+        self._enregistrer_pic_de_chauffe(tenu)
         r = self.reserve_chauffe
         print(f"[acvram] chauffe du contexte : {tenu}/{n} jetons tenus en {time.time() - t0:.1f} s"
               + (f", {r[0] >> 20} Mio libres après la passe (réserve ≥ {r[1] >> 20})" if r else ""), flush=True)
@@ -239,6 +264,23 @@ class ChauffeContexte:
             print(f"[acvram] contexte clampé à {tenu} (demandé {n}) : une invite au-delà reçoit un 400 nommé",
                   flush=True)
         return tenu
+
+    def _enregistrer_pic_de_chauffe(self, tenu: Optional[int]) -> None:
+        """kv31b : compare le pic mesuré de la passe tenue à la formule et le dépose pour le prochain chargement
+        (`loader.enregistrer_chauffe`) — la réserve de préfill se cale sur la mesure, plus seulement sur la formule."""
+        pic = getattr(self, "pic_chauffe", None)
+        if not tenu or not pic or pic[0] != tenu:
+            return
+        from .loader import enregistrer_chauffe
+        spec = self.model.spec
+        formule = int(spec.activations_prefill_bytes(tenu))
+        manifest = getattr(self.loaded, "manifest", None) if hasattr(self, "loaded") else None
+        d = enregistrer_chauffe(getattr(spec, "name", "") or "modele", tenu, pic[1], formule, manifest=manifest,
+                                kv_format=self.kv_format_servi() if hasattr(self, "kv_format_servi") else "?",
+                                plafond=getattr(spec, "mlp_prefill_plafond", None), max_model_len=int(self.max_model_len))
+        print(f"[acvram] chauffe : pic transitoire du préfill {pic[1] / 2**30:.2f} Gio à {tenu} jetons "
+              f"({pic[1] // tenu // 1024} Kio/jeton ; formule {formule / 2**30:.2f} Gio, {formule // tenu // 1024} Kio/jeton) — "
+              f"excès {d['exces_par_jeton'] // 1024} Kio/jeton enregistré pour le prochain chargement", flush=True)
 
     def _recapturer(self, warm_max_len: int) -> int:
         """Graphes neufs au ``max_model_len`` courant (les captures précédentes sont rendues), puis capture d avance."""
@@ -285,15 +327,7 @@ class ChauffeContexte:
         `GraphRunner._eligible` (graphs.py:473) les construit AVANT la chauffe ; même construction ici, pour que la
         chauffe mesure le régime servi. Mêmes piles, même sortie : seul le moment change. Rend le nombre de couches
         décidées."""
-        from .moe import MoEBlock
-        n = 0
-        for couche in getattr(self.model, "layers", ()):
-            if not _sur_carte(couche):
-                continue
-            for mod in couche.modules():
-                if isinstance(mod, MoEBlock) and mod._stack_state == "?":
-                    mod._stack_state = "oui" if mod._try_build_stacks() else "non"
-                    n += 1
+        n = construire_piles_sur_carte(getattr(self.model, "layers", ()))
         if n:
             print(f"[acvram] piles d experts construites avant la chauffe : {n} couches", flush=True)
         return n

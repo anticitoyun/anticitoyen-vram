@@ -10,10 +10,12 @@ résident sur un GPU, ou épinglé en mémoire hôte derrière un
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import sys
+import time
 from typing import Any, Optional
 
 import torch
@@ -941,6 +943,33 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 m.fuse()
             elif hasattr(m, "fuse") and type(m).__name__ == "GatedDeltaNet":
                 m.fuse()
+
+    # aym (30/09, edz définitif : 18 alias qwen3-coder-30b-a3b / qwen3-vl-30b-a3b à 29 096-32 768 morts au démarrage) :
+    # les piles d experts et leur repack Marlin se construisaient APRÈS le KV — dans `GraphRunner._eligible`
+    # (graphs.py:473) ou avant la chauffe (ya1, contexte.py) —, quand le budget KV avait déjà rempli la carte jusqu à la
+    # marge : pile empilée + copie Marlin + concaténation w13 d une couche ne tenaient plus (OOM dans
+    # `_construire_marlin` à 48 Mio libres, ou 11 couches sur 48 en boucle par expert puis chauffe à 0 jeton). Le plan
+    # compte déjà la pile en régime établi (loader `_reserve_prefill` : Σ × 1, la Marlin REMPLACE la naturelle) ; seul le
+    # transitoire manquait. Construites ici, KV encore libre, comme les fusions ci-dessus : mêmes piles, même sortie,
+    # seul le moment change. ACVRAM_PILES_AU_CHARGEMENT=0 : témoin (construction d avant, paresseuse).
+    if a_allouer and os.environ.get("ACVRAM_PILES_AU_CHARGEMENT", "1") != "0":
+        from .contexte import construire_piles_sur_carte
+        libre_avant = {d: torch.cuda.mem_get_info(d)[0] for d in {c.device for c in layers}
+                       if torch.device(d).type == "cuda"} if torch.cuda.is_available() else {}
+        n_piles = construire_piles_sur_carte(layers)
+        if n_piles:
+            # le coût NET des piles en régime établi (la Marlin remplace la naturelle : attendu ≈ 0), dit au journal —
+            # fenêtre du 30/09 : Coder-30B refusé ensuite à 6,04 Gio libres pour 6,90 Gio de KV planifié
+            if libre_avant:
+                torch.cuda.empty_cache()
+            # alloué ET réservé : un coût « net » qui serait du réservé non alloué = segments du bassin des petits blocs
+            # (2 Mio) épinglés par un petit tenseur survivant, pas des piles plus grosses (hypothèse de la pièce qui suit)
+            net = " ; ".join(f"{d} : {v / 2**30:.2f} → {torch.cuda.mem_get_info(d)[0] / 2**30:.2f} Gio libres, "
+                             f"alloué {torch.cuda.memory_allocated(d) / 2**30:.2f}, réservé {torch.cuda.memory_reserved(d) / 2**30:.2f}, "
+                             f"petits blocs {_petits_blocs(d)}"
+                             for d, v in libre_avant.items())
+            print(f"[acvram] piles d experts construites au chargement, avant le KV : {n_piles} couches"
+                  + (f" ({net})" if net else ""), flush=True)
 
     # Chaque empilement alloue son tenseur concatene avant de liberer les deux
     # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent
@@ -2033,6 +2062,14 @@ _SUFFIXES_DOUBLES = {"mlp.gate_up": (".mlp.gate_proj.weight", ".mlp.up_proj.weig
                      "mlp.down": (".mlp.down_proj.weight",), "gdn.out": (".linear_attn.out.weight",)}
 
 
+def _petits_blocs(d) -> str:
+    """« réservé/alloué Gio » du bassin des petits blocs (< 1 Mio, segments de 2 Mio) de l allocateur : un expert de
+    Coder-30B (768 × 2 048 nvfp4 = 0,75 Mio) y vit ; un segment n est rendu que vide."""
+    st = torch.cuda.memory_stats(d)
+    return (f"{st.get('reserved_bytes.small_pool.current', 0) / 2**30:.2f}/"
+            f"{st.get('allocated_bytes.small_pool.current', 0) / 2**30:.2f}")
+
+
 def _octets_marlin(manifest: dict) -> int:
     """Pièce 129 (ACVRAM_PROJ_MARLIN=1) : octets à retirer du budget KV AVANT de le fixer — la seconde disposition
     des rôles doublés (`kernels._PROJ_MARLIN_DOUBLES`, poids nvfp4 des couches, hors tête MTP). 0 sans la variable.
@@ -2147,6 +2184,92 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     return True
 
 
+def dossier_chauffe() -> str:
+    """Où la chauffe dépose la mesure du pic de préfill (un fichier par modèle) ; `ACVRAM_CHAUFFE_CACHE` (regime.VARIABLES :
+    un chemin qui change le plan relu) pour le déplacer."""
+    return os.path.expanduser(os.environ.get("ACVRAM_CHAUFFE_CACHE") or "~/.cache/acvram/chauffe")
+
+
+def empreinte_modele(manifest: dict) -> str:
+    """Empreinte courte du converti (sa description et la liste de ses tenseurs) : une mesure de chauffe ne vaut que pour
+    le converti qui l'a produite — même nom, autre conversion (autre échelle, autre format) → autre empreinte, mesure ignorée."""
+    base = json.dumps(manifest.get("model") or {}, sort_keys=True) + "\n" + "\n".join(sorted(manifest.get("tensors") or {}))
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+
+
+def lire_chauffe(nom: str) -> Optional[dict]:
+    """La dernière mesure de chauffe déposée pour ce nom (`enregistrer_chauffe`), ou None. Sa validité (version, empreinte)
+    se juge dans `_exces_mesure`, qui la dit."""
+    try:
+        with open(os.path.join(dossier_chauffe(), f"{nom}.json"), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) and int(d.get("jetons", 0)) > 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def enregistrer_chauffe(nom: str, jetons: int, pic_octets: int, formule_octets: int, manifest: Optional[dict] = None,
+                        **infos: Any) -> dict:
+    """kv31b (preuve carte 30/09, ordre chef) : la chauffe MESURE le pic transitoire d'un préfill de ``jetons`` (elle passe la
+    vraie attention — le profile_run de vLLM la saute) ; la formule `activations_prefill_bytes` s'y compare et la réserve du
+    prochain chargement s'y cale : ``exces_par_jeton`` = max(0, pic − formule) / jetons est ajouté pour toute longueur.
+    Le fichier porte la VERSION d'acvram et l'EMPREINTE du converti : relu sous une autre version ou pour un autre converti, il
+    est ignoré et dit (un état caché ne doit jamais changer le plan en silence — revue chef 30/09). gemma-4-31B à 20 480 :
+    ≈ 4,9 Gio mesurés contre 2,7 de formule (+111 Kio/jeton) — la chauffe clampait à 20 480 ce que le plan promettait à 31 744."""
+    from .. import __version__
+    d = {"nom": nom, "jetons": int(jetons), "pic_octets": int(pic_octets), "formule_octets": int(formule_octets),
+         "exces_par_jeton": max(0, int(pic_octets) - int(formule_octets)) // max(1, int(jetons)),
+         "date": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": __version__,
+         "empreinte": empreinte_modele(manifest) if manifest is not None else "", **infos}
+    os.makedirs(dossier_chauffe(), exist_ok=True)
+    with open(os.path.join(dossier_chauffe(), f"{nom}.json"), "w", encoding="utf-8") as fh:
+        json.dump(d, fh, indent=1, ensure_ascii=False)
+    return d
+
+
+# nom du modèle → ce que le chargement a appliqué (lu par la ligne de régime : `reserve_chauffe=`)
+RESERVE_CHAUFFE_APPLIQUEE: dict[str, dict] = {}
+
+
+def reserve_chauffe_texte(nom: str) -> str:
+    """Pour la ligne de régime : « formule » (aucune mesure valable) ou « +K Kio/jeton (date, version) »."""
+    a = RESERVE_CHAUFFE_APPLIQUEE.get(nom)
+    if not a or not a.get("exces_par_jeton"):
+        return "formule" + (f"(mesure ignorée: {a['motif']})" if a and a.get("motif") else "")
+    return f"+{a['exces_par_jeton'] // 1024}Kio/jeton({a.get('date', '?')},{a.get('version', '?')})"
+
+
+def _exces_mesure(spec, max_model_len: int, manifest: dict) -> int:
+    """Octets à AJOUTER à la réserve d'un préfill de ``max_model_len`` d'après la dernière chauffe mesurée VALABLE de ce
+    converti (même version d'acvram, même empreinte) ; 0 sinon. Dit une fois par modèle ce qu'il applique ou ignore, et le
+    garde dans `RESERVE_CHAUFFE_APPLIQUEE` pour la ligne de régime."""
+    from .. import __version__
+    nom = (manifest.get("model") or {}).get("name") or getattr(spec, "name", "")
+    if not nom:
+        return 0
+    deja = RESERVE_CHAUFFE_APPLIQUEE.get(nom)
+    if deja is not None:
+        return int(deja.get("exces_par_jeton", 0)) * int(max_model_len)
+    m = lire_chauffe(nom)
+    motif = None
+    if not m:
+        motif = "aucun fichier"
+    elif m.get("version") != __version__:
+        motif = f"version {m.get('version')} ≠ {__version__}"
+    elif m.get("empreinte") != empreinte_modele(manifest):
+        motif = "empreinte du converti différente"
+    if motif:
+        RESERVE_CHAUFFE_APPLIQUEE[nom] = {"exces_par_jeton": 0, "motif": motif}
+        print(f"[acvram] réserve de préfill : formule seule — mesure de chauffe de {nom} ignorée ({motif})", flush=True)
+        return 0
+    RESERVE_CHAUFFE_APPLIQUEE[nom] = dict(m)
+    sup = int(m.get("exces_par_jeton", 0)) * int(max_model_len)
+    print(f"[acvram] réserve de préfill calée sur la chauffe du {m.get('date', '?')} (acvram {m.get('version')}, {m['jetons']} jetons : "
+          f"pic {m['pic_octets'] / 2**30:.2f} Gio, formule {m['formule_octets'] / 2**30:.2f}) : +{int(m.get('exces_par_jeton', 0)) // 1024} "
+          f"Kio/jeton → +{sup / 2**30:.2f} Gio à {max_model_len}", flush=True)
+    return sup
+
+
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
                      plan: Optional[Plan] = None) -> int:
     """Octets transitoires à retirer des budgets (KV, exil) :
@@ -2164,7 +2287,7 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
         return 0
     ctx = int(max_model_len or 8192)
     reserve = int(spec.activations_prefill_bytes(ctx)) + _octets_marlin(manifest) \
-        + _plus_grosse_nvfp4_marlin_bytes(manifest)
+        + _plus_grosse_nvfp4_marlin_bytes(manifest) + _exces_mesure(spec, ctx, manifest)
     if plan is not None and plan.layers:
         reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
         # P1 disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile

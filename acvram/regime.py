@@ -245,6 +245,10 @@ VARIABLES: tuple[Variable, ...] = (
              "cqy (29/09, 0.7.15) : un masque d attention dense [q × kv] (préfixe en cache, fenêtre, images) au-delà de N octets est découpé d emblée par blocs de lignes, au bit du seul tenant sur carte (≥ 1 024 lignes) ; 0 = témoin (seul tenant, découpage après OOM seulement)"),
     Variable("MASQUE_LIGNES_MIN", "1024", ("acvram.engine.layers", "_MASQUE_LIGNES_MIN"), None,
              "cqy (29/09) : lignes par bloc au moins, pour un masque découpé ; refus sous 1 024 (blocs de 7 lignes : pas au bit sur carte)"),
+    Variable("PILES_AU_CHARGEMENT", "1", None, None,
+             "aym (30/09, 0.7.17) : piles d experts MoE et repack Marlin construits au chargement, AVANT le KV (au bit du témoin paresseux sur carte) ; un OOM du repack garde la pile naturelle, nommé ; 0 = témoin (construction paresseuse, après le KV)"),
+    Variable("PILES_COMPACTER", "1", None, None,
+             "5v7 (30/09, 0.7.17) : les petits survivants des piles d experts (échelles AWQ, global_scale) regroupés par vues avant de rendre le cache — ils épinglaient des segments de 2 Mio (Coder-30B : 7,4 Gio réservés non alloués) ; mêmes valeurs ; 0 = témoin"),
     Variable("CAPTURE_DELAI_S", "120", None, None,
              "garde d interblocage de capture : au-delà de ce délai, alerte + pile de tous les fils au journal et abandon des captures suivantes (ligne graphes=off abandon(...))"),
     Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",
@@ -406,6 +410,17 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL_TRANCHES", "1", ("acvram.engine.runner", "_PREFILL_TRANCHES"), None,
              "pièce 284 b (au bit) : préfill « une par une » (hybride au-delà de la frontière d'instantané) réordonné couche "
              "par couche, déquantification partagée par couche ; 0 = témoin (la boucle d'avant)"),
+    Variable("PREFILL_RELIRE_KV", "0", ("acvram.engine.attention", "_RELIRE_KV"), "1",
+             "lic (01/10, témoin, défaut 0) : 1 = le préfill d'un seul tenant relit ses propres K/V depuis le cache (quantifiés), comme "
+             "tout morceau après le premier — sépare le format du cache du chemin par morceaux ; déclaré « prefill=…(relu) »"),
+    Variable("PREFILL_MORCEAU", "0", ("acvram.engine.runner", "_PREFILL_MORCEAU"), None,
+             "kv31b levier 2 étape 1 (30/09, OPT-IN, défaut 0 = un seul tenant) : préfill de l'attention par morceaux de N jetons "
+             "d'invite, lots passés couche par couche (forward_tranches) ; au bit d'un seul tenant sous les mêmes chemins (morceau ≥ 128 "
+             "lignes et > seuil de fusion gate/up pour une invite qui le dépasse, sinon ignoré et dit) ; hors récurrence linéaire"),
+    Variable("CHAUFFE_CACHE", "~/.cache/acvram/chauffe", None, None,
+             "kv31b (30/09) : dossier des mesures de pic de chauffe (un fichier par modèle : version, empreinte du converti, excès par "
+             "jeton) relues au chargement — la réserve de préfill en dépend, la ligne de régime nomme l'excès appliqué et sa source "
+             "(reserve_chauffe=) ; fichier absent ou périmé : formule seule, dit"),
     Variable("PREFILL_FILE", "0", ("acvram.engine.runner", "_PREFILL_FILE"), None,
              "pièce 276 k (OPT-IN) : 1 = dans le pas groupé, un forward par séquence dans l'ordre d'admission, jeton rapatrié "
              "après le lancement du forward suivant (copie épinglée + événement) et émis aussitôt (Engine.emettre) : le premier "
