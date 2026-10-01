@@ -12,6 +12,8 @@ Deux étages :
   pas l'ordre de sommation et ne prouve rien."""
 import re
 
+import os
+
 import pytest
 import torch
 
@@ -46,6 +48,9 @@ def _compiler(fn, sig: dict, const: dict) -> str:
                           options=dict(num_warps=1, num_stages=3)).asm["ptx"]
 
 
+# Sous TRITON_INTERPRET=1 (CI sans carte), les noyaux @triton.jit deviennent des InterpretedFunction : pas de PTX à
+# compiler, donc rien à comparer — le test se saute au lieu d'échouer sur cache_key.
+@pytest.mark.skipif(os.environ.get("TRITON_INTERPRET") == "1", reason="PTX : impossible sous TRITON_INTERPRET")
 @pytest.mark.parametrize("hv,porte", [(48, True), (48, False), (32, True)])
 @pytest.mark.parametrize("J", [1, 2, 4])
 def test_ptx_meme_suite_flottante_que_fla(hv, porte, J):
