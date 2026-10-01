@@ -2208,8 +2208,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         `_consommer`, mais la garde sémantique vaut mieux qu'un comptage par appel) ; une fois
         amorcée, la tête tient son propre cache par `commit()` (speculative.py) — étendre
         encore ici doublerait les lignes."""
-        m = self.model
-        if m.mtp is None or m._mtp_prefill is None or len(seq.output_ids) <= 1:
+        # moteurs de test montés sans modèle, ou modèles sans tête MTP : rien à nourrir
+        m = getattr(self, "model", None)
+        if (getattr(m, "mtp", None) is None or getattr(m, "_mtp_prefill", None) is None
+                or len(seq.output_ids) <= 1):
             return
         if m._mtp_prefill_seq_id != seq.id:
             return
