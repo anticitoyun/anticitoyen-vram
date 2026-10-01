@@ -151,10 +151,11 @@ def test_poids_en_flux_refusent_les_tranches(converted, monkeypatch):
 
 @pytest.mark.parametrize("kv_format", [
     "bf16",
-    # Réfuté le 01/10 (verdict poste6-lic-relire-kv-01-10) : 4,3e-3 sous int8, K/V relus des deux côtés — le chemin par
-    # morceaux porte une différence propre sous int8 (échelles par jeton : pas la granularité d'écriture). Cliquet strict :
-    # le jour où il passe, ce xfail casse et l'on dit pourquoi.
-    pytest.param(None, marks=pytest.mark.xfail(strict=True, reason="lic : réfuté 01/10, 4,3e-3 sous int8 — à ouvrir")),
+    # Réfuté le 01/10 (verdict poste6-lic-relire-kv-01-10) : 4,3e-3 sous int8, K/V relus des deux côtés. Mécanisme : le SDPA
+    # réduit les clés par blocs et son découpage dépend de la longueur totale de l'appel (256 contre 400 : 1 ulp bf16 à la ligne
+    # 253 de la couche 0, à entrées égales au bit) ; l'int8 expose la frontière d'arrondi, le bf16 n'y tombe pas ici. « Au bit »
+    # n'est pas atteignable par morceaux. Cliquet strict : le jour où il passe, ce xfail casse et l'on dit pourquoi.
+    pytest.param(None, marks=pytest.mark.xfail(strict=True, reason="lic : réfuté 01/10 — réduction par blocs de clés du SDPA, longueur-dépendante")),
 ])
 def test_relire_ses_kv_fait_du_seul_tenant_un_morceaux_au_bit(converted, monkeypatch, kv_format):
     """lic (chef 01/10) : la différence morceaux/seul tenant sur carte est-elle le FORMAT du cache ou le CHEMIN ?

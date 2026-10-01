@@ -5,7 +5,7 @@ commit : 73d0d97be + ce commit (témoin `ACVRAM_PREFILL_RELIRE_KV`, test)
 régime : à sec (`CUDA_VISIBLE_DEVICES=""`), venv du dépôt principal ; aucune carte
 scellé : prédiction écrite dans la docstring avant la mesure — « K/V relus des deux côtés → au bit ; FAUX si Δ ≠ 0 : le chemin porte une différence propre »
 mesuré : bf16 : morceaux − seul tenant 0 ; K/V relus des deux côtés 0. int8 : morceaux − seul tenant 6,3e-3 ; **K/V relus des deux côtés 4,3e-3**
-verdict : **RÉFUTÉ** — la différence morceaux/seul tenant n'est pas le seul format de lecture : à format égal et relecture égale, le chemin par morceaux diffère encore sous int8 (0 sous bf16). Cliquet : `xfail(strict=True)` sur le cas int8
+verdict : **RÉFUTÉ, mécanisme nommé** — à entrées identiques (q, K/V relus égaux au bit, vérifié), le noyau d'attention rend pour UNE ligne (253) un résultat qui dépend de la LONGUEUR TOTALE DES CLÉS de l'appel (256 pour le morceau, 400 pour le seul tenant) : réduction par blocs de clés (softmax en ligne), pas le masque, pas le format — l'int8 ne fait qu'exposer une frontière d'arrondi (1 ulp bf16, 3,05e-5). « Au bit à toute longueur » (30/09) était une mesure heureuse. Cliquet : `xfail(strict=True)` sur le cas int8
 durée : 0 min de carte
 
 ## Le témoin
@@ -24,5 +24,21 @@ l'attention dans les deux chemins, attention.py:347-352). Hors défaut, `ACVRAM_
 * Sur carte (S1 du 01/10) : gemma Δ lp 0,60 / 0,088, Devstral 0,041 — même classe de cause probable, plus les noyaux GPU (paged, q_offset) : à
   reprendre seulement après la bissection à sec.
 
+## Bissection (ordre chef 01/10) — premier élément qui diffère, puis le mécanisme
+* Par couche et par module (hooks, jouet int8, relecture des deux côtés) : **couche 0, sortie de l'attention, ligne 253, Δ 3,05e-5** — une seule
+  ligne sur 400 ; caches K/V/échelles de la couche 0 identiques ; tout le reste (121 lignes à la couche 1, une position de cache) en découle.
+* Les appels `attention()` de la couche 0 (espion) : morceau [128, 256) reçoit q, K, V ÉGAUX AU BIT à ceux du seul tenant (tranches), même
+  `scale`, `n_rep` 4, `window` 0 ; sa sortie diffère à la ligne 253 ; rejouer la fonction sur les tenseurs du seul tenant découpés pareil
+  reproduit l'écart (3,05e-5) ; rejouer l'appel morceau à l'identique rend l'identique (déterministe).
+* Le noyau, ligne 253 : `is_causal` à 400 = masque booléen à 400 = seul tenant ; masque booléen à 256 = `causal_lower_right` à 256 = morceau.
+  Clés REMPLIES de zéros masqués au-delà de 256 : longueur totale 272, 320, 384, 400 → égal au seul tenant ; 256, 288, 512 → différent.
+  Donc : le SDPA processeur réduit les clés par blocs et le découpage dépend de la longueur totale de l'appel (softmax en ligne, ordre des
+  sommes partielles) ; chaque variante reste à 2,4e-4 du fp32. Le GPU (flash, paginé) a la même propriété, amplifiée par la profondeur (40-60
+  couches) et par le cache int8 (S1 : Devstral 0,041, gemma 0,088).
+* Conséquence : « au bit » n'est PAS un objectif atteignable pour un préfill par morceaux avec un noyau d'attention par blocs — la bonne
+  exigence est celle de la reprise après le cache de préfixe, déjà acceptée : équivalence sous témoin (KL/logprobs ≤ 2 × le témoin), à sceller.
+  Reste à part : gemma 0,60 avec cache (frontière 7 936) contre 0,088 sans — un bras `ACVRAM_INSTA_PAS` grand, sur carte, le dira.
+
 ## Reste
-Bissection (pièce lic, suite) ; `ACVRAM_PREFILL_MORCEAU` reste OFF ; pas d'anneau.
+`ACVRAM_PREFILL_MORCEAU` reste OFF ; pas d'anneau tant que chef n'a pas scellé l'exigence (témoin reprise, 2 ×) ; scripts de bissection
+non commités (scratch, reproductibles par les lignes ci-dessus).
