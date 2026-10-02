@@ -72,3 +72,19 @@ rouges ; plafond qui ignore la table : 1 ; chauffe sur l'appareil de la table : 
 Reste carte : G1' / G5' (`scratchpad/poste6-g6r/carte-g6r.sh`) ; G6' à ± 1 % ne se résout pas avec l'instrument de prise
 (32 jetons décodés) — à mesurer par l'instrument de cellule b=1 / b=12 (poste2), `ACVRAM_EMBED=hote` contre `carte` ; ma prise
 ne donne que l'égalité des ids (sha) entre les deux bras à 4 096.
+
+## Prédiction ajoutée le 02/10 à 12 h 5x, AVANT la seconde prise (après G1', dont le verdict suit)
+
+G1' (12:42-12:48, ee01f0272) a tenu 65 536 en NOMINAL, mais sa chauffe a mesuré un pic de préfill de 4,09 Gio pour 3,35 de
+formule et enregistré **+11 Kio/jeton** pour le chargement suivant (+0,72 Gio à 65 536). Rejeu à sec avec cet excès
+(`EXCES_KIO=11`, `sim_g6r.py`) : **1 MLP exilé** (plafond ramené à 4 096) ; avec 6 Kio/jeton : 0.
+
+| | prédit | faux si |
+|---|---|---|
+| G1'' : DEUX chargements consécutifs à 65 536 (2a puis 2b) | 2a comme G1' (NOMINAL, 0 exilé, excès 9-13 Kio/jeton enregistré) ; **2b : 1 MLP exilé (0-2), DÉGRADÉ, graphes coupés** | 2b NOMINAL : mon rejeu à sec ne reproduit pas le chargement réel |
+| ids, table hôte forcée contre table sur la carte, 8 192 (l'invite de 7 953 jetons ne tenait pas dans 4 096 : mon erreur de script, HTTP 400, dite) | mêmes 32 ids (sha égal), NOMINAL des deux côtés | sha différents |
+
+Si 2b est DÉGRADÉ, la branche ne se fusionne pas en l'état : le NOMINAL à 65 536 ne survivrait pas à un redémarrage du service.
+Cause présumée, non mesurée : la réserve compte une seule matrice déquantifiée du préfill (`plus_grosse`, 0,22 Gio) quand
+gate, up et down résidents en demandent davantage ; correctif possible sans toucher au tenu : ne pas compter la réserve des
+tampons denses (1,22 Gio, `_DENSE_SLOTS`) quand le plan n'exile rien.
