@@ -290,3 +290,8 @@ DEFAUTS_PAR_VERSION["0.7.16"] = DEFAUTS_PAR_VERSION["0.7.15"]
 # 5v7 : survivants des piles regroupés (PILES_COMPACTER) — mêmes valeurs, 7,4 Gio de segments rendus sur Coder-30B.
 DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_CHARGEMENT": "1", "PILES_COMPACTER": "1"},
                                  DEFAUTS_PAR_VERSION["0.7.16"][1])
+# 0.7.18 (en préparation, B2) : PRELECTURE=1 (prélecture des fragments au chargement, aucun octet changé).
+# levier 2 + g6r + plongements (poste6 01-02/10) : KV_ANNEAU=auto (anneau seulement si le KV plein exile ou ne loge pas une
+# séquence), EMBED=auto (la table de plongements ne quitte la carte qu'avant un exil de MLP) — rien ne change pour un plan qui tenait.
+DEFAUTS_PAR_VERSION["0.7.18"] = ({**DEFAUTS_PAR_VERSION["0.7.17"][0], "PRELECTURE": "1", "KV_ANNEAU": "auto", "EMBED": "auto"},
+                                 DEFAUTS_PAR_VERSION["0.7.17"][1])

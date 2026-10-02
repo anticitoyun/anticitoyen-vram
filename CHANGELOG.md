@@ -1,5 +1,14 @@
 # Journal des changements
 
+## En préparation (0.7.18)
+
+### Chargement à froid 5,5 × plus rapide (poste6, B2)
+
+* **Prélecture des fragments** (`ACVRAM_PRELECTURE`, défaut 1 ; 0 = jamais) : pendant le chargement, un fil remplit le
+  cache de pages des fichiers safetensors par `readahead` (pas de 128 Kio). Coder-30B nvfp4 (17,6 Go) à froid : 27,1 s →
+  4,9 s ; à chaud inchangé (+0,05 s). Aucun octet chargé ne change (test d'identité de tous les tenseurs avec et sans) ;
+  coupée si les fragments dépassent 80 % de la RAM disponible. `acvram-memoire/revue/poste6-prelecture-verdict-02-10.md`.
+
 ## 0.7.17 (01/10/2026)
 
 ### Piles d'experts MoE construites au chargement, avant le KV (aym)
