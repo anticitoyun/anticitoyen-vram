@@ -68,3 +68,23 @@ sur carte ne s'y reproduit pas : il vient de ce que seule la carte ajoute. Deux 
 1 ulp, (ii) < 1 % — donc H4.
 Réponse à l'ordre : trois hypothèses jouées à sec — H1 confirmée mais trop petite (≤ 0,5 × le témoin), H2 et H3 écartées ;
 H4 reste, par élimination et par la mesure du 27/09, non par cette bissection.
+
+## Micro-prise carte « H4 » — prédiction écrite AVANT (02/10 15 h 4x, feu de chef : ≈ 1 min après le rejeu de poste2, une seule prise englobante)
+
+Instrument : `scratchpad/poste6-s1-dense/prise-h4.py`, lancé par UNE prise `outils/carte.sh` (type mesure,
+`ACVRAM_DUREE_MAX=180`), joué d'abord à sec sur processeur (mêmes poids, T réduit). Devstral-24B chargé par `load_model`
+(le chemin servi : disposition Marlin, dépaquetage, `F.linear`) ; entrée = plongements d'une séquence pseudo-aléatoire de
+7 865 jetons (graine 0) passés par la norme d'entrée de la couche 0. Aucune génération, aucun texte.
+
+| mesure | prédit | faux si / seuil |
+|---|---|---|
+| (i) projections de la couche 0 (`q_proj`, `k_proj`, `v_proj`, `gate_proj`, `up_proj`) : M = 7 865 d'un coup contre 4 096 + 3 769 | **20-50 % des éléments diffèrent**, d'1 ulp bf16 pour ≥ 99 % d'entre eux | < 1 % : H4 réfutée |
+| témoin (i) : le même appel deux fois, même M | 0 élément différent | ≠ 0 : la carte n'est pas déterministe, rien ne se lit |
+| contrôle (i) : `F.linear` nu sur un poids bf16 aléatoire de même forme | même ordre que (i) : c'est cuBLAS, pas notre dépaquetage | ≈ 0 alors que (i) ≥ 10 % : la dépendance à M viendrait de notre chemin Marlin |
+| (ii) `attention()` sur les MÊMES q, k, v : un appel de 7 865 lignes contre deux morceaux (clés 4 096, puis 7 865) | **< 1 % des éléments**, ≤ 2 ulp | ≥ (i) : le SDPA de la carte serait la cause principale (H1 sur carte) |
+| durée | ≤ 60 s si le modèle est en cache de pages, ≤ 150 s sinon | — |
+
+Décision, fixée ici : **H4 confirmée** si (i) ≥ 10 % sur `q_proj` ET `gate_proj`, témoin à 0 et (ii) < (i) ; **H1 sur carte**
+si (ii) ≥ (i) ; **ni l'une ni l'autre** si (i) < 1 % et (ii) < 1 % — la cause serait alors ailleurs (noyaux propres à la
+carte : normes, RoPE, écriture du cache) et je le dirai sans la deviner.
+Limite, dite avant : cette prise montre QUELLE opération dépend de la forme de l'appel, pas combien des 0,0428 elle porte.
