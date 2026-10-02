@@ -33,12 +33,16 @@ FAUX = textwrap.dedent('''
             self.send_response(200); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
         def do_GET(self):
-            self._json({"regime_ligne": regime} if self.path == "/metrics" else {"data": [{"id": nom}]})
+            met = {"regime_ligne": regime, "graphes": os.environ.get("FAUX_GRAPHES", "1") == "1", "repli_eager": 0,
+                   "kv_max_tokens": int(os.environ.get("FAUX_KV", "16512"))}
+            self._json(met if self.path == "/metrics" else {"data": [{"id": nom}]})
         def do_POST(self):
             req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             p = req["prompt"]
             time.sleep(len(p) * 4e-6 * (1.0 if temoin else 0.6))
             n, s = req["max_tokens"], sum(p)
+            if len(p) > int(os.environ.get("FAUX_REFUS", "99999")):
+                n = 0                                    # le vrai serveur refuse sans erreur HTTP : 0 jeton
             if req.get("stream"):
                 self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
                 self.wfile.write(b'data: {"choices": [{"text": "", "index": 0}]}\\n\\n')
@@ -60,10 +64,10 @@ def _bras(temoin, ms8, ms32, jetons=None, lp=None):
     regime = ("[régime] ACVRAM_MLA_CAUSAL=0" if temoin else "[régime] défaut") + " torch=x" \
         + (" mla_causal=0(temoin)" if temoin else "")
     m = {}
-    for L, ms in (("8192", ms8), ("32768", ms32)):
+    for L, ms in (("8192", ms8), ("16384", ms32)):
         m[L] = [{"k": k, "mur_prefill_ms": ms + k * 0.01, "jetons": list(jetons or ["a", "b", "c"]),
                  "logprobs": list(lp or [-0.1, -0.2, -0.3])} for k in range(3)]
-    return {"regime": regime, "mesures": m}
+    return {"regime": regime, "mesures": m, "n_gen": 3}
 
 
 def _comparer(tmp_path, a1, b1, b2, a2, capsys):
@@ -76,7 +80,7 @@ def _comparer(tmp_path, a1, b1, b2, a2, capsys):
     return rc, capsys.readouterr().out
 
 
-def _quatre(ms8a=1400.0, ms32a=16000.0, ms8b=1100.0, ms32b=9500.0):
+def _quatre(ms8a=1400.0, ms32a=16000.0, ms8b=1100.0, ms32b=11000.0):
     return _bras(True, ms8a, ms32a), _bras(False, ms8b, ms32b), _bras(False, ms8b, ms32b), _bras(True, ms8a, ms32a)
 
 
@@ -87,9 +91,9 @@ def test_comparer_identiques_et_dans_les_bandes(tmp_path, capsys):
     assert out.count("dans la bande") == 2, out
 
 
-def test_comparer_faux_si_le_gain_a_32k_est_sous_20_pourcent(tmp_path, capsys):
+def test_comparer_faux_si_le_gain_a_16k_est_sous_15_pourcent(tmp_path, capsys):
     rc, out = _comparer(tmp_path, *_quatre(ms32b=14000.0), capsys)
-    assert rc == 9 and "FAUX (gain < 20 %)" in out, out
+    assert rc == 9 and "FAUX (gain < 15 %)" in out, out
 
 
 def test_comparer_refuse_un_a_sans_temoin_ou_un_b_avec(tmp_path, capsys):
@@ -110,7 +114,7 @@ def test_comparer_refuse_un_regime_qui_differe_par_autre_chose(tmp_path, capsys)
 def test_comparer_temoin_non_deterministe_aucun_verdict(tmp_path, capsys):
     a1, b1, b2, a2 = _quatre()
     a2 = copy.deepcopy(a2)
-    a2["mesures"]["32768"][1]["jetons"][2] = "z"
+    a2["mesures"]["16384"][1]["jetons"][2] = "z"
     rc, out = _comparer(tmp_path, a1, b1, b2, a2, capsys)
     assert rc == 6 and "mur du préfill" not in out, out
 
@@ -173,3 +177,54 @@ def test_abba_de_bout_en_bout_contre_le_faux_serveur(tmp_path):
     # le coût suit l'interrupteur jusque dans le serveur : B (0,6 × A) plus court que A aux deux longueurs
     assert sortie.count("mur du préfill : A") == 2
     assert not (tmp_path / "o" / "A1.json.pid").exists()
+
+
+def test_comparer_refuse_des_jetons_manquants(tmp_path, capsys):
+    """La prise du 02/10 13:14 : 32 k refusé rendait 0 jeton, et deux listes vides sont « identiques »."""
+    a1, b1, b2, a2 = _quatre()
+    for x in (a1, b1, b2, a2):
+        for s in x["mesures"]["16384"]:
+            s["jetons"], s["logprobs"] = [], []
+    rc, out = _comparer(tmp_path, a1, b1, b2, a2, capsys)
+    assert rc == 7 and "JETONS manquants" in out and "IDENTIQUES" not in out, out
+
+
+def _faux_en_service(tmp_path, env):
+    faux = tmp_path / "faux.py"
+    faux.write_text(FAUX)
+    p = _port()
+    srv = subprocess.Popen([sys.executable, str(faux), str(p), "kimi-zzs"], env={**os.environ, **env},
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import time
+    for _ in range(50):
+        try:
+            socket.create_connection(("127.0.0.1", p), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    return srv, p
+
+
+def test_bras_refuse_un_regime_non_resident(tmp_path):
+    for env in ({"FAUX_GRAPHES": "0"}, {"FAUX_KV": "9000"}):
+        srv, p = _faux_en_service(tmp_path, env)
+        try:
+            r = subprocess.run([sys.executable, str(MESURE / "mla-causal-abba.py"), "bras", f"http://127.0.0.1:{p}",
+                                "kimi-zzs", str(tmp_path / "x.json")], capture_output=True, text=True, timeout=60,
+                               env={**os.environ, "MLA_ABBA_REPS": "1"})
+        finally:
+            srv.kill()
+        assert r.returncode != 0 and "NON résident" in r.stderr, (env, r.stderr[-500:])
+        assert not (tmp_path / "x.json").exists()
+
+
+def test_bras_refuse_une_requete_rendue_sans_jetons(tmp_path):
+    """/metrics annonce assez de KV (le contrôle passe), mais le faux serveur refuse la plus longue invite."""
+    srv, p = _faux_en_service(tmp_path, {"FAUX_REFUS": "16000"})
+    try:
+        r = subprocess.run([sys.executable, str(MESURE / "mla-causal-abba.py"), "bras", f"http://127.0.0.1:{p}",
+                            "kimi-zzs", str(tmp_path / "x.json")], capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "MLA_ABBA_REPS": "1", "MLA_ABBA_LONGUEURS": "8192,16384"})
+    finally:
+        srv.kill()
+    assert r.returncode != 0 and "0 jetons" in r.stderr, r.stderr[-500:]

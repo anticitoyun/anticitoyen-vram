@@ -5,8 +5,9 @@
 # Étape 0 : tests/test_mla_causal_zzs.py sur carte (E1(a) au bit, E2 fp32, bras cassant) ; rouge → arrêt, carte rendue.
 # Puis A1 B1 B2 A2 : un serveur neuf par bras (serveur-bras.sh : PID vrai, port libre avant, VRAM rendue après), requêtes
 # de mla-causal-abba.py bras ; enfin nsys p81 A puis B (nsys-kda-p81.sh inchangé, préfill 8 k au GPU ; NSYS=0 l'omet).
-# Durée prédite : étape 0 ≈ 1-2 min ; par bras chargement 60-90 s + 2 chauffes + 3 × 2 requêtes à 8 k (≈ 1,4 s A) et à
-# 32 k (≈ 16 s A, ≈ 9 s B) ≈ 3-3,5 min ; nsys 2 × 4-6 min ; total ≈ 25-30 min.
+# Durée prédite : étape 0 ≈ 3 min (mesuré le 02/10) ; par bras chargement ≈ 50 s + 2 chauffes + 3 × 2 requêtes à 8 k
+# (≈ 1,8 s A) et à 16 k (≈ 5 s A) ≈ 1,5-2 min ; nsys 2 × 4-6 min ; total ≈ 20-25 min (NSYS=0 : ≈ 10 min).
+# Contexte 16 512 : 32 896 exilait 5 MLP sur 27 (prise du 02/10 13:14, amendement 2 du scellé).
 # Injection de test (tests/test_mla_causal_abba.py) : MLA_ABBA_LANCEUR remplace `python -m acvram serve` par un faux serveur ;
 # l'étape 0 et nsys sont alors omis, et le disent.
 set -euo pipefail
@@ -58,7 +59,7 @@ for bras in A1 B1 B2 A2; do
     else
         bras_servir "$PORT" "$O/serveur-$bras.log" "${interrupteur[@]}" PYTHONPATH="$ARBRE" ACVRAM_ARBRE="$ARBRE" \
             CUDA_VISIBLE_DEVICES=0 "$PY" -m acvram serve "$MODELE" --port "$PORT" --served-name "$NOM" \
-            --max-model-len 32896 --max-batch 1 --no-prefix-cache || exit 70
+            --max-model-len 16512 --max-batch 1 --no-prefix-cache || exit 70
     fi
     bras_pret "$PORT" "$NOM" "$BRAS_PID" "${MLA_ABBA_DELAI_S:-480}" || { bras_arreter "$BRAS_PID" "$PORT" || true; exit 71; }
     (cd / && "$PY" "$ICI/mla-causal-abba.py" bras "http://127.0.0.1:$PORT" "$NOM" "$O/$bras.json" 2>&1 \

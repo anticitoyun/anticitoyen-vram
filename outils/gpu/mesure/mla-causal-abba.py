@@ -3,7 +3,7 @@ A = ACVRAM_MLA_CAUSAL=0 (témoin : toutes les clés puis masque), B = défaut ; 
 arrêté par le harnais serveur-bras.sh (mla-causal-abba.sh). Prédiction et critère : revue/poste5-zzs-scelle-01-10.md.
 
   bras URL NOM SORTIE.json : contre un `acvram serve --no-prefix-cache` prêt. Lit la ligne de régime dans /metrics (preuve
-           que l'interrupteur a pris DANS le serveur), puis pour L = 8 192 et 32 768 : une chauffe (invite hors mesure,
+           que l'interrupteur a pris DANS le serveur), puis pour L = 8 192 et 16 384 (amendement 2 du scellé) : une chauffe (invite hors mesure,
            autotune et allocateur), puis REPS invites DISTINCTES (mêmes ids d'un bras à l'autre), chacune deux fois :
            1) flux, max_tokens=1 : mur du préfill = temps jusqu'au premier fragment (texte vide compris, pièce 210) ;
            2) sans flux, max_tokens=64, logprobs=0 : les 64 jetons gloutons (textes par pas) et leurs logprobs.
@@ -12,7 +12,8 @@ arrêté par le harnais serveur-bras.sh (mla-causal-abba.sh). Prédiction et cri
   comparer A1.json B1.json B2.json A2.json : régimes (A porte mla_causal=0(temoin), B non, rien d'autre ne diffère :
            sinon rc 5), témoins A1 = A2 et B1 = B2 en jetons (sinon rc 6, aucun verdict), logprobs finis (sinon rc 8),
            jetons A contre B (premier pas divergent), puis mur du préfill (médiane des 2 × REPS mesures par chemin)
-           contre les bandes scellées : 8 k −18 à −26 %, 32 k −35 à −48 %, FAUX si le gain à 32 k est < 20 %.
+           contre les bandes scellées : 8 k −18 à −26 % ; 16 k −25 à −36 %, FAUX si le gain à 16 k est < 15 %
+           (amendement 2 ; 32 k −35 à −48 %, FAUX < 20 %, gardé pour MLA_ABBA_LONGUEURS=…,32768).
 """
 import json
 import math
@@ -21,11 +22,13 @@ import statistics
 import sys
 import time
 
-LONGUEURS = (8192, 32768)
+# Amendement du 02/10 (scellé § Amendement 2) : 32 768 ne tient pas en régime résident (plan : 5 MLP sur 27 exilés à
+# --max-model-len 32896, KV 1 024 blocs ; « 17 562 tiendrait sans exil ») → 16 384, le plus long qui tient.
+LONGUEURS = tuple(int(x) for x in os.environ.get("MLA_ABBA_LONGUEURS", "8192,16384").split(","))
 REPS = int(os.environ.get("MLA_ABBA_REPS", "3"))
 N_GEN = 64
 VOCAB_APPROX = int(os.environ.get("BANC_VOCAB", "150000"))
-BANDES = {8192: (-26.0, -18.0, None), 32768: (-48.0, -35.0, -20.0)}   # (bas, haut, FAUX si Δ > ce seuil)
+BANDES = {8192: (-26.0, -18.0, None), 16384: (-36.0, -25.0, -15.0), 32768: (-48.0, -35.0, -20.0)}   # (bas, haut, FAUX si Δ >)
 TEMOIN = "mla_causal=0(temoin)"
 
 
@@ -43,9 +46,16 @@ def bras(url: str, nom: str, sortie: str) -> int:
     import httpx
     url = url.rstrip("/")
     c = httpx.Client(timeout=900.0)
-    regime = c.get(f"{url}/metrics").json().get("regime_ligne")
+    m = c.get(f"{url}/metrics").json()
+    regime = m.get("regime_ligne")
     if not regime:
         sys.exit("mla-causal-abba : /metrics sans regime_ligne — l'interrupteur ne peut pas être prouvé")
+    # Prise du 02/10 13:14 perdue sur ce point : exil de 5 MLP (graphes coupés, préfill en flux PCIe) et refus du KV à 32 k,
+    # rendus comme « 0 jetons, 6 ms ». Le régime résident se prouve ici, avant toute requête.
+    besoin = max(LONGUEURS) + N_GEN
+    if m.get("graphes") is not True or m.get("repli_eager", 0) != 0 or (m.get("kv_max_tokens") or 0) < besoin:
+        sys.exit(f"mla-causal-abba : régime NON résident — graphes={m.get('graphes')} repli_eager={m.get('repli_eager')} "
+                 f"kv_max_tokens={m.get('kv_max_tokens')} (besoin {besoin}) : {m.get('replis_eager_raisons')}")
 
     def mur_prefill(ids):
         corps = {"model": nom, "prompt": ids, "max_tokens": 1, "temperature": 0.0, "ignore_eos": True, "stream": True}
@@ -69,9 +79,13 @@ def bras(url: str, nom: str, sortie: str) -> int:
         r.raise_for_status()
         ch = r.json()["choices"][0]
         lp = ch.get("logprobs") or {}
-        return lp.get("tokens") or [], lp.get("token_logprobs") or []
+        toks, lps = lp.get("tokens") or [], lp.get("token_logprobs") or []
+        if len(toks) != N_GEN or len(lps) != N_GEN:          # une requête refusée rend 0 jeton sans erreur HTTP
+            raise RuntimeError(f"{len(toks)} jetons / {len(lps)} logprobs au lieu de {N_GEN} ({ch.get('finish_reason')})")
+        return toks, lps
 
-    res = {"url": url, "regime": regime, "reps": REPS, "n_gen": N_GEN, "mesures": {}}
+    res = {"url": url, "regime": regime, "reps": REPS, "n_gen": N_GEN, "mesures": {},
+           "metrics": {k: m.get(k) for k in ("graphes", "repli_eager", "kv_max_tokens")}}
     for L in LONGUEURS:
         mur_prefill(invite(100 * LONGUEURS.index(L), L))          # chauffe, jetée
         m = []
@@ -123,6 +137,10 @@ def comparer(a1: str, b1: str, b2: str, a2: str) -> int:
           for s in m if any(v is not None and not math.isfinite(v) for v in s["logprobs"])]
     if nf:
         print(f"NaN/inf dans les logprobs : {nf} (risque vLLM #27491 nommé au scellé) — aucun verdict"); return 8
+    courts = [(n, L, s["k"]) for n, x in (("A1", A1), ("B1", B1), ("B2", B2), ("A2", A2)) for L, m in x["mesures"].items()
+              for s in m if len(s["jetons"]) != x.get("n_gen", N_GEN)]
+    if courts:
+        print(f"JETONS manquants (requête refusée ?) : {courts} — aucun verdict"); return 7
     print("TÉMOINS A1 = A2 et B1 = B2 au jeton près ; logprobs tous finis")
     tout = True
     for L in A1["mesures"]:

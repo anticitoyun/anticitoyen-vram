@@ -84,3 +84,24 @@ le processeur, A128 = A au bit (mesuré à sec, 300 + 700 jetons). Un témoin nu
   (diagonale perdue) couvrent ce bord ; la prise relèvera tout NaN.
 * Tests liés (71 fichiers : MLA, régime, registre) sans carte, avec TRITON_INTERPRET posé par le conftest : 713 passés,
   139 sautés, 1 xfail (15:01:15-15:03:22). Chevauchement : la campagne a pris la carte à 15:01:20 (services deepseek-coder).
+
+## Amendement 2 du 02/10 (13 h 25), après la prise de 13:11-13:18, AVANT toute mesure à 16 k
+
+Ce que la prise a rendu, sans rien changer à la prédiction ci-dessus :
+
+* **Étape 0** : E1(a) tombe sur carte (8 192 sans passé : 262 473 éléments ≠, max 3,9e-3 ; 3 000 + 1 000 : 17 357 ≠,
+  max 2,0e-3), E2 vert : le verdict d'équivalence se juge en E2, comme prévu par le critère.
+* **nsys p81, préfill 8 k au GPU** (le critère FAUX principal, régime du pilote à 8 448 de contexte, sans exil) :
+  A 1 406,7 ms → B 1 064,0 ms, soit −342,7 ms, −24,4 % (prédit −280 à −365 ms, −20 à −26 % ; FAUX < 150 ms). Décodage
+  b=1 −0,04 %, b=12 +0,04 % (prédit 0 ± 1 %).
+* **ABBA en service : invalide, faute de l'instrument.** À `--max-model-len 32896`, le plan exile 5 MLP sur 27 en RAM
+  hôte (graphes coupés, « 17 562 tiendrait sans exil »), et le KV de 1 024 blocs refuse l'invite de 32 768 (« 0 jetons,
+  6 ms », sans erreur HTTP). Le comparateur a refusé (rc 5). Aucun mur n'est publié.
+
+Changement, posé avant de mesurer : **32 768 ne tient pas en régime résident sur la carte.** La longueur longue devient
+**16 384** (`--max-model-len 16512`). La borne se calcule comme plus haut : Σ S tronqué / complet = 50,8 % (fp32 : 57,0 %,
+tf32 : 7,0 %). En extrapolant depuis le ht9 (cœur quadratique, le reste linéaire), le préfill fait ≈ 4,45 s, dont un gain
+borné à ≈ −1,60 s, soit **−36 %**. Prédiction au mur à 16 k : **−25 à −36 %**, et **FAUX si le gain au mur à 16 k est
+inférieur à 15 %**. Ce critère remplace celui de 32 k, qui reste écrit pour une carte où 32 k tiendrait. L'instrument
+prouve désormais le régime résident avant toute requête (`/metrics` : graphes, repli_eager, kv_max_tokens ≥ L + 64), et il
+refuse toute réponse privée de ses 64 jetons (rc 7).
