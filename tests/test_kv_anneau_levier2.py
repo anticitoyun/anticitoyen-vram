@@ -122,8 +122,5 @@ def test_a3_octets_et_fenetre_qui_tient_gemma():
     s.kv_anneau = 67
     assert LD._kv_plancher(plan, s, 65536, "cuda:0") == anneau
     avec = LD._fenetre_qui_tient(plan, s, man, "cuda:0", base, 0, 65536)
-    # la formule garde le terme de scores d'un seul tenant à fenêtre en T (mesure du 01/10 18 h : 3,91 Gio à 16 384) : elle annonce
-    # 34 816 sous l'anneau à 10,4 Gio de base ; sur carte la chauffe a tenu 65 536 (morceaux au-delà du tenu, pic 1,93 Gio) — c'est elle
-    # qui prouve, la formule reste prudente ; sans anneau : 15 360
-    assert sans < avec and avec >= 32768, (sans, avec)
+    assert sans < 65536 <= avec, (sans, avec)
     print(f"levier 2 A3 : gemma 65 536 — plein {plein / G:.2f} Gio, anneau {anneau / G:.2f} ; fenêtre qui tient sans {sans}, avec {avec}")

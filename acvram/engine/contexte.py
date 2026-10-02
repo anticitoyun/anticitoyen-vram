@@ -290,7 +290,9 @@ class ChauffeContexte:
             return
         from .loader import enregistrer_chauffe
         spec = self.model.spec
-        formule = int(spec.activations_prefill_bytes(tenu))
+        # g6r : un tenu atteint d'UN SEUL TENANT (phase 1, pas de `morceaux_seuil`) se compare à la formule du seul tenant —
+        # comparé à la réserve par morceaux, gemma à 16 384 enregistrait 117 Kio/jeton d'« excès » (7,3 Gio à 65 536)
+        formule = int(spec.activations_prefill_bytes(tenu, seul_tenant=getattr(self, "morceaux_seuil", None) is None))
         manifest = getattr(self.loaded, "manifest", None) if hasattr(self, "loaded") else None
         d = enregistrer_chauffe(getattr(spec, "name", "") or "modele", tenu, pic[1], formule, manifest=manifest,
                                 kv_format=self.kv_format_servi() if hasattr(self, "kv_format_servi") else "?",

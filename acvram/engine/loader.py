@@ -1330,6 +1330,22 @@ def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev:
     return bpt * jetons * ici // total
 
 
+def _kv_plancher_prevu(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev: str) -> int:
+    """g6r (poste6 02/10) : le plancher qu'aura UNE séquence de ``max_model_len`` une fois l'anneau posé, pour ce qui se
+    décide AVANT `_poser_anneau` (`kv_min` de `_reajuster_plan`, critère de `_plafonner_mlp_prefill`) quand le plan a été
+    dimensionné sous l'anneau (`plan.kv_anneau`). Sans lui le plancher était celui du KV plein (gemma-4-31B à 65 536 :
+    30,2 Gio), le KV ne cédait jamais et 39/60 MLP partaient en RAM hôte pour loger 9,44 Gio de cache là où une séquence
+    en demande 5,45 (G1, 01/10). Plan au KV plein : le plancher d'avant, à l'identique."""
+    R = int(getattr(plan, "kv_anneau", 0) or 0)
+    if not R or int(getattr(spec, "kv_anneau", 0) or 0):
+        return _kv_plancher(plan, spec, max_model_len, dev)
+    spec.kv_anneau = R
+    try:
+        return _kv_plancher(plan, spec, max_model_len, dev)
+    finally:
+        spec.kv_anneau = 0
+
+
 def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
                          max_model_len: Optional[int], reserve: int = 0, tours: int = 4,
                          embed_charge: bool = False) -> None:
@@ -1506,7 +1522,9 @@ def _poser_anneau(spec: ModelSpec, plan: Plan, manifest: dict, dev, max_model_le
     if not R or mode in ("0", "off", "non"):
         return 0
     motif = "ACVRAM_KV_ANNEAU=1"
-    if mode != "1":
+    if mode != "1" and int(getattr(plan, "kv_anneau", 0) or 0):
+        motif = getattr(plan, "kv_anneau_motif", "") or "plan dimensionné sous l'anneau"      # g6r : décidé au plan
+    elif mode != "1":
         if not torch.cuda.is_available() or not max_model_len or not plan.kv_budget:
             return 0
         bornes = _borner_kv_par_la_vram(plan, manifest, dev, reserve=0, embed_charge=embed_charge) or {}
@@ -1555,11 +1573,15 @@ def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
         n_layers = max(1, layers_on.get(dev, 1))
         if R and fen_on.get(dev, 0):
             # anneaux : au plus un quart du budget, au moins un créneau, jamais plus que les séquences planifiées
+            # g6r : et jamais pris sur le plancher d'UNE séquence de max_model_len — au plancher (5,45 Gio sur gemma à
+            # 65 536) le quart donnait 3 créneaux, 0,82 Gio ôtés aux couches pleines : 54 800 jetons pour 65 536 promis
             kv_fmt0 = _kv_format(plan, dev)
             bloc = KVCacheConfig(num_layers=1, num_kv_heads=spec.num_key_value_heads, head_dim=spec.head_dim,
                                  num_blocks=1, dtype=kv_fmt0).bytes_per_block()
             par_seq = fen_on[dev] * R * bloc
-            seqs = max(1, min(int(getattr(plan, "kv_planned_seqs", 0) or 1), int(budget // 4 // max(1, par_seq))))
+            au_dessus = int(budget) - _kv_plancher(plan, spec, max_model_len, dev) if max_model_len else int(budget)
+            seqs = max(1, min(int(getattr(plan, "kv_planned_seqs", 0) or 1), int(budget // 4 // max(1, par_seq)),
+                              1 + max(0, au_dessus) // max(1, par_seq)))
             ANNEAU_SEQS[dev] = seqs
             budget = max(0, int(budget) - seqs * par_seq)
         per_layer = budget // n_layers
@@ -1971,7 +1993,7 @@ def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
 
 def _replanifier(manifest: dict, spec: "ModelSpec",
                  max_model_len: Optional[int] = None,
-                 max_concurrent_seqs: Optional[int] = None) -> "Plan | None":
+                 max_concurrent_seqs: Optional[int] = None, kv_anneau: int = 0) -> "Plan | None":
     """Rejoue TOUJOURS le planificateur avec l'état actuel de la machine.
 
     Le plan est écrit une fois pour toutes à la conversion, et `_reajuster_plan`
@@ -2024,7 +2046,8 @@ def _replanifier(manifest: dict, spec: "ModelSpec",
                 else int(d.get("kv_planned_seqs") or 0) or PlannerOptions().max_concurrent_seqs)
         neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx,
                                                        max_concurrent_seqs=slots,
-                                                       kv_jusqu_a_la_demande=max_model_len is not None))
+                                                       kv_jusqu_a_la_demande=max_model_len is not None,
+                                                       kv_anneau=int(kv_anneau or 0)))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
               f"conservé", flush=True)
@@ -2228,7 +2251,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
             return plein if p is None else _mlp_exiles(p), True
         bornes = _borner_kv_par_la_vram(p, manifest_de(p), lambda nom: torch.device(nom),
                                         reserve=_reserve_prefill(spec, ctx, manifest_de(p), p))
-        tient = all(int(bornes[n]) >= _kv_plancher(p, spec, ctx, n) for n in bornes)
+        tient = all(int(bornes[n]) >= _kv_plancher_prevu(p, spec, ctx, n) for n in bornes)
         return _mlp_exiles(p), tient
 
     def exiles(c: int) -> int:
@@ -2387,16 +2410,42 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
     if spec is not None:
-        def planifier():
-            p = _replanifier(manifest, spec, max_model_len=max_model_len, max_concurrent_seqs=max_concurrent_seqs)
-            if p is not None:
-                _reajuster_plan(p, manifest, top_k=spec.num_experts_per_tok or 8,
-                                reserve=_reserve_prefill(spec, max_model_len, manifest, p),
-                                kv_min={d: _kv_plancher(p, spec, max_model_len, d) for d in (p.kv_budget or {})})
+        def chaine(anneau: int = 0):
+            """Le plan réajusté, plafond de préfill compris, au KV plein (0) ou sous l'anneau (R)."""
+            def planifier():
+                p = _replanifier(manifest, spec, max_model_len=max_model_len, max_concurrent_seqs=max_concurrent_seqs,
+                                 kv_anneau=anneau)
+                if p is not None:
+                    _reajuster_plan(p, manifest, top_k=spec.num_experts_per_tok or 8,
+                                    reserve=_reserve_prefill(spec, max_model_len, manifest, p),
+                                    kv_min={d: _kv_plancher_prevu(p, spec, max_model_len, d) for d in (p.kv_budget or {})})
+                return p
+            p = planifier()
+            if p is not None and _plafonner_mlp_prefill(spec, max_model_len, p, planifier, manifest):
+                p = planifier()
             return p
-        neuf = planifier()
-        if neuf is not None and _plafonner_mlp_prefill(spec, max_model_len, neuf, planifier, manifest):
-            neuf = planifier()
+
+        def cout(p) -> tuple:
+            """(le plancher d'une séquence manque-t-il ?, MLP exilés) — ce que le chargement paierait avec ce plan."""
+            manque = any(int(v) < _kv_plancher_prevu(p, spec, max_model_len, d) for d, v in (p.kv_budget or {}).items())
+            return (1 if manque else 0, _mlp_exiles(p))
+        plafonds = (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
+        R = spec.anneau_R() if (max_model_len and _KV_ANNEAU_MODE not in ("0", "off", "non")) else 0
+        neuf = chaine(R if (R and _KV_ANNEAU_MODE == "1") else 0)
+        # g6r : poids résidents d'abord. Le KV plein reste le défaut (tout contexte qui tenait sans exil garde son plan
+        # à l'identique) ; s'il exile des poids ou ne loge pas une séquence, la même chaîne est rejouée sous l'anneau
+        # et retenue seulement si elle coûte moins (gemma-4-31B à 16 384 : 27 MLP exilés au plein, 0 sous l'anneau).
+        if neuf is not None and R and not neuf.kv_anneau and cout(neuf) != (0, 0):
+            plafonds_plein = (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
+            spec.mlp_prefill_plafond, spec.prefill_morceau_plafond = plafonds
+            sous = chaine(R)
+            if sous is not None and cout(sous) < cout(neuf):
+                sous.kv_anneau_motif = (f"le KV plein d'une séquence de {max_model_len} jetons "
+                                        + ("ne tient pas" if cout(neuf)[0] else f"exile {cout(neuf)[1]} MLP")
+                                        + f" ; sous l'anneau : {cout(sous)[1]} exilé(s)")
+                neuf = sous
+            else:
+                spec.mlp_prefill_plafond, spec.prefill_morceau_plafond = plafonds_plein      # le plan plein, tel quel
         # a5v : sans chauffe (Engine direct, eval), une invite au-delà du plafond passerait d un seul tenant dans une
         # réserve qui ne la couvre plus — le seuil est posé ici ; la chauffe le remplace par le tenu prouvé. None sinon.
         from . import attention as _att

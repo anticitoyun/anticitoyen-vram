@@ -55,3 +55,30 @@ des MLP. C'est pourtant le poids le moins cher à sortir (une ligne par jeton ; 
 graphes). 2,62 > 1,95 : table en RAM hôte, tête liée int8 gardée sur la carte → prédit **0 exilé à 65 536, NOMINAL**. Points à
 lire avant : `_tete_liee` exige `embed.is_cuda` (`loader.py:1164`), la tour de vision suit `embed_tokens.device`
 (`runner.py:762`), `_essai_de_chauffe` mesure sur ce même appareil (`contexte.py:103`).
+
+## Résultats à sec (02/10, APRÈS le scellé b54490f9a ; rien ci-dessus n'a été retouché)
+
+Instrument validé d'abord : correctif A seul, le rejeu rend le journal de G1 (39 exilés, « le KV plein ne tient que 25 600 »).
+Le correctif B prévu ne suffisait pas : à 27 648 le planificateur lui-même (`tiering.py:480`, cible = jetons × octets/jeton)
+exilait 32 MLP avant tout réajustement — la cible est donc portée AU PLANIFICATEUR (`PlannerOptions.kv_anneau`), et le plan au KV
+plein reste le défaut : la chaîne n'est rejouée sous l'anneau que si le plein exile ou ne loge pas une séquence
+(`loader._plan_from_manifest`), retenue si elle coûte moins. Écart au correctif scellé : dit ici.
+
+| | prédit | à sec | |
+|---|---|---|---|
+| S1 65 536 | 10-12 exilés, KV 5,45, 1 créneau, ≥ 4 096 blocs | **12 exilés**, 5,45 Gio, 1 créneau, 4 096 blocs, pas de refus | tenu |
+| S2 27 648 | 0 exilé | **0** (KV plein : 49) — après le passage au planificateur ; 32 avec B seul | tenu au 2e essai, dit |
+| S3 4 096 témoin | identique | budget 4 810 509 577 o, 606 blocs, plafond None : identiques | tenu |
+| S4 fenêtre sans exil | 38 912-46 080 | **41 984** (43 008 : 1 exilé) | tenu |
+| S5 anneau interdit | refus, anneau non posé | refus, anneau non posé | tenu |
+| 16 384 (non scellé) | — | anneau, 0 exilé (KV plein : 20) | — |
+| 8 192 (non scellé) | — | KV plein, 0 exilé ; plafond 5 120 au lieu de 4 096 : effet du correctif A (réserve), pas de l'anneau | — |
+
+Tests : `tests/test_cible_kv_anneau_g6r.py` (7, réplique gemma, CUDA simulé) ; cassure vérifiée sur copie pour cinq fautes
+réintroduites (kv_min plein : 2 rouges ; scores en T : 3 ; quart du budget : 1 ; plan sans anneau : 2 ; chauffe à la formule du
+plan : 1). Les trois fichiers d'attendus retouchés par 2808a8190 sont rendus à leur état e5653aa9d (12 verts). Suite ciblée
+(69 fichiers, 2 cœurs, nice 19, 42 s, carte tenue par poste2 en `service`) : 491 passés ; 1 échec
+`test_prefill_compact::test_le_module_lit_le_defaut_sans_variable`, dû à ma variable `ACVRAM_ARBRE` (rouge aussi sur l'arbre
+d'avant, vert sans elle).
+
+Reste carte (inchangé) : G1/G5 — prédit 12 exilés, DÉGRADÉ, 5-9 j/s ; G5 (≥ 20 j/s NOMINAL) annoncé FAUX avec g6r seul.

@@ -173,6 +173,10 @@ class PlannerOptions:
     # (38 884 × 8 sur Qwen3-Coder-30B) qui remplirait la carte — un second chargement dans le même processus (modèle
     # brouillon de --speculative draft, tests d'exil) n'aurait plus 1,1 Gio. Sans annonce, le plan d'avant, à l'identique.
     kv_jusqu_a_la_demande: bool = True
+    # g6r (poste6 02/10) : R blocs par séquence pour les couches à fenêtre glissante (`ModelSpec.anneau_R`), 0 = KV plein.
+    # Sous l'anneau la cible du cache est séquences × `kv_bytes_pour_sequence` (gemma-4-31B à 65 536 : 5,45 Gio la
+    # séquence au lieu de 30,2) ; posé par `loader._plan_from_manifest` quand le plan au KV plein exile des poids.
+    kv_anneau: int = 0
     host_exec: str = "auto"               # auto | stream | cpu
     # Coût fixe d'un transfert d'expert vers la carte, en microsecondes.
     #
@@ -265,6 +269,10 @@ class Plan:
     # tronque des séquences en silence (`loader.py::_replanifier` ne le
     # passait pas, trouvé par poste3 le 17/09 sur un banc b=12 planifié pour 8).
     kv_planned_seqs: int = 0
+    # g6r : R si ce plan a été dimensionné sous l'anneau (`PlannerOptions.kv_anneau`), et pourquoi — lu par
+    # `loader._poser_anneau` et `_kv_plancher_prevu`. Pas dans `to_dict` : décision du chargement, pas du converti.
+    kv_anneau: int = 0
+    kv_anneau_motif: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -476,15 +484,27 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     kv_per_tok = spec.kv_bytes_per_token(kv_bits, fmt=kv_fmt_plan)
     plan.kv_bytes_per_token = kv_per_tok
     plan.kv_planned_seqs = opts.max_concurrent_seqs
+    # g6r : sous l'anneau, une séquence ne coûte plus kv_per_tok × longueur — la cible et le test « un contexte complet
+    # tient » se comptent en octets d'UNE séquence ; `kv_max_tokens` reste un nombre de jetons (budget ÷ octets d'une
+    # séquence × sa longueur), si bien que `kv_max_tokens ≥ max_model_len` ⟺ une séquence loge, anneau ou pas.
+    anneau = int(opts.kv_anneau or 0) if spec.couches_fenetre else 0
+    plan.kv_anneau = anneau
     if gpu_tiers and kv_per_tok:
-        wanted = kv_per_tok * opts.max_model_len * opts.max_concurrent_seqs
+        if anneau:
+            par_seq = max(1, spec.kv_bytes_pour_sequence(opts.max_model_len, kv_bits, fmt=kv_fmt_plan, anneau=anneau))
+            wanted = par_seq * opts.max_concurrent_seqs
+        else:
+            wanted = kv_per_tok * opts.max_model_len * opts.max_concurrent_seqs
         pool = sum(remaining[t.name] for t in gpu_tiers)
         target = min(wanted, pool * opts.kv_vram_fraction)
         for t in gpu_tiers:
             share = target * remaining[t.name] / max(1.0, pool)
             plan.kv_budget[t.name] = int(share)
             remaining[t.name] -= share
-        plan.kv_max_tokens = int(sum(plan.kv_budget.values()) // max(1, kv_per_tok))
+        if anneau:
+            plan.kv_max_tokens = int(sum(plan.kv_budget.values()) * opts.max_model_len // par_seq)
+        else:
+            plan.kv_max_tokens = int(sum(plan.kv_budget.values()) // max(1, kv_per_tok))
         if plan.kv_max_tokens < opts.max_model_len:
             plan.warnings.append(
                 f"le budget KV tient {plan.kv_max_tokens:,} jetons, moins qu'un "

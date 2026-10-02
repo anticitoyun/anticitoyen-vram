@@ -398,7 +398,7 @@ class ModelSpec:
                 overhead += (self.num_key_value_heads * self.head_dim + 4) / BLOCK_SIZE
         return int((per_layer + overhead) * self.couches_avec_kv)
 
-    def activations_prefill_bytes(self, n_jetons: int) -> int:
+    def activations_prefill_bytes(self, n_jetons: int, seul_tenant: bool = False) -> int:
         """Octets TRANSITOIRES de VRAM qu'un préfill de ``n_jetons`` demande
         au-delà des poids résidents et du cache KV — le terme que le budget
         d'exil ne comptait pas (poste3, verdict-palier1-bloc6-17-09 :
@@ -418,7 +418,11 @@ class ModelSpec:
         470 Mio (28672 × 8192 × 2) qui manquait au 70B. Les logits n'y sont
         pas : le moteur ne les calcule que pour les positions échantillonnées.
         Un préfill groupé de plusieurs invites (ACVRAM_PREFILL_BATCH) peut
-        dépasser cette estimation : elle couvre une invite, la plus longue."""
+        dépasser cette estimation : elle couvre une invite, la plus longue.
+
+        ``seul_tenant`` (g6r, 02/10) : la passe d'un SEUL TENANT de ``n_jetons`` d'un modèle à fenêtre glissante, que la
+        chauffe essaie au-delà du plafond de morceaux (phase 1) — lignes et clés en T. La réserve du PLAN, elle, couvre
+        le régime par morceaux (défaut) : un seul tenant au-delà du plafond n'est servi que si la chauffe l'a tenu."""
         T = max(1, int(n_jetons))
         H = self.hidden_size
         D = self.head_dim or (H // max(1, self.num_attention_heads))
@@ -426,7 +430,10 @@ class ModelSpec:
         # d19 : au-delà du plafond de morceaux S, une invite passe par morceaux — le pire cas admissible d'un seul tenant est S
         # lignes (flux résiduel, ligne normée, sorties, q/k/v : ces termes s'arrêtent à S) ; reste linéaire en T le tampon
         # bf16 des K/V d'une couche (2 × T × têtes_KV × D × 2) — Devstral 65 536 : 256 Mio contre 3,25 Gio de résiduel.
+        fenetre = self.sliding_window > 0 or any("sliding" in t for t in (self.layer_types or []))
         S = int(self.prefill_morceau_plafond) if self.prefill_morceau_plafond else 0
+        if seul_tenant and fenetre:
+            S = 0
         lignes_res = min(T, S) if S > 0 else T
         fixe = (4 * H * 2 + qkv * 2) * lignes_res
         par_jeton = (2 * self.num_key_value_heads * D * 2) if 0 < S < T else 0
@@ -453,11 +460,12 @@ class ModelSpec:
         # tenant ne matérialise rien (flash is_causal — Devstral : chauffe 1,12 Gio à 10 240 sous ce seul terme de 1,25) sauf à
         # relire un préfixe en cache (masque dense, cqy) : jusqu'à S clés ; au-delà de S les morceaux prennent le biais bas-droite
         # (flash). Pire cas admissible sans fenêtre : min(T, S) clés — T quand aucun plafond n'est posé (l'ancien terme).
-        # levier 2 (carte 01/10 18 h) : les MORCEAUX d'une couche à fenêtre lisent leurs clés tranchées à fenêtre + M, mais un seul
-        # tenant à fenêtre (la chauffe l'essaie jusqu'au tenu, au-delà de S) matérialise toujours [1 024 × T] : à 16 384 la formule
-        # bornée à S réservait 2,07 Gio pour un pic de 3,91 (excès 117 Kio/jeton relevé par la chauffe) — le terme reste en T avec fenêtre.
-        fenetre = self.sliding_window > 0 or any("sliding" in t for t in (self.layer_types or []))
-        cles = T if (fenetre or S <= 0) else min(T, S)
+        # levier 2 (carte 01/10 18 h) : les MORCEAUX d'une couche à fenêtre lisent leurs clés tranchées à fenêtre + M ; un seul
+        # tenant à fenêtre matérialise [1 024 × T] (16 384 : pic 3,91 Gio pour 2,07 bornés à S).
+        # g6r (02/10) : ce pic-là est celui de ``seul_tenant`` (S = 0 ci-dessus), pas de la réserve du plan — laissé en T
+        # dans la réserve (2808a8190), il valait 8,0 Gio à 65 536 et faisait REFUSER ce que la carte avait tenu par morceaux
+        # (G1 : pic 1,93 Gio pour 2,82 réservés).
+        cles = T if S <= 0 else min(T, S + (self.sliding_window if fenetre else 0))
         fixe += self.num_attention_heads * min(T, LIGNES_BLOC_ATTENTION) * 4 * cles
         # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
         # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),
