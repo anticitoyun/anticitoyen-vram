@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Iterator
 
 import torch
@@ -150,7 +151,7 @@ def iter_gpt_oss(path: str, direct_nvfp4: bool = True) -> Iterator[tuple[str, to
                         w = mxfp4_vers_nvfp4(b, s, arrondir=True)
                         print(f"[mxfp4] {pref}.{e}.{nom}.weight : {w.arrondi_mxfp4['blocs16']} bloc(s) de 16 sous le "
                               f"plancher ARRONDIS, erreur max {w.arrondi_mxfp4['erreur_max_rel']:.2e} du max du "
-                              "tenseur (seul tenseur non exact)", flush=True)
+                              "tenseur (seul tenseur non exact)", file=sys.stderr, flush=True)
                     yield f"{pref}.{e}.{nom}.weight", w
                     yield f"{pref}.{e}.{nom}.bias", biais[e, lignes].contiguous()
             continue

@@ -480,7 +480,7 @@ def test_iter_gpt_oss_arrondi_nomme_et_borne(tmp_path, capsys):
     assert float(ecart.max()) <= 0.25 * 2.0 ** -9 * float(w.global_scale)
     w0 = sortie["model.layers.0.mlp.experts.0.down_proj.weight"]
     assert getattr(w0, "arrondi_mxfp4", None) is None
-    assert "experts.1.down_proj.weight : 2 bloc(s) de 16 sous le plancher ARRONDIS" in capsys.readouterr().out
+    assert "experts.1.down_proj.weight : 2 bloc(s) de 16 sous le plancher ARRONDIS" in capsys.readouterr().err
 
 
 def test_arrondi_egalite_vers_le_code_pair():
