@@ -6,7 +6,7 @@ régime : lecture seule, fichiers du projet seulement ; carte tenue en `service`
 scellé : `poste6-colibri-flux-experts-scelle-02-10.md`
 mesuré : 9 lots, ≈ 2 min de lectures, 0 octet écrit
 verdict : **(B) chargement à froid en O_DIRECT parallèle RETENU** (5,2 × notre chemin, seuil 1,5 ×) ; **(A) niveau disque : 0 modèle du parc concerné** et sous 1 jeton/s pour la classe GLM sur un disque ; **(C) miroir : les débits s'additionnent**, utile seulement derrière (A) ou (B) ; **(E) O_DIRECT 2,85 × le tamponné** ; (D) prélecture par le routeur non mesurée. Sept de mes douze prédictions de débit étaient FAUSSES, six par optimisme sur le NVMe des modèles, une par un seuil mal posé (M5).
-durée : ≈ 1 h 10 de lecture de code et de mesure, 0 min de carte
+durée : 7 min de mesure (scellé commité à 11 h 10, verdict à 11 h 17), lecture du code avant, non chronométrée ; 0 min de carte. (Corrigé le 02/10 11 h 3x : j'avais écrit « ≈ 1 h 10 », un chiffre estimé de tête, faux.)
 
 ## Prédit / mesuré
 
