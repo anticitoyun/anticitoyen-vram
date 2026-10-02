@@ -736,6 +736,25 @@ class RotaryEmbedding(nn.Module):
             base = self.base * (factor ** (dim / (dim - 2)))
             return 1.0 / (base ** (torch.arange(0, dim, 2, device=device,
                                                 dtype=torch.float32) / dim))
+        if rtype in ("yarn",) and "truncate" in self.scaling:
+            # evp (gpt-oss) : la config NOMME `truncate` → formule de transformers à l'identique (seuils non arrondis si
+            # false, 1/(facteur·base^…) et non (1/base^…)/facteur). Une config sans ce champ garde le chemin ci-dessous,
+            # au bit d'avant (cliquet tests/test_gpt_oss_evp.py::test_yarn_sans_truncate_au_bit_d_avant).
+            import math
+            factor = max(factor, 1.0)
+            orig = float(self.scaling.get("original_max_position_embeddings") or 4096)
+            bf = float(self.scaling.get("beta_fast") or 32); bs = float(self.scaling.get("beta_slow") or 1)
+            def corr(nrot: float) -> float:
+                return (dim * math.log(orig / (nrot * 2 * math.pi))) / (2 * math.log(self.base))
+            low, high = corr(bf), corr(bs)
+            if self.scaling["truncate"]:
+                low, high = math.floor(low), math.ceil(high)
+            low, high = max(low, 0), min(high, dim - 1)
+            if low == high:
+                high += 0.001
+            pos = self.base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float) / dim)
+            extra = 1 - ((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low)).clamp(0, 1).to(device)
+            return (1.0 / (factor * pos)) * (1 - extra) + (1.0 / pos) * extra
         if rtype in ("yarn",):
             # YaRN (DeepSeek-V2/V3) : interpolation des basses fréquences,
             # extrapolation des hautes, rampe entre beta_fast et beta_slow
@@ -761,6 +780,23 @@ class RotaryEmbedding(nn.Module):
             inv = torch.where((wavelen <= low_wl) & (wavelen >= high_wl), smoothed, inv)
             return inv
         return inv
+
+    def facteur_attention(self) -> float:
+        """evp : `attention_factor` de transformers appliqué à cos/sin, SEULEMENT pour un YaRN dont la config nomme
+        `truncate` (gpt-oss) — `get_mscale(facteur)`, ou le rapport mscale/mscale_all_dim. 1,0 pour tout autre RoPE :
+        les alias YaRN déjà servis (DeepSeek : mscale porté par le chargeur MLA) restent au bit."""
+        s = self.scaling
+        if str(s.get("rope_type") or s.get("type") or "") != "yarn" or "truncate" not in s:
+            return 1.0
+        if s.get("attention_factor") is not None:
+            return float(s["attention_factor"])
+        import math
+        f = float(s.get("factor") or 1.0)
+        def m(scale: float, ms: float = 1.0) -> float:
+            return 1.0 if scale <= 1 else 0.1 * ms * math.log(scale) + 1.0
+        if s.get("mscale") and s.get("mscale_all_dim"):
+            return float(m(f, s["mscale"]) / m(f, s["mscale_all_dim"]))
+        return m(f)
 
     def _ensure(self, seq_len: int, device, dtype) -> None:
         """Tables cos/sin au dtype FIXE du module (`self._dtype`), jamais à celui du premier appelant.
@@ -789,8 +825,9 @@ class RotaryEmbedding(nn.Module):
         t = torch.arange(n, device=device, dtype=torch.float32)
         freqs = torch.outer(t, self.inv_freq.to(device))
         emb = torch.cat((freqs, freqs), dim=-1)
-        self._cos = emb.cos().to(dtype)
-        self._sin = emb.sin().to(dtype)
+        af = self.facteur_attention()
+        self._cos = (emb.cos() * af if af != 1.0 else emb.cos()).to(dtype)
+        self._sin = (emb.sin() * af if af != 1.0 else emb.sin()).to(dtype)
         self._cache_len = n
         self._generation = getattr(self, "_generation", 0) + 1     # tables dérivées : reconstruites si périmées
 
@@ -1202,6 +1239,63 @@ def decode_attention_fixed(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
         q.unsqueeze(2), kh, vh,
         attn_mask=mask, scale=scale, enable_gqa=(n_rep > 1))  # [b, hq, 1, d]
     return out.squeeze(2)                                     # [b, hq, d]
+
+
+def _avec_cle_puits(k: torch.Tensor, v: torch.Tensor, axe: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """evp : une clé et une valeur NULLES ajoutées en fin d'axe ``axe`` — le logit q·0 vaut 0, le masque flottant y
+    pose le puits de la tête ; la valeur nulle ne contribue qu'au dénominateur, exactement le `sinks` de gpt-oss
+    (transformers modeling_gpt_oss.eager_attention_forward : logits concaténés au puits, softmax, colonne retirée)."""
+    forme = list(k.shape)
+    forme[axe] = 1
+    return torch.cat((k, k.new_zeros(forme)), axe), torch.cat((v, v.new_zeros(forme)), axe)
+
+
+def attention_puits(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sinks: torch.Tensor, scale: float,
+                    q_offset: int = 0, window: int = 0, n_rep: int = 1, lignes: int = 256) -> torch.Tensor:
+    """evp : attention causale à puits (gpt-oss), ``q`` [t, hq, d], ``k``/``v`` [L, hkv, d] (têtes KV diffusées par
+    SDPA si ``n_rep`` > 1), ``sinks`` [hq]. La requête i (position absolue q_offset + i) voit les clés j ≤ i, et
+    j > i − window si ``window`` > 0 — la fenêtre de `decode_attention_fixed`. Par blocs de ``lignes`` requêtes :
+    le masque flottant [hq, lignes, L + 1] reste borné."""
+    t, hq, _ = q.shape
+    n_k = k.shape[0]
+    kz, vz = _avec_cle_puits(k, v, 0)
+    kh, vh = kz.permute(1, 0, 2)[None], vz.permute(1, 0, 2)[None]
+    j = torch.arange(n_k, device=q.device)
+    puits = sinks.to(q.dtype).view(hq, 1, 1)
+    sorties = []
+    for i0 in range(0, t, lignes):
+        qi = q[i0:i0 + lignes]
+        n = qi.shape[0]
+        ipos = q_offset + i0 + torch.arange(n, device=q.device)
+        ok = j[None, :] <= ipos[:, None]
+        if window > 0:
+            ok = ok & (j[None, :] > ipos[:, None] - window)
+        m = torch.zeros(n, n_k, dtype=q.dtype, device=q.device).masked_fill_(~ok, float("-inf"))
+        masque = torch.cat((m.expand(hq, n, n_k), puits.expand(hq, n, 1)), dim=-1)[None]
+        o = F.scaled_dot_product_attention(qi.permute(1, 0, 2)[None], kh, vh, attn_mask=masque, scale=scale,
+                                           enable_gqa=(n_rep > 1))
+        sorties.append(o[0].permute(1, 0, 2))
+    return torch.cat(sorties, dim=0)
+
+
+def decode_attention_puits_fixe(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seq_lens: torch.Tensor,
+                                sinks: torch.Tensor, n_rep: int, scale: float, window: int = 0) -> torch.Tensor:
+    """evp : `decode_attention_fixed` avec puits — formes fixes, frontière sur le GPU (capturable en graphe).
+    ``q`` [b, hq, d], ``k``/``v`` [b, S, hkv, d], ``seq_lens`` [b]."""
+    b, s = k.shape[0], k.shape[1]
+    hq = q.shape[1]
+    kz, vz = _avec_cle_puits(k, v, 1)
+    kh, vh = kz.permute(0, 2, 1, 3), vz.permute(0, 2, 1, 3)
+    pos = torch.arange(s, device=q.device)[None, :]
+    ok = pos < seq_lens[:, None]
+    if window > 0:
+        ok = ok & (pos >= seq_lens[:, None] - window)
+    m = torch.zeros(b, s, dtype=q.dtype, device=q.device).masked_fill_(~ok, float("-inf"))
+    masque = torch.cat((m.view(b, 1, 1, s).expand(b, hq, 1, s),
+                        sinks.to(q.dtype).view(1, hq, 1, 1).expand(b, hq, 1, 1)), dim=-1)
+    out = F.scaled_dot_product_attention(q.unsqueeze(2), kh, vh, attn_mask=masque, scale=scale,
+                                         enable_gqa=(n_rep > 1))
+    return out.squeeze(2)
 
 
 def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
