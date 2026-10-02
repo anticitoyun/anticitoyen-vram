@@ -295,6 +295,8 @@ DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_
 # EMBED=auto (la table de plongements ne quitte la carte qu'avant un exil de MLP) — rien ne change pour un plan qui tenait ;
 # zzs, troncature causale du cœur MLA au préfill, OPT-IN (MLA_CAUSAL=0 par défaut) — −24 % du GPU du préfill à 8 k sur
 # Kimi-Linear-35B, mais la sortie change ; le défaut ne bascule qu'après la garde de PPL à 8 192 + 512.
+# Réduction bf16 exacte de cuBLAS, OPT-IN (BF16_REDUCTION=reduite par défaut) : morceaux = seul tenant au bit sous `exacte`,
+# mais +2,40 % de préfill à M = 4 096 (seuil scellé 2 %) et la sortie du seul tenant change — garde de qualité d'abord.
 DEFAUTS_PAR_VERSION["0.7.18"] = ({**DEFAUTS_PAR_VERSION["0.7.17"][0], "PRELECTURE": "1", "KV_ANNEAU": "auto", "EMBED": "auto",
-                                  "MLA_CAUSAL": "0"},
+                                  "MLA_CAUSAL": "0", "BF16_REDUCTION": "reduite"},
                                  DEFAUTS_PAR_VERSION["0.7.17"][1])

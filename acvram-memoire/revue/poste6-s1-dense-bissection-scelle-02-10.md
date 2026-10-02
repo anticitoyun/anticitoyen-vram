@@ -1,0 +1,141 @@
+# Pourquoi Devstral s'écarte de 10 × son témoin reprise sous les morceaux (0,0428 contre 0,00403) : scellé AVANT la bissection à sec (poste6, 02/10 15 h 3x, ordre chef)
+
+Constat (carte, `poste6-s1-morceaux-verdict-ter-02-10.md`) : Devstral-24B, invite de 7 865 jetons, cache KV int8 dans tous
+les bras ; morceaux de 4 096 (K/V bf16 transitoires) contre seul tenant : Δ 0,0428 à la position 0 ; même requête rejouée
+(7 856 jetons relus du cache int8, une dizaine recalculés) : Δ 0,00403. Les bras A1/A2 sont au bit.
+
+## Ce qui est déjà su avant de mesurer
+
+* La reprise ne recalcule que la queue de l'invite : son erreur est celle de la relecture int8 des K/V pour une dizaine de
+  lignes. Les morceaux, eux, changent la FORME de tous les appels (lignes M de chaque produit, longueur des clés de
+  chaque attention) pour TOUTES les lignes de TOUTES les couches. Dix fois plus n'est pas absurde a priori.
+* Sur processeur, le produit bf16 de torch est indépendant des lignes ; sur carte, la GEMM cuBLAS bf16 dépend de M
+  (276i, 27/09 : `k_proj` couche 0, 1 ulp sur 38 % des éléments entre deux M). La bissection à sec ne peut donc PAS voir
+  cette cause-là : elle peut seulement l'isoler par élimination.
+
+## Instrument
+
+Jouet de la CI (`converted`, cache int8, bf16), sur processeur : `forward` (seul tenant) contre `forward_tranches`
+(morceaux, K/V transitoires), 20 séquences tirées au hasard de 400 jetons, morceaux [128, 256, 400] et [200, 400] ;
+crochets sur chaque couche (q, k, v après projection et RoPE ; sortie du SDPA ; o_proj ; MLP ; résidu) ; et la grandeur du
+comparateur S1 (écart des logits de la dernière position) contre le témoin reprise du jouet (deux passes, la seconde
+relisant le cache int8). Script : `scratchpad/poste6-s1-dense/bissection.py`. Diagnostic, pas un instrument de cellule.
+
+## Hypothèses et prédictions
+
+| | hypothèse | prédit à sec | faux si |
+|---|---|---|---|
+| H1 | le SDPA rend un résultat qui dépend de la longueur des clés de l'appel (`layers.py:1063`, REGLES § 4) | premier écart = sortie du SDPA de la couche 0, avec q, k, v d'entrée ÉGAUX au bit ; reproduit hors modèle en appelant `attention()` sur les mêmes q, k, v à deux longueurs | premier écart ailleurs, ou q/k/v déjà différents |
+| H2 | les K/V transitoires ne sont pas ceux du seul tenant | ÉCARTÉE : k, v égaux au bit couche 0 | k ou v différents à la couche 0 |
+| H3 | le masque « bas-droite » des morceaux prend un autre chemin que le causal d'un seul tenant | ÉCARTÉE sur processeur : un morceau unique [400] rend 0 écart (déjà vu au diagnostic j4, graine 0) — confirmée sur 20 graines | un écart avec un seul morceau |
+| H4 | GEMM cuBLAS bf16 dépendante de M sur les projections et le MLP | INVISIBLE à sec : sur processeur, projections et MLP égaux au bit dès que leur entrée l'est | un écart de projection à entrée égale sur processeur |
+| G | grandeur du comparateur sur le jouet | écart des logits morceaux ≤ celui du témoin reprise (rapport 0,3-1,5) — l'inverse de Devstral sur carte (10,6) | rapport ≥ 5 sur processeur : la cause serait visible à sec |
+| P | propagation | l'écart maximal des états cachés croît de la couche 0 à la dernière (≥ 1,5 ×) | décroît |
+
+Conclusion attendue, écrite avant : à sec on trouve H1 seule (fichier:ligne `layers.py:1063`), d'une ampleur comparable
+au témoin ; le facteur 10 de Devstral ne s'y reproduit pas → il vient de ce que seule la carte ajoute, H4 (cuBLAS selon M
+sur ~7 projections × 40 couches × toutes les lignes), à confirmer par une micro-prise de 30 s (un `F.linear` bf16 de la
+couche 0 de Devstral à M = 7 865 contre 4 096 + 3 769). Si G est faux (rapport ≥ 5 à sec), H4 n'est pas nécessaire et la
+cause est lisible sur processeur — je la nommerai.
+
+## Résultats à sec (02/10 15:26, APRÈS le scellé ; rien ci-dessus n'a été retouché)
+
+`scratchpad/poste6-s1-dense/bissection.py`, jouet de la CI sur processeur, 20 séquences de 400 jetons, 8 s, carte tenue en
+`service` par poste2 (pas une mesure).
+
+| | prédit | à sec | |
+|---|---|---|---|
+| H1 SDPA selon la longueur des clés | premier écart = sortie du SDPA, q/k/v égaux | **tous les premiers écarts sont une sortie de SDPA à q, k, v égaux au bit** : [128, 256, 400] → 13 cas sur 20 (couche 0 : 5, couche 1 : 4, couche 2 : 3, couche 3 : 1), 7 sans aucun écart ; [200, 400] → 3 sur 20 | confirmée |
+| H2 K/V transitoires différents | écartée | couche 0 : q, k, v égaux au bit 20/20 dans les trois découpages | écartée |
+| H3 masque bas-droite | écartée | un seul morceau [400] : 0 écart sur 20 | écartée |
+| H4 GEMM selon M | invisible à sec | MLP à entrée égale et sortie différente : 0 cas ; projections égales | invisible, comme prévu |
+| G rapport morceaux / témoin | 0,3-1,5 | écart des logprobs (top-10, dernière position) : morceaux médiane 0, max 0,0028 (14 nuls sur 20) ; témoin reprise médiane 0,0038, max 0,0057 → **rapport ≤ 0,5** | sous la fourchette (le sens était le bon, pas la valeur) ; le seuil « ≥ 5 » n'est pas atteint |
+| P propagation | croît ≥ 1,5 × | sortie SDPA : 0,0001 → 0,0020 → 0,0039 → 0,0039 par couche ; entrée du MLP : 0,0039 → 0,031 | tenu |
+
+**Lecture.** Sur processeur, la seule cause qui existe est H1 — `acvram/engine/layers.py:1063`, `attention()` : le SDPA
+réduit les clés selon la longueur de l'appel — et elle pèse au plus LA MOITIÉ du témoin reprise. Le facteur 10,6 de Devstral
+sur carte ne s'y reproduit pas : il vient de ce que seule la carte ajoute. Deux candidats, que le processeur ne sépare pas :
+
+* **H4, la GEMM cuBLAS bf16 qui dépend de M** — mesurée sur carte le 27/09 (276i : `k_proj` couche 0, 1 ulp sur 38 % des
+  éléments entre deux M). Les morceaux changent M (7 865 → 4 096 + 3 769) pour les sept produits de chacune des 40 couches,
+  sur toutes les lignes : `kernels/__init__.py:1350` et `:1353` (`F.linear(xr, W…)` du chemin Marlin dépaqueté) et le MLP
+  (`attention.py`, `MLP._forward_un`). La reprise, elle, ne recalcule qu'une dizaine de lignes à M inchangé.
+* **H1 sur carte** : le SDPA « flash » de la carte peut dépendre de la longueur plus fortement que celui du processeur.
+
+**Ce qui trancherait** (≈ 1 min de carte, une prise, à écrire au scellé avant) : avec les poids de la couche 0 de Devstral,
+(i) `F.linear` de `q_proj` et `gate_proj` à M = 7 865 contre 4 096 + 3 769 — part des éléments qui diffèrent ; (ii)
+`attention()` sur les mêmes q, k, v en un appel contre deux morceaux — écart maximal. Prédit : (i) 20-50 % des éléments à
+1 ulp, (ii) < 1 % — donc H4.
+Réponse à l'ordre : trois hypothèses jouées à sec — H1 confirmée mais trop petite (≤ 0,5 × le témoin), H2 et H3 écartées ;
+H4 reste, par élimination et par la mesure du 27/09, non par cette bissection.
+
+## Micro-prise carte « H4 » — prédiction écrite AVANT (02/10 15 h 4x, feu de chef : ≈ 1 min après le rejeu de poste2, une seule prise englobante)
+
+Instrument : `scratchpad/poste6-s1-dense/prise-h4.py`, lancé par UNE prise `outils/carte.sh` (type mesure,
+`ACVRAM_DUREE_MAX=180`), joué d'abord à sec sur processeur (mêmes poids, T réduit). Devstral-24B chargé par `load_model`
+(le chemin servi : disposition Marlin, dépaquetage, `F.linear`) ; entrée = plongements d'une séquence pseudo-aléatoire de
+7 865 jetons (graine 0) passés par la norme d'entrée de la couche 0. Aucune génération, aucun texte.
+
+| mesure | prédit | faux si / seuil |
+|---|---|---|
+| (i) projections de la couche 0 (`q_proj`, `k_proj`, `v_proj`, `gate_proj`, `up_proj`) : M = 7 865 d'un coup contre 4 096 + 3 769 | **20-50 % des éléments diffèrent**, d'1 ulp bf16 pour ≥ 99 % d'entre eux | < 1 % : H4 réfutée |
+| témoin (i) : le même appel deux fois, même M | 0 élément différent | ≠ 0 : la carte n'est pas déterministe, rien ne se lit |
+| contrôle (i) : `F.linear` nu sur un poids bf16 aléatoire de même forme | même ordre que (i) : c'est cuBLAS, pas notre dépaquetage | ≈ 0 alors que (i) ≥ 10 % : la dépendance à M viendrait de notre chemin Marlin |
+| (ii) `attention()` sur les MÊMES q, k, v : un appel de 7 865 lignes contre deux morceaux (clés 4 096, puis 7 865) | **< 1 % des éléments**, ≤ 2 ulp | ≥ (i) : le SDPA de la carte serait la cause principale (H1 sur carte) |
+| durée | ≤ 60 s si le modèle est en cache de pages, ≤ 150 s sinon | — |
+
+Décision, fixée ici : **H4 confirmée** si (i) ≥ 10 % sur `q_proj` ET `gate_proj`, témoin à 0 et (ii) < (i) ; **H1 sur carte**
+si (ii) ≥ (i) ; **ni l'une ni l'autre** si (i) < 1 % et (ii) < 1 % — la cause serait alors ailleurs (noyaux propres à la
+carte : normes, RoPE, écriture du cache) et je le dirai sans la deviner.
+Limite, dite avant : cette prise montre QUELLE opération dépend de la forme de l'appel, pas combien des 0,0428 elle porte.
+
+Instrument joué à sec avant la carte (02/10 15:29-15:32, processeur, Devstral, T = 600, coupe 300, pendant un service de
+poste2) : il va au bout ; (i) 0 élément différent sur les cinq projections et sur le `F.linear` nu (attendu : le produit bf16
+du processeur ne dépend pas de M) ; (ii) 21 éléments sur 2 457 600 à 1 ulp, 12 lignes sur 600 ; témoins à 0. Chargement
+135,7 s (disque dur, sur processeur). Lanceur : `scratchpad/poste6-s1-dense/carte-h4.sh` (une seule prise `carte.sh`).
+
+## Troisième bras de la micro-prise — prédiction écrite AVANT (02/10 16 h, ordre chef après le lot duck.ai `poste4-224` 8463edd58)
+
+Ce que le lot rapporte (non vérifié par moi) : cuBLAS bf16 et le SDPA flash choisissent leur découpage selon la forme de
+l'appel ; `use_deterministic_algorithms` ne garantit que la répétition d'un même appel. Levier nommé :
+`torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False`. Vérifié à sec : le réglage existe dans le torch
+installé (2.14.0+cu130), vaut `True` par défaut, et acvram ne le pose nulle part.
+
+Bras (iii) : les mêmes produits de la couche 0 (`q_proj`, `gate_proj`, et le `F.linear` nu), M = 7 865 contre 4 096 + 3 769,
+réglage à `False` ; plus la part des éléments qui changent entre réglage `True` et `False` au même M, et le temps d'un appel
+dans chaque réglage (3 répétitions, synchronisées — indicatif, pas une cellule).
+
+| mesure | prédit | faux si |
+|---|---|---|
+| (iii) produits, réglage `False`, M = 7 865 contre deux morceaux | **< 1 % des éléments** (attendu 0-0,3 %) : l'accumulation en pleine précision n'arrondit qu'à la fin, le découpage ne se voit presque plus | ≥ 10 % : le réglage ne retire pas la dépendance à M (ou torch ne le transmet pas à ce chemin) |
+| témoin (iii) : même M deux fois, réglage `False` | 0 | ≠ 0 |
+| sortie `False` contre `True`, même M | **20-60 % des éléments changent** d'1 ulp : le réglage change la sortie servie | < 1 % : il ne change rien, donc n'agit pas |
+| temps d'un `F.linear` 7 865 × 5 120 → 5 120, `False` contre `True` | 1,0 à 2 × plus lent | > 3 × |
+
+Conséquence à écrire quel que soit le résultat : un réglage qui retire la dépendance à M change aussi tous les logits
+servis (règle « une optimisation qui change la sortie… ») — ce ne serait pas un correctif à poser par défaut, mais un
+régime à juger par sa propre garde de qualité et son coût en débit. Cette minute de carte ne juge ni l'un ni l'autre.
+
+Script étendu rejoué à sec (02/10 16:11-16:14, processeur, T = 300) : le troisième bras va au bout ; sur processeur le
+réglage n'a aucun effet (0 élément différent partout, temps × 1,00) — attendu, il ne concerne que cuBLAS.
+
+## Seconde micro-prise — prédiction écrite AVANT (02/10 22 h 2x), après lecture de la première (22:18:45-22:19:59, 74 s)
+
+La première prise (journal `scratchpad/poste6-s1-dense/prise-h4.log`, verdict à part) rend : produits `q_proj`, `gate_proj`,
+`up_proj` et `F.linear` nu à N = 4 096 → 0 élément différent entre M = 7 865 et 4 096 + 3 769 ; attention → 0 ; mais
+**`k_proj` 15,1 % et `v_proj` 29,6 % des éléments** diffèrent. Ces deux-là ont N = 1 024 : exclus de Marlin
+(`_PROJ_MARLIN_MIN_N` = 2 048, `kernels/__init__.py:1270`), ils passent par le chemin NVFP4 naturel, déquantification puis
+`F.linear` (`kernels/__init__.py:932`). Mon troisième bras portait sur `q_proj`, `gate_proj` et un poids nu de N = 4 096 :
+il ne dit donc RIEN du réglage — je n'avais pas mis les deux projections touchées dans ce bras.
+
+Seconde prise (même instrument étendu, une prise `carte.sh`, ≈ 75 s) : (iv) `F.linear` nu, K = 5 120, à N = 512, 1 024,
+2 048 et 4 096, M = 7 865 contre deux morceaux, réglage `True` puis `False` ; (iii bis) `k_proj` et `v_proj` sous réglage
+`False`.
+
+| mesure | prédit | faux si |
+|---|---|---|
+| (iv) `F.linear` nu, réglage par défaut | N = 512 et 1 024 : ≥ 10 % d'éléments différents ; N = 2 048 et 4 096 : 0 | N = 1 024 à 0 : la dépendance à M ne viendrait pas de cuBLAS mais de notre déquantification du chemin naturel |
+| (iv) idem, réglage `False` | < 1 % à tous les N | ≥ 10 % : le réglage ne retire rien |
+| (iii bis) `k_proj`, `v_proj`, réglage `False`, M = 7 865 contre deux morceaux | < 1 % | ≥ 10 % |
+| (iii bis) `k_proj`, `v_proj` : sortie `False` contre `True`, même M | 15-60 % des éléments changent | < 1 % : le réglage n'agit pas sur ce produit |
+| temps `F.linear` nu N = 1 024, `False` contre `True` | 1 à 2 × | > 3 × |
