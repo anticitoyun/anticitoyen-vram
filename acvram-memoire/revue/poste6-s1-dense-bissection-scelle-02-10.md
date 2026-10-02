@@ -118,3 +118,24 @@ régime à juger par sa propre garde de qualité et son coût en débit. Cette m
 
 Script étendu rejoué à sec (02/10 16:11-16:14, processeur, T = 300) : le troisième bras va au bout ; sur processeur le
 réglage n'a aucun effet (0 élément différent partout, temps × 1,00) — attendu, il ne concerne que cuBLAS.
+
+## Seconde micro-prise — prédiction écrite AVANT (02/10 22 h 2x), après lecture de la première (22:18:45-22:19:59, 74 s)
+
+La première prise (journal `scratchpad/poste6-s1-dense/prise-h4.log`, verdict à part) rend : produits `q_proj`, `gate_proj`,
+`up_proj` et `F.linear` nu à N = 4 096 → 0 élément différent entre M = 7 865 et 4 096 + 3 769 ; attention → 0 ; mais
+**`k_proj` 15,1 % et `v_proj` 29,6 % des éléments** diffèrent. Ces deux-là ont N = 1 024 : exclus de Marlin
+(`_PROJ_MARLIN_MIN_N` = 2 048, `kernels/__init__.py:1270`), ils passent par le chemin NVFP4 naturel, déquantification puis
+`F.linear` (`kernels/__init__.py:932`). Mon troisième bras portait sur `q_proj`, `gate_proj` et un poids nu de N = 4 096 :
+il ne dit donc RIEN du réglage — je n'avais pas mis les deux projections touchées dans ce bras.
+
+Seconde prise (même instrument étendu, une prise `carte.sh`, ≈ 75 s) : (iv) `F.linear` nu, K = 5 120, à N = 512, 1 024,
+2 048 et 4 096, M = 7 865 contre deux morceaux, réglage `True` puis `False` ; (iii bis) `k_proj` et `v_proj` sous réglage
+`False`.
+
+| mesure | prédit | faux si |
+|---|---|---|
+| (iv) `F.linear` nu, réglage par défaut | N = 512 et 1 024 : ≥ 10 % d'éléments différents ; N = 2 048 et 4 096 : 0 | N = 1 024 à 0 : la dépendance à M ne viendrait pas de cuBLAS mais de notre déquantification du chemin naturel |
+| (iv) idem, réglage `False` | < 1 % à tous les N | ≥ 10 % : le réglage ne retire rien |
+| (iii bis) `k_proj`, `v_proj`, réglage `False`, M = 7 865 contre deux morceaux | < 1 % | ≥ 10 % |
+| (iii bis) `k_proj`, `v_proj` : sortie `False` contre `True`, même M | 15-60 % des éléments changent | < 1 % : le réglage n'agit pas sur ce produit |
+| temps `F.linear` nu N = 1 024, `False` contre `True` | 1 à 2 × | > 3 × |
