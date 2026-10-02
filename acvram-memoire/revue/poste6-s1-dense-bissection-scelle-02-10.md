@@ -88,3 +88,8 @@ Décision, fixée ici : **H4 confirmée** si (i) ≥ 10 % sur `q_proj` ET `gate_
 si (ii) ≥ (i) ; **ni l'une ni l'autre** si (i) < 1 % et (ii) < 1 % — la cause serait alors ailleurs (noyaux propres à la
 carte : normes, RoPE, écriture du cache) et je le dirai sans la deviner.
 Limite, dite avant : cette prise montre QUELLE opération dépend de la forme de l'appel, pas combien des 0,0428 elle porte.
+
+Instrument joué à sec avant la carte (02/10 15:29-15:32, processeur, Devstral, T = 600, coupe 300, pendant un service de
+poste2) : il va au bout ; (i) 0 élément différent sur les cinq projections et sur le `F.linear` nu (attendu : le produit bf16
+du processeur ne dépend pas de M) ; (ii) 21 éléments sur 2 457 600 à 1 ulp, 12 lignes sur 600 ; témoins à 0. Chargement
+135,7 s (disque dur, sur processeur). Lanceur : `scratchpad/poste6-s1-dense/carte-h4.sh` (une seule prise `carte.sh`).
