@@ -8,8 +8,11 @@ porte exactement de 2⁻⁹ (sous-normal) à 2⁸. Sous 18 octaves d'étendue pa
 source au bit (mesuré sur gpt-oss-20b : ≤ 16 octaves par tenseur — scratchpad/poste1-evp-01-10/scelle.md § 2). Au-delà
 (gpt-oss-120b : 2 tenseurs sur 13 824, 18 octaves — scratchpad/poste1-evp-120b/etendue.log), un bloc de 16 sous le
 plancher garde l'échelle 2⁻⁹ et reporte l'octave sur ses codes quand c'est exact (|codes| × 2^-d tous E2M1) ; sinon
-`EtendueInexacte`, et `iter_gpt_oss` livre CE tenseur en bf16 (déquantifié, exact, gardé en clair par le passage direct),
-en le nommant. Jamais un arrondi.
+`EtendueInexacte`, et `iter_gpt_oss` reconvertit CE tenseur avec `arrondir=True` : les seuls blocs sous le plancher dont les
+codes ne se reportent pas sont arrondis au plus proche (égalité → code pair), et le tenseur porte `arrondi_mxfp4` (blocs,
+erreur max relative au max du tenseur), écrit au manifeste et imprimé. Le bf16 exact a été essayé : le convertisseur
+refuse une couche aux experts de formats mélangés (pile groupée impossible) ; `global_scale_rows` serait exact mais n'est
+ni sérialisé ni lu par les noyaux rapides. 120b : layers.13.experts.43.down, 26 blocs de 16, une rangée 2^-18 sous le max.
 
 La sortie (`iter_gpt_oss`) suit les noms d'un MoE acvram : experts désentrelacés (gate = lignes paires de gate_up, up =
 lignes impaires, transformers `GptOssExperts._apply_gate`), un tenseur par expert et par projection, biais compris ;
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Iterator
 
 import torch
@@ -35,12 +39,14 @@ class EtendueInexacte(ValueError):
     """Un bloc sous le plancher de l'E4M3 dont les codes ne supportent pas le report d'octave."""
 
 
-def _reporter_sous_plancher(blocs: torch.Tensor, expo: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _reporter_sous_plancher(blocs: torch.Tensor, expo: torch.Tensor,
+                            arrondir: bool = False) -> tuple[torch.Tensor, torch.Tensor, int]:
     """``blocs`` u8 [N, 2·nb, 8] (un bloc NVFP4 de 16 = 8 octets), ``expo`` int32 [N, 2·nb]. Chaque bloc sous le
-    plancher prend l'échelle 2^_PLANCHER et ses codes × 2^-d (d = octaves manquantes), seulement si c'est exact."""
+    plancher prend l'échelle 2^_PLANCHER et ses codes × 2^-d (d = octaves manquantes) : exact, ou refus — sauf
+    ``arrondir``, qui prend le code E2M1 le plus proche (égalité → code pair). Rend aussi le nombre de blocs arrondis."""
     bas = expo < _PLANCHER
     if not bool(bas.any()):
-        return blocs, expo
+        return blocs, expo, 0
     sel = blocs[bas]                                                        # [m, 8]
     nib = torch.stack([sel & 0x0F, sel >> 4], -1).reshape(-1, 16).to(torch.int64)
     signe, mag = nib & 8, nib & 7
@@ -48,27 +54,31 @@ def _reporter_sous_plancher(blocs: torch.Tensor, expo: torch.Tensor) -> tuple[to
     val = torch.tensor(_E2M1, dtype=torch.float64)[mag] * torch.pow(2.0, -d)
     table = torch.tensor(_E2M1, dtype=torch.float64)
     egal = val[..., None] == table                                          # [m, 16, 8]
-    if not bool(egal.any(-1).all()):
-        n = int((~egal.any(-1)).any(-1).sum())
+    n = int((~egal.any(-1)).any(-1).sum())
+    if n and not arrondir:
         raise EtendueInexacte(f"MXFP4 → NVFP4 : {n} bloc(s) de 16 sous le plancher 2^{_PLANCHER} dont les codes ne "
                               "supportent pas le report d'octave — conversion exacte impossible en NVFP4")
-    code = signe | egal.to(torch.int64).argmax(-1)
+    ecart = (val[..., None] - table).abs()
+    ecart = ecart + (torch.arange(8, dtype=torch.float64) % 2) * 1e-9      # égalité → code pair
+    code = signe | ecart.argmin(-1)
     code = code.reshape(-1, 8, 2).to(torch.uint8)
     blocs, expo = blocs.clone(), expo.clone()
     blocs[bas] = code[..., 0] | (code[..., 1] << 4)
     expo[bas] = _PLANCHER
-    return blocs, expo
+    return blocs, expo, n
 
 
-def mxfp4_vers_nvfp4(blocs: torch.Tensor, echelles: torch.Tensor) -> NVFP4Tensor:
-    """``blocs`` u8 [N, nb, 16], ``echelles`` u8 [N, nb] (une matrice [N, 32·nb]) → NVFP4Tensor aux mêmes valeurs."""
+def mxfp4_vers_nvfp4(blocs: torch.Tensor, echelles: torch.Tensor, arrondir: bool = False) -> NVFP4Tensor:
+    """``blocs`` u8 [N, nb, 16], ``echelles`` u8 [N, nb] (une matrice [N, 32·nb]) → NVFP4Tensor aux mêmes valeurs
+    (``arrondir`` : voir `_reporter_sous_plancher` ; le tenseur porte alors `arrondi_mxfp4`)."""
+    source = (blocs, echelles)
     if blocs.dtype != torch.uint8 or echelles.dtype != torch.uint8:
         raise TypeError("MXFP4 : blocs et échelles attendus en uint8")
     n, nb, _ = blocs.shape
     s = echelles.to(torch.int32)
     s_max = int(s.max())
     expo = (s - s_max + _MARGE_HAUTE).repeat_interleave(2, dim=-1)        # exposant par bloc de 16, ≤ 8 ; [N, 2·nb]
-    paq, expo = _reporter_sous_plancher(blocs.reshape(n, 2 * nb, 8), expo)
+    paq, expo, n_arrondis = _reporter_sous_plancher(blocs.reshape(n, 2 * nb, 8), expo, arrondir)
     blocs = paq.reshape(n, nb, 16)
     bloc16 = torch.pow(2.0, expo.to(torch.float32))
     bs = bloc16.to(torch.float8_e4m3fn)
@@ -76,8 +86,15 @@ def mxfp4_vers_nvfp4(blocs: torch.Tensor, echelles: torch.Tensor) -> NVFP4Tensor
         raise AssertionError("MXFP4 → NVFP4 : une échelle de bloc n'est pas exacte en E4M3")
     k = nb * 32
     gs = torch.tensor(2.0 ** (s_max - _E8M0_BIAIS - _MARGE_HAUTE), dtype=torch.float32)
-    return NVFP4Tensor(qweight=blocs.reshape(n, nb * 16).contiguous(), block_scale=bs.contiguous(),
-                       global_scale=gs, shape=(n, k), padded_in=k)
+    t = NVFP4Tensor(qweight=blocs.reshape(n, nb * 16).contiguous(), block_scale=bs.contiguous(),
+                    global_scale=gs, shape=(n, k), padded_in=k)
+    if n_arrondis:
+        from .nvfp4 import dequantize_nvfp4
+        ref = mxfp4_dequant(*source)
+        t.arrondi_mxfp4 = {"blocs16": n_arrondis,
+                           "erreur_max_rel": float((dequantize_nvfp4(t, torch.float32) - ref).abs().max()
+                                                   / ref.abs().max())}
+    return t
 
 
 def mxfp4_dequant(blocs: torch.Tensor, echelles: torch.Tensor) -> torch.Tensor:
@@ -130,9 +147,11 @@ def iter_gpt_oss(path: str, direct_nvfp4: bool = True) -> Iterator[tuple[str, to
                     b, s = blocs[e, lignes].contiguous(), ech[e, lignes].contiguous()
                     try:
                         w = mxfp4_vers_nvfp4(b, s) if direct_nvfp4 else mxfp4_dequant(b, s).to(torch.bfloat16)
-                    except EtendueInexacte as exc:
-                        w = mxfp4_dequant(b, s).to(torch.bfloat16)          # exact : E2M1 × 2^k tient en bf16
-                        print(f"[mxfp4] {pref}.{e}.{nom}.weight servi en bf16 exact ({exc})", flush=True)
+                    except EtendueInexacte:
+                        w = mxfp4_vers_nvfp4(b, s, arrondir=True)
+                        print(f"[mxfp4] {pref}.{e}.{nom}.weight : {w.arrondi_mxfp4['blocs16']} bloc(s) de 16 sous le "
+                              f"plancher ARRONDIS, erreur max {w.arrondi_mxfp4['erreur_max_rel']:.2e} du max du "
+                              "tenseur (seul tenseur non exact)", file=sys.stderr, flush=True)
                     yield f"{pref}.{e}.{nom}.weight", w
                     yield f"{pref}.{e}.{nom}.bias", biais[e, lignes].contiguous()
             continue

@@ -416,8 +416,8 @@ def test_jouet_pas_de_decodage_contre_transformers(jouet_oss):
 
 
 # -- evp 120b : 18 octaves (2 tenseurs sur 13 824 du gpt-oss-120b, scratchpad/poste1-evp-120b/etendue.log) -----------
-# Cassures éprouvées : `_reporter_sous_plancher` neutralisé → test_18_octaves_report_exact rouge ; repli bf16 retiré
-# d'`iter_gpt_oss` → test_iter_gpt_oss_repli_bf16_exact_et_nomme rouge (EtendueInexacte remonte et arrête la conversion).
+# Cassures éprouvées : `_reporter_sous_plancher` neutralisé → test_18_octaves_report_exact rouge ; repli retiré
+# d'`iter_gpt_oss` → test_iter_gpt_oss_arrondi_nomme_et_borne rouge (EtendueInexacte remonte et arrête la conversion).
 def _bloc_codes(mags, g):
     """Un bloc MXFP4 de 32 (16 octets) dont les |codes| sont tirés dans ``mags`` (indices E2M1), signes au hasard."""
     m = torch.tensor(mags)[torch.randint(0, len(mags), (32,), generator=g)]
@@ -449,11 +449,13 @@ def test_18_octaves_code_impair_refuse():
         mxfp4_vers_nvfp4(blocs, ech)
 
 
-def test_iter_gpt_oss_repli_bf16_exact_et_nomme(tmp_path, capsys):
+def test_iter_gpt_oss_arrondi_nomme_et_borne(tmp_path, capsys):
+    """Codes 0,5 / 1,5 sous le plancher : CE tenseur reste NVFP4 (pile homogène), arrondi au plus proche, nommé, borné ;
+    ses voisins restent exacts. Le bf16 exact a été refusé par le convertisseur (formats mélangés dans la couche)."""
     import json
     from safetensors.torch import save_file
     from acvram.quant.mxfp4 import iter_gpt_oss, mxfp4_dequant
-    from acvram.quant.nvfp4 import NVFP4Tensor
+    from acvram.quant.nvfp4 import NVFP4Tensor, dequantize_nvfp4
     g = torch.Generator().manual_seed(9)
     E, H, I = 2, 64, 64
     sd = {}
@@ -469,6 +471,26 @@ def test_iter_gpt_oss_repli_bf16_exact_et_nomme(tmp_path, capsys):
     json.dump({"weight_map": {k: "m.safetensors" for k in sd}}, open(tmp_path / "model.safetensors.index.json", "w"))
     sortie = dict(iter_gpt_oss(str(tmp_path)))
     w = sortie["model.layers.0.mlp.experts.1.down_proj.weight"]
-    assert w.dtype == torch.bfloat16 and torch.equal(w.float(), mxfp4_dequant(b[1], s[1]))
-    assert isinstance(sortie["model.layers.0.mlp.experts.0.down_proj.weight"], NVFP4Tensor)
-    assert "experts.1.down_proj.weight servi en bf16 exact" in capsys.readouterr().out
+    assert isinstance(w, NVFP4Tensor) and w.arrondi_mxfp4["blocs16"] == 2
+    ref, obtenu = mxfp4_dequant(b[1], s[1]), dequantize_nvfp4(w, torch.float32)
+    ecart = (obtenu - ref).abs()
+    assert torch.equal(ecart[torch.arange(H) != 5], torch.zeros_like(ecart[torch.arange(H) != 5]))  # hors rangée : exact
+    # borne : un demi-pas E2M1 au plancher, soit 0,25 × 2^-9 × l'échelle globale ; ≤ 2^-11 du max du tenseur ici
+    assert 0 < w.arrondi_mxfp4["erreur_max_rel"] <= 2.0 ** -11
+    assert float(ecart.max()) <= 0.25 * 2.0 ** -9 * float(w.global_scale)
+    w0 = sortie["model.layers.0.mlp.experts.0.down_proj.weight"]
+    assert getattr(w0, "arrondi_mxfp4", None) is None
+    assert "experts.1.down_proj.weight : 2 bloc(s) de 16 sous le plancher ARRONDIS" in capsys.readouterr().err
+
+
+def test_arrondi_egalite_vers_le_code_pair():
+    """0,5 / 2 = 0,25 : à égale distance de 0 et de 0,5 → 0 (code pair) ; 1,5 / 2 = 0,75 → 1 (code pair)."""
+    from acvram.quant.mxfp4 import mxfp4_vers_nvfp4
+    from acvram.quant.nvfp4 import dequantize_nvfp4
+    blocs = torch.zeros(1, 2, 16, dtype=torch.uint8)
+    blocs[0, 0] = 0x77                                   # 6 partout : bloc du haut
+    blocs[0, 1] = 0x31                                   # 0,5 (bas) et 1,5 (haut) alternés
+    ech = torch.tensor([[128, 110]], dtype=torch.uint8)
+    t = mxfp4_vers_nvfp4(blocs, ech, arrondir=True)
+    v = dequantize_nvfp4(t, torch.float32)[0, 32:] / 2.0 ** (110 - 127)
+    assert v[0::2].tolist() == [0.0] * 16 and v[1::2].tolist() == [2.0] * 16
