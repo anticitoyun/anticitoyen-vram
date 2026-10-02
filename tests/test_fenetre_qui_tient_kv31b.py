@@ -69,15 +69,18 @@ def test_le_refus_nomme_une_fenetre_exacte(monkeypatch, capsys):
     # levier 1 : la fenêtre annoncée compte la réserve PLAFONNÉE (MLP par tranches de 4 096 à la relance) ; avec le terme
     # d'attention de la réserve (preuve carte 30/09) : 25 600 à 28,1 Gio libres (31 744 avant le terme — que la chauffe
     # démentait à 20 480 ; 23 552 avec la réserve d'un seul tenant)
-    assert 24576 <= n <= 26624, n
+    # d19 (poste6 01/10) : au-delà du plafond l'attention passe par morceaux — le flux résiduel et q/k/v ne sont plus comptés qu'à
+    # 4 096 lignes (−2,0 Gio à 32 768 sur gemma) et les K/V bf16 transitoires d'une couche s'ajoutent (+0,5) : la fenêtre annoncée
+    # monte ; c'est la chauffe qui la prouve (scellé poste6-d19, C5)
+    assert 26624 <= n <= 28672, n                                   # 25 600 avant d19
     assert f"[acvram] fenêtre qui tient : {n} jetons" in capsys.readouterr().err
     # exactitude : N tient, N + 1 024 ne tient pas — avec le plan tel qu'exilé au refus et la réserve plafonnée
     bornes = LD._borner_kv_par_la_vram(p, man, lambda nom: nom, reserve=0)
     base = int(bornes["cuda:0"])                                    # réserve 0 : libre − poids − marge de base
-    spec.mlp_prefill_plafond = 4096
+    spec.mlp_prefill_plafond = spec.prefill_morceau_plafond = 4096          # d19 : la relance aura les deux plafonds
     cout = lambda k: LD._kv_plancher(p, spec, k, "cuda:0") + LD._reserve_prefill(spec, k, man, p)
     assert cout(n) <= base < cout(n + 1024), (cout(n) / G, base / G, cout(n + 1024) / G)
-    spec.mlp_prefill_plafond = None
+    spec.mlp_prefill_plafond = spec.prefill_morceau_plafond = None
     assert n > 23552, "la réserve plafonnée doit faire tenir plus que la pleine"
 
 
