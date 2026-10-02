@@ -1612,7 +1612,9 @@ _EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
 # `etroite` / `etroite-tranches` (03/10, scellé revue/poste6-bf16-etroite-scelle-02-10) : la réduction exacte n'est posée
 # que le temps du `F.linear` du chemin NVFP4 naturel (`kernels._linear_naturel`), le reste du processus garde le défaut
 # de torch ; `-tranches` découpe M par 1 024 lignes dans cet appel (même valeurs au bit : sous réduction exacte le produit
-# ne dépend pas de M). Jugés sur carte E0-E9, défaut tranché par le chef au verdict.
+# ne dépend pas de M). Carte 03/10 (revue/poste6-bf16-etroite-verdict-carte-03-10) : au bit au noyau et gratuite au
+# moteur (0,02 % à M = 4 096), mais les morceaux ne rendent toujours pas le seul tenant (E4 faux) : un autre produit
+# cuBLAS bf16 du préfill dépend du découpage (attention SDPA présumée, non mesurée) — opt-in, défaut inchangé.
 _BF16_REDUCTION = (os.environ.get("ACVRAM_BF16_REDUCTION") or "reduite").strip().lower()     # regime.VARIABLES
 _MODES_ETROITS = {"etroite": "appel", "etroite-tranches": "tranches"}
 

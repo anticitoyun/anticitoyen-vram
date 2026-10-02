@@ -18,6 +18,10 @@
   (Devstral, 7 865 jetons : premier jeton basculé). Sous `exacte` : morceaux et seul tenant **au bit** (352 valeurs sur
   352). Opt-in parce que le préfill coûte **+2,40 % à M = 4 096** (+0,2 à +0,8 % de 512 à 2 048) pour un seuil écrit avant
   de 2 %, et que le réglage change aussi la sortie servie du seul tenant. La ligne de régime dit `reduction_bf16=`.
+  `etroite` / `etroite-tranches` (03/10) : la réduction exacte seulement le temps du `F.linear` du chemin NVFP4 naturel
+  (k_proj / v_proj) — au bit du drapeau global sur ces produits, gratuite au moteur (+0,02 % à M = 4 096), mais un
+  préfill découpé ne rend toujours pas le seul tenant : un autre produit cuBLAS du préfill dépend du découpage.
+  Opt-in aussi. `acvram-memoire/revue/poste6-bf16-etroite-verdict-carte-03-10.md`.
   `acvram-memoire/revue/poste6-bf16-reduction-verdict-carte-02-10.md`.
 
 ### Troncature causale du cœur MLA au préfill, en option (zzs)

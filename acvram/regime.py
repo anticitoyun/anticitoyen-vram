@@ -432,7 +432,8 @@ VARIABLES: tuple[Variable, ...] = (
              "éléments selon le découpage du préfill ; `reduite` (défaut) : le défaut de torch. Opt-in parce que le préfill "
              "coûte +2,40 % à M = 4 096 (seuil 2 %) et que la sortie du seul tenant change aussi. `etroite` / "
              "`etroite-tranches` (03/10) : réduction exacte le temps du seul F.linear du chemin NVFP4 naturel (k/v), "
-             "sans / avec tranches de 1 024 lignes — jugés sur carte E0-E9. Régime « reduction_bf16= »"),
+             "sans / avec tranches de 1 024 lignes — gratuit (03/10) mais insuffisant seul : les morceaux ne rendent pas le "
+             "seul tenant (E4 faux). Régime « reduction_bf16= »"),
     Variable("PRELECTURE", "1", ("acvram.engine.loader", "_PRELECTURE"), None,
              "B2 (02/10) : fils qui remplissent le cache de pages des fragments (readahead par pas de 128 Kio) pendant le "
              "chargement ; 0 : jamais. Ne change aucun octet chargé ; coupée si les fragments dépassent 80 % de la RAM disponible"),
