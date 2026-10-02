@@ -296,5 +296,5 @@ DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_
 # zzs, troncature causale du cœur MLA au préfill, OPT-IN (MLA_CAUSAL=0 par défaut) — −24 % du GPU du préfill à 8 k sur
 # Kimi-Linear-35B, mais la sortie change ; le défaut ne bascule qu'après la garde de PPL à 8 192 + 512.
 DEFAUTS_PAR_VERSION["0.7.18"] = ({**DEFAUTS_PAR_VERSION["0.7.17"][0], "PRELECTURE": "1", "KV_ANNEAU": "auto", "EMBED": "auto",
-                                  "MLA_CAUSAL": "0"},
+                                  "MLA_CAUSAL": "0", "BF16_REDUCTION": "exacte"},
                                  DEFAUTS_PAR_VERSION["0.7.17"][1])

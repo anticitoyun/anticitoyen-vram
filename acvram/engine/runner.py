@@ -104,6 +104,11 @@ _MORCEAU_AU_DELA = max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU_AU_DELA", "
 _MORCEAU_SEUIL: Optional[int] = None
 
 
+def _reduction_bf16_en_vigueur() -> str:
+    from .loader import reduction_bf16_en_vigueur
+    return reduction_bf16_en_vigueur()
+
+
 def definir_seuil_morceaux(n: Optional[int]) -> None:
     """Jetons au-delà desquels l'attention passe par morceaux de `_MORCEAU_AU_DELA` (None : jamais) ; posé par la chauffe."""
     global _MORCEAU_SEUIL
@@ -1036,6 +1041,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "piles_raison": sorted(raisons_piles),
             "cartes": cartes,
             "plongements": "hôte" if plan.embed_device == "cpu" else "carte",
+            "reduction_bf16": _reduction_bf16_en_vigueur(),
             "chemin_moe": chemin_moe,
             # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
@@ -1153,7 +1159,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 f"replays={r['graphes_replays']} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
-               f"{piles_txt} cartes={r['cartes']} plongements={r['plongements']} "
+               f"{piles_txt} cartes={r['cartes']} plongements={r['plongements']} reduction_bf16={r['reduction_bf16']} "
                f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} prefill_int8={r['prefill_int8']} dense={r['dense']} "
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
                f"echelle_awq={r['echelle_awq']} "

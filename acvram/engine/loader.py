@@ -296,6 +296,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # ACVRAM_ECO=off : rien n'est exécuté, l'état est nommé quand même.
     from .. import eco as _eco
     _eco.poser_pour_ce_processus()
+    poser_reduction_bf16()                 # avant le premier produit : la sortie ne doit pas dépendre du découpage du préfill
     # `ModelSpec.to_dict()` ne serialise pas `raw`, et le manifeste ne porte
     # donc AUCUNE des cles brutes de la configuration. Or le chargeur en lit
     # certaines — `gdn_a_log_negexp` decide si `a_log` doit etre retransforme,
@@ -1597,6 +1598,28 @@ _KV_ANNEAU_MODE = (os.environ.get("ACVRAM_KV_ANNEAU") or "auto").strip().lower()
 # plongements (poste6 02/10) : auto (la table bf16 quitte la carte avant le premier MLP), hote (toujours : bras de mesure),
 # carte (jamais : le comportement d'avant)
 _EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
+# Réduction bf16 de cuBLAS (poste6 02/10, ordre chef : « une sortie qui change avec le découpage du préfill est le bogue,
+# pas le réglage »). `exacte` (défaut) pose `torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False` ;
+# `reduite` = retrait, le défaut de torch, pour la mesure. Cause mesurée sur carte (revue/poste6-s1-dense-h4-verdict-carte-
+# 02-10) : les projections étroites k_proj / v_proj (N = 1 024, exclues de Marlin par `_PROJ_MARLIN_MIN_N`,
+# kernels/__init__.py:1270) passent par `F.linear` (kernels/__init__.py:932), et cuBLAS y prend pour certaines formes
+# (M, N ≤ 1 024) une réduction à précision réduite : 15 % (k) et 30 % (v) des éléments différaient entre 7 865 lignes d'un
+# seul tenant et 4 096 + 3 769 — Devstral s'écartait de 10 × son témoin reprise sous les morceaux. Réglage posé : 0 élément
+# différent, et la sortie du seul tenant à 7 865 lignes ne change pas. Drapeau GLOBAL du processus.
+_BF16_REDUCTION = (os.environ.get("ACVRAM_BF16_REDUCTION") or "exacte").strip().lower()      # exacte | reduite (regime.VARIABLES)
+
+
+def poser_reduction_bf16() -> str:
+    """Pose le drapeau cuBLAS selon `ACVRAM_BF16_REDUCTION`, au chargement du moteur ; rend « exacte » ou « reduite ».
+    Les deux sens sont écrits : un retrait après un chargement « exacte » dans le même processus doit se voir."""
+    exacte = _BF16_REDUCTION not in ("reduite", "réduite")
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = not exacte
+    return "exacte" if exacte else "reduite"
+
+
+def reduction_bf16_en_vigueur() -> str:
+    """Lu sur le drapeau lui-même, pas sur la variable : c'est lui qui décide du calcul (ligne de régime)."""
+    return "reduite" if torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction else "exacte"
 
 
 def _a_des_puits(manifest: Optional[dict]) -> bool:
