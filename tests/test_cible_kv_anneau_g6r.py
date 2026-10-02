@@ -152,3 +152,55 @@ def test_planificateur_cible_par_sequence(carte):
     assert sum(sous.kv_budget.values()) >= par_seq and sous.kv_max_tokens >= 65536
     court = plan_placement(s, carte, PlannerOptions(max_model_len=65536, max_concurrent_seqs=8, kv_vram_fraction=0.10, kv_anneau=67))
     assert sum(court.kv_budget.values()) < par_seq and court.kv_max_tokens < 65536
+
+
+# --- plongements en RAM hôte (scellé revue/poste6-plongements-hote-scelle-02-10.md) : la table bf16 quitte la carte avant le
+# premier MLP ; 65 536 sur la réplique : les MLP que g6r seul exilait encore restent résidents. Cassants : `ACVRAM_EMBED=carte`
+# rend l'exil d'avant ; les plans qui tenaient gardent leur table sur la carte, à l'identique.
+
+def test_plongements_la_table_sort_avant_tout_mlp(carte, monkeypatch, capsys):
+    spec, plan, blocs = _charger(65536)
+    assert plan.embed_device == "cpu" and plan.embed_exile and LD._mlp_exiles(plan) == 0, (plan.embed_device, LD._mlp_exiles(plan))
+    assert blocs["cuda:0"] * 16 >= 65536 and plan.lm_head_device == "cuda:0"
+    assert "table de plongements (2.62 Gio) en RAM hôte (avant tout MLP" in capsys.readouterr().out
+    monkeypatch.setattr(LD, "_EMBED_MODE", "carte")
+    _, avant, _ = _charger(65536)
+    assert avant.embed_device == "cuda:0" and not avant.embed_exile and LD._mlp_exiles(avant) >= 1, "témoin : sans le levier, exil"
+
+
+@pytest.mark.parametrize("ctx", [4096, 27648])
+def test_plongements_un_plan_qui_tenait_garde_sa_table(carte, monkeypatch, capsys, ctx):
+    spec, plan, blocs = _charger(ctx)
+    assert "Gio) en RAM hôte" not in capsys.readouterr().out, "un plan écarté ne doit rien annoncer"
+    monkeypatch.setattr(LD, "_EMBED_MODE", "carte")
+    spec0, plan0, blocs0 = _charger(ctx)
+    assert plan.embed_device == plan0.embed_device == "cuda:0" and not plan.embed_exile
+    assert (plan.kv_budget, blocs, spec.mlp_prefill_plafond, plan.kv_anneau) == (plan0.kv_budget, blocs0, spec0.mlp_prefill_plafond, plan0.kv_anneau)
+    assert [l.mlp_storage for l in plan.layers] == [l.mlp_storage for l in plan0.layers]
+
+
+def test_plongements_bras_force(carte, monkeypatch):
+    monkeypatch.setattr(LD, "_EMBED_MODE", "hote")
+    spec, plan, _ = _charger(4096)
+    assert plan.embed_device == "cpu" and not plan.embed_exile and LD._mlp_exiles(plan) == 0
+    assert spec.mlp_prefill_plafond is None, "forcée, la table n'est pas un exil : pas de plafond de préfill pour elle"
+
+
+def test_appareil_de_calcul_n_est_pas_celui_de_la_table(monkeypatch):
+    """Table en RAM hôte : la chauffe doit encore juger la réserve DE LA CARTE (avant : `embed_tokens.device` → hors carte,
+    (2^40, 2^40), tout « tenu »), et la tour de vision aller sur la carte."""
+    from types import SimpleNamespace
+    from acvram.engine.contexte import ChauffeContexte
+    from acvram.engine.model import ACVRamModel
+    faux = SimpleNamespace(layers=[SimpleNamespace(device="cuda:0")], embed_tokens=torch.zeros(2, 2))
+    assert ACVRamModel.appareil.fget(faux) == torch.device("cuda:0")
+    assert ACVRamModel.appareil.fget(SimpleNamespace(layers=[], embed_tokens=torch.zeros(2, 2))) == torch.device("cpu")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda d=None: None)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda d=None: (5 * G, 32 * G))
+
+    class Moteur(ChauffeContexte):
+        pass
+    m = Moteur()
+    m.model = SimpleNamespace(appareil=torch.device("cuda:0"), embed_tokens=torch.zeros(2, 2))
+    assert m._libre_apres_chauffe() == (5 * G, 32 * G)

@@ -52,3 +52,23 @@ Ordre : chef 02/10 (« plongements en RAM hôte : oui, scellé avant le code » 
 Issues qui me gêneraient, nommées : (i) la capture des graphes à 65 536 manque de mémoire (marge 1,59 Gio) → clamp ou graphes
 off, G1' faux ; (ii) le repli bf16 de la tête liée se déclenche → +1,28 Gio, exil ; (iii) le coût fixe du transfert des lignes
 dépasse 1 % à b=1 → G6' faux, le levier ne serait plus gratuit et resterait réservé au cas « sinon exil ».
+
+## Résultats à sec (02/10, APRÈS le scellé ; rien ci-dessus n'a été retouché)
+
+| | prédit | à sec (`scratchpad/poste6-g6r/sim_g6r.py`, vrai manifeste, VRAM de G1) | |
+|---|---|---|---|
+| E1 65 536 | table hôte, 0 MLP exilé, KV 5,45, ≥ 4 096 blocs | table hôte, **0 exilé**, 5,45 Gio, 4 096 blocs, 1 créneau, plafond 5 120, pas de refus | tenu |
+| E2 témoins | identiques à g6r | 4 096 / 8 192 / 16 384 / 27 648 / 41 984 : budget, blocs, plafond, anneau identiques, table sur la carte | tenu |
+| E3 46 080 | table hôte, 0 exilé | table hôte, 0 exilé (2 sous g6r) | tenu |
+| E4 fenêtre sans MLP exilé | 67 584-75 776 | **70 656** | tenu |
+| E5 | jouet : ids/logits ; exil 1 MLP → table seule | réplique : 7 MLP exilés (`ACVRAM_EMBED=carte`) → 0 ; l'égalité des ids n'a de sens que sur carte (G6') — NON jouée à sec, dit | à moitié |
+
+Ajouts au correctif scellé, dits : la sortie d'une chaîne de plan n'est imprimée que si son plan est retenu (le plan plein
+écarté annonçait des exils qui n'ont pas lieu) ; le bras forcé `ACVRAM_EMBED=hote` ne compte pas comme un exil.
+Tests : 5 de plus dans `tests/test_cible_kv_anneau_g6r.py` (12 en tout) ; cassure vérifiée sur copie (table jamais exilée : 2
+rouges ; plafond qui ignore la table : 1 ; chauffe sur l'appareil de la table : 1). Suite ciblée 81 fichiers, 2 cœurs, nice 19,
+46 s, carte tenue par poste2 en `service` : 561 passés, 0 échec.
+
+Reste carte : G1' / G5' (`scratchpad/poste6-g6r/carte-g6r.sh`) ; G6' à ± 1 % ne se résout pas avec l'instrument de prise
+(32 jetons décodés) — à mesurer par l'instrument de cellule b=1 / b=12 (poste2), `ACVRAM_EMBED=hote` contre `carte` ; ma prise
+ne donne que l'égalité des ids (sha) entre les deux bras à 4 096.

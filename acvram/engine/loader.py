@@ -1498,6 +1498,9 @@ def _sans_marlin(calcul):
 # `_kv_blocks_per_device`, lus à la création des caches des couches à fenêtre
 ANNEAU_SEQS: dict = {}
 _KV_ANNEAU_MODE = (os.environ.get("ACVRAM_KV_ANNEAU") or "auto").strip().lower()      # auto | 1 | 0 (regime.VARIABLES)
+# plongements (poste6 02/10) : auto (la table bf16 quitte la carte avant le premier MLP), hote (toujours : bras de mesure),
+# carte (jamais : le comportement d'avant)
+_EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
 
 
 def _anneau_couche(spec: ModelSpec, i: int) -> int:
@@ -1681,7 +1684,7 @@ def _compter_experts_manifest(manifest: dict) -> dict:
 
 
 def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0,
-                    kv_min: Optional[dict] = None) -> None:
+                    kv_min: Optional[dict] = None, embed_exilable: bool = False) -> None:
     """Fait descendre en RAM hôte les MLP des dernières couches d'un GPU
     dont les poids réels dépassent la capacité de l'étage.
 
@@ -1783,6 +1786,16 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
                 bpt = int(getattr(plan, "kv_bytes_per_token", 0) or 0)
                 if bpt:
                     plan.kv_max_tokens = int(sum(plan.kv_budget.values()) // bpt)
+        # Plongements (poste6 02/10) : la table bf16 sort AVANT le premier MLP. Elle ne sert qu'au gather d'entrée (une
+        # ligne par jeton : 3 µs à b=1, 11 µs à b=12, mesurés) ; la tête liée a sa propre copie quantifiée (`_tete_liee`).
+        # Un MLP exilé coûte 8,8 ms par jeton et coupe les graphes. gemma-4-31B à 65 536 : 2,62 Gio rendus pour 1,95
+        # manquants, 12 MLP exilés → 0. À la planification seulement (``embed_exilable``) : au chargement la table est
+        # déjà sur la carte.
+        if embed_exilable and plan.embed_device == dev and _EMBED_MODE != "carte" and embed:
+            force = _EMBED_MODE in ("hote", "hôte")
+            if force or utilise() > capacite - marge:
+                plan.embed_device = "cpu"                  # dit une fois, sur le plan RETENU (`_plan_from_manifest`)
+                plan.embed_exile = not force
         while utilise() > capacite - marge:
             # Candidats déjà résidents (couche entière) OU déjà à moitié
             # (placement par expert antérieur, dont on peut encore réduire
@@ -2212,6 +2225,12 @@ def _mlp_exiles(plan: Plan) -> int:
     return sum(1 for l in plan.layers if l.mlp_storage == "cpu")
 
 
+def _poids_exiles(plan: Plan) -> int:
+    """MLP exilés, plus un si la table de plongements a dû quitter la carte : pour `_plafonner_mlp_prefill`, qui préfère
+    un plafond de préfill à tout exil — un plan qui tenait avec sa table sur la carte la garde."""
+    return _mlp_exiles(plan) + (1 if getattr(plan, "embed_exile", False) else 0)
+
+
 def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, planifier,
                            manifest: Optional[dict] = None) -> bool:
     """a5v (28/09, pièce 294 de poste5) : un modèle DENSE dont la réserve de préfill d un seul tenant exile des MLP
@@ -2237,7 +2256,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     def poser(c: Optional[int]) -> None:
         spec.mlp_prefill_plafond = c
         spec.prefill_morceau_plafond = c if morceaux else None
-    plein = _mlp_exiles(plan)
+    plein = _poids_exiles(plan)
     if plein == 0:
         return False
 
@@ -2248,11 +2267,11 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
         with contextlib.redirect_stdout(io.StringIO()):
             p = planifier()
         if p is None or not torch.cuda.is_available():
-            return plein if p is None else _mlp_exiles(p), True
+            return plein if p is None else _poids_exiles(p), True
         bornes = _borner_kv_par_la_vram(p, manifest_de(p), lambda nom: torch.device(nom),
                                         reserve=_reserve_prefill(spec, ctx, manifest_de(p), p))
         tient = all(int(bornes[n]) >= _kv_plancher_prevu(p, spec, ctx, n) for n in bornes)
-        return _mlp_exiles(p), tient
+        return _poids_exiles(p), tient
 
     def exiles(c: int) -> int:
         return essai(c)[0]
@@ -2271,7 +2290,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
         motif = "plancher KV tenu, réserve d'un seul tenant refusée"
     else:
         critere = lambda c: exiles(c) <= plancher                       # a5v : le plus grand plafond sans exil de plus
-        motif = f"seul tenant à {ctx} : {plein} MLP exilés ; plafonnée : {plancher}"
+        motif = f"seul tenant à {ctx} : {plein} poids exilés ; plafonnée : {plancher} (table de plongements comprise)"
     bas, haut = m, ctx                                              # critere(bas) vrai ; critere(ctx) faux
     while haut - bas > 1024:
         milieu = (bas + haut) // 2 // 1024 * 1024
@@ -2418,11 +2437,19 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                 if p is not None:
                     _reajuster_plan(p, manifest, top_k=spec.num_experts_per_tok or 8,
                                     reserve=_reserve_prefill(spec, max_model_len, manifest, p),
-                                    kv_min={d: _kv_plancher_prevu(p, spec, max_model_len, d) for d in (p.kv_budget or {})})
+                                    kv_min={d: _kv_plancher_prevu(p, spec, max_model_len, d) for d in (p.kv_budget or {})},
+                                    embed_exilable=True)
                 return p
-            p = planifier()
-            if p is not None and _plafonner_mlp_prefill(spec, max_model_len, p, planifier, manifest):
+            import contextlib
+            import io
+            # la sortie d'une chaîne n'est dite que si son plan est retenu : celle du plan écarté (plein quand l'anneau
+            # gagne) annonçait des exils qui n'ont pas lieu
+            with contextlib.redirect_stdout(io.StringIO()) as dit:
                 p = planifier()
+                if p is not None and _plafonner_mlp_prefill(spec, max_model_len, p, planifier, manifest):
+                    p = planifier()
+            if p is not None:
+                p._dit = dit.getvalue()
             return p
 
         def cout(p) -> tuple:
@@ -2446,6 +2473,13 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                 neuf = sous
             else:
                 spec.mlp_prefill_plafond, spec.prefill_morceau_plafond = plafonds_plein      # le plan plein, tel quel
+        if neuf is not None:
+            print(getattr(neuf, "_dit", ""), end="", flush=True)
+            if neuf.embed_device == "cpu" and any(t.kind == "gpu" for t in neuf.tiers):
+                table = _octets_reels(manifest)[2]
+                print(f"[acvram] table de plongements ({table / 2**30:.2f} Gio) en RAM hôte "
+                      f"({'avant tout MLP : le plan débordait' if neuf.embed_exile else 'ACVRAM_EMBED=hote' if _EMBED_MODE in ('hote', 'hôte') else 'plan'}) ; "
+                      f"la tête de sortie reste sur {neuf.lm_head_device}", flush=True)
         # a5v : sans chauffe (Engine direct, eval), une invite au-delà du plafond passerait d un seul tenant dans une
         # réserve qui ne la couvre plus — le seuil est posé ici ; la chauffe le remplace par le tenu prouvé. None sinon.
         from . import attention as _att

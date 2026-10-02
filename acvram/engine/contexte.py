@@ -100,7 +100,7 @@ class ChauffeContexte:
         seq = self.sequence_de_chauffe(L - 2)
         en_cache = self.stats.cached_prompt_tokens
         # kv31b : le pic transitoire de la passe (alloué, pas réservé) — ce que la réserve de préfill doit couvrir
-        dev = self.model.embed_tokens.device
+        dev = getattr(self.model, "appareil", None) or self.model.embed_tokens.device
         mesure = torch.cuda.is_available() and dev.type == "cuda"
         if mesure:
             torch.cuda.synchronize(dev); torch.cuda.reset_peak_memory_stats(dev)
@@ -160,7 +160,7 @@ class ChauffeContexte:
     def _libre_apres_chauffe(self) -> tuple[int, int]:
         """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
         encore compté. Hors carte : (total, total) — la réserve ne se juge que sur carte."""
-        dev = self.model.embed_tokens.device
+        dev = getattr(self.model, "appareil", None) or self.model.embed_tokens.device
         if torch.cuda.is_available() and dev.type == "cuda":
             torch.cuda.synchronize(dev)                                  # la crête est passée avant la lecture
             libre, total = torch.cuda.mem_get_info(dev)

@@ -273,6 +273,8 @@ class Plan:
     # `loader._poser_anneau` et `_kv_plancher_prevu`. Pas dans `to_dict` : décision du chargement, pas du converti.
     kv_anneau: int = 0
     kv_anneau_motif: str = ""
+    # plongements (02/10) : vrai quand `loader._reajuster_plan` a sorti la table de la carte pour éviter un exil de MLP
+    embed_exile: bool = False
 
     def to_dict(self) -> dict:
         return {

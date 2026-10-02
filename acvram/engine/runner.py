@@ -759,7 +759,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         from .. import regime as _regime
         _regime.declarer_modele_charge(loaded.manifest)          # vision=off sur la ligne d'un alias texte (pièce a)
         self.vision: Optional[TourVision] = TourVision.depuis_dossier(
-            loaded.path, loaded.manifest, self.model.embed_tokens.device)
+            loaded.path, loaded.manifest, getattr(self.model, "appareil", None) or self.model.embed_tokens.device)
         # Une tour servie exige un masque de plage image connu pour sa famille : refus NOMMÉ au chargement
         # (MasqueImageInconnu), jamais un bloc bidirectionnel appliqué par défaut (Qwen3-VL, 20/09 18:57)
         self.masque_images: Optional[str] = None
@@ -932,7 +932,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         plan = self.loaded.plan
         couches_exilees = sum(1 for lp in plan.layers if lp.streamed)
         cartes = sorted({lp.exec_device for lp in plan.layers}
-                        | {plan.embed_device, plan.lm_head_device})
+                        | {plan.lm_head_device} | ({plan.embed_device} - {"cpu"}))      # table en RAM hôte : pas une carte
 
         etats_piles: set[str] = set()
         raisons_piles: set[str] = set()
@@ -1035,6 +1035,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "piles_ok": piles_ok,
             "piles_raison": sorted(raisons_piles),
             "cartes": cartes,
+            "plongements": "hôte" if plan.embed_device == "cpu" else "carte",
             "chemin_moe": chemin_moe,
             # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
@@ -1152,7 +1153,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 f"replays={r['graphes_replays']} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
-               f"{piles_txt} cartes={r['cartes']} "
+               f"{piles_txt} cartes={r['cartes']} plongements={r['plongements']} "
                f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} prefill_int8={r['prefill_int8']} dense={r['dense']} "
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
                f"echelle_awq={r['echelle_awq']} "
@@ -2092,7 +2093,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         en_vol: Optional[dict] = None
         # le device du modèle : celui de la table d'embeddings (runner:666, chargement de la tour) — `Model` n'a pas de `.device`
         # (essai 2, 07 h 06 : `getattr(self.model, "device", cpu)` rendait cpu et le chemin épinglé ne s'appliquait jamais)
-        device = getattr(getattr(self.model, "embed_tokens", None), "device", None) or torch.device("cpu")
+        device = (getattr(self.model, "appareil", None)
+                  or getattr(getattr(self.model, "embed_tokens", None), "device", None) or torch.device("cpu"))
         cuda = torch.cuda.is_available() and device.type == "cuda"
 
         def rapatrier(v: dict) -> list[GenerationOutput]:

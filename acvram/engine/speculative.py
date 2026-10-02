@@ -559,7 +559,7 @@ class MTPProposer:
         emb = self.model.embed_tokens
         toks = torch.tensor(ids[1:n + 1], dtype=torch.long, device=emb.device)
         e = torch.nn.functional.embedding(toks, emb)
-        self.tete(e.to(hs.dtype), hs[:n], self._batch(st, ids[1:n + 1], 0))
+        self.tete(e.to(hs.device, hs.dtype), hs[:n], self._batch(st, ids[1:n + 1], 0))
         st.length = n
         return True
 
@@ -586,7 +586,7 @@ class MTPProposer:
                 break
             e = torch.nn.functional.embedding(
                 torch.tensor([cur], dtype=torch.long, device=emb.device), emb)
-            sortie = tete(e.to(h.dtype), h, self._batch(st, [cur], pos))
+            sortie = tete(e.to(h.device, h.dtype), h, self._batch(st, [cur], pos))
             logits = lm(sortie.to(lm.qweight.qweight.device
                                   if getattr(lm.qweight, "qweight", None) is not None   # 129 : tête Marlin seule
                                   else sortie.device))[0]
