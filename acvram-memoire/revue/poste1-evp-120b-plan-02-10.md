@@ -45,6 +45,12 @@ Ce qui manque de la carte passe par le PCIe en zéro-copie UVA, mesuré à 23,6 
 | A : 5090 + RAM | 0,41 → 1,19 Go hôte → 50 ms | 0,73 → 0,55 Go → 23 ms | **12-19** | 19-38 |
 | B : 5090 + 3080 Ti + RAM | 0,57 → 0,87 Go → 37 ms | ≈ 0,82 → 0,36 Go → 15 ms | **14-22** | 25-50 |
 
+**Contrainte du futur chemin groupé (02/10, a994dacb4)** : un arbre sans evp a fait passer gpt-oss par les piles Marlin
+MoE, qui refusent la forme (MKN [16 376, 2 880, 2 880], g16 : « Invalid thread config »). K = H = I = 2 880 n'est pas un
+multiple de 128. Un chemin groupé gpt-oss devra donc remplir K jusqu'à 2 944, ou choisir des tuiles k = 64, et porter les
+biais et la SwiGLU bornée. Aujourd'hui, l'arbre evp refuse les piles (`moe.py:202-207`, test
+`test_aucune_pile_groupee_pour_gpt_oss`).
+
 Le mur, c'est le PCIe : même un chemin parfait plafonne vers 50 t/s, tant que les experts froids ne sont pas
 calculés sur l'hôte. Il faudrait pour cela le noyau AVX-512 de la pièce 22 (le noyau scalaire fait 16,6 Go/s,
 il ne gagne rien).
