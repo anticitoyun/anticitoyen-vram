@@ -2,8 +2,10 @@
 sortie qui change avec le découpage du préfill est le bogue »). Cause mesurée sur carte : les projections étroites k_proj /
 v_proj (N = 1 024) passent par `F.linear`, et cuBLAS bf16 y prend pour certaines formes une réduction à précision réduite —
 15 % et 30 % de leurs éléments différaient entre 7 865 lignes d'un seul tenant et 4 096 + 3 769.
-(1) le chargement du moteur pose `allow_bf16_reduced_precision_reduction = False` (cassant : retirer la pose) et
-`ACVRAM_BF16_REDUCTION=reduite` le retire ; (2) la ligne de régime dit le drapeau EN VIGUEUR, lu sur torch ; (3) sur carte,
+OPT-IN depuis le verdict carte (revue/poste6-bf16-reduction-verdict-carte-02-10.md) : +2,40 % de préfill à M = 4 096 pour
+un seuil scellé de 2 %, et la sortie du seul tenant change aussi — le défaut reste `reduite` (tests/test_defaut_servi.py).
+(1) sous `ACVRAM_BF16_REDUCTION=exacte` le chargement du moteur pose `allow_bf16_reduced_precision_reduction = False`
+(cassant : retirer la pose) et `reduite` le retire ; (2) la ligne de régime dit le drapeau EN VIGUEUR, lu sur torch ; (3) sur carte,
 à la forme mesurée, un seul tenant et un découpage rendent le même produit AU BIT sous le réglage, et pas sans lui — le
 témoin : si cette carte ne diffère pas sans le réglage, le test ne prouve rien et s'ignore en le disant.
 Pourquoi pas un préfill de moteur d'un seul tenant contre découpé : sur processeur le SDPA dépend de la longueur des clés

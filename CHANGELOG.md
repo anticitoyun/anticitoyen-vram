@@ -9,6 +9,17 @@
   4,9 s ; à chaud inchangé (+0,05 s). Aucun octet chargé ne change (test d'identité de tous les tenseurs avec et sans) ;
   coupée si les fragments dépassent 80 % de la RAM disponible. `acvram-memoire/revue/poste6-prelecture-verdict-02-10.md`.
 
+### Réduction bf16 exacte de cuBLAS, en option (poste6)
+
+* **`ACVRAM_BF16_REDUCTION=exacte`** (défaut `reduite`, celui de torch) pose
+  `torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False` au chargement. Sous le défaut, cuBLAS prend
+  pour les produits bf16 étroits (k_proj / v_proj, N ≤ 1 024) une réduction à précision réduite selon le nombre de lignes :
+  27 à 42 % des éléments changent de 1 ulp, et un préfill découpé (4 096 + 3 769) ne rend pas la sortie du seul tenant
+  (Devstral, 7 865 jetons : premier jeton basculé). Sous `exacte` : morceaux et seul tenant **au bit** (352 valeurs sur
+  352). Opt-in parce que le préfill coûte **+2,40 % à M = 4 096** (+0,2 à +0,8 % de 512 à 2 048) pour un seuil écrit avant
+  de 2 %, et que le réglage change aussi la sortie servie du seul tenant. La ligne de régime dit `reduction_bf16=`.
+  `acvram-memoire/revue/poste6-bf16-reduction-verdict-carte-02-10.md`.
+
 ### Troncature causale du cœur MLA au préfill, en option (zzs)
 
 * `ACVRAM_MLA_CAUSAL=1` limite les scores, le masque, le softmax et le produit par V de chaque morceau du préfill aux clés
