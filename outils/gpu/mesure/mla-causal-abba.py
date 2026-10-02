@@ -28,7 +28,9 @@ LONGUEURS = tuple(int(x) for x in os.environ.get("MLA_ABBA_LONGUEURS", "8192,163
 REPS = int(os.environ.get("MLA_ABBA_REPS", "3"))
 N_GEN = 64
 VOCAB_APPROX = int(os.environ.get("BANC_VOCAB", "150000"))
-BANDES = {8192: (-26.0, -18.0, None), 16384: (-36.0, -25.0, -15.0), 32768: (-48.0, -35.0, -20.0)}   # (bas, haut, FAUX si Δ >)
+# (bas, haut, FAUX si Δ >) ; 12 288 et 14 336 : amendement 3 (bornes −31 et −33 % depuis le ht9, bas = 0,7 × borne)
+BANDES = {8192: (-26.0, -18.0, None), 12288: (-31.0, -22.0, -15.0), 14336: (-33.0, -23.0, -15.0),
+          16384: (-36.0, -25.0, -15.0), 32768: (-48.0, -35.0, -20.0)}
 TEMOIN = "mla_causal=0(temoin)"
 
 

@@ -17,6 +17,9 @@ ARBRE=$(cd "$ICI/../../.." && pwd)
 PY=${PY_ACVRAM:-$HOME/Bureau/Claude/anticitoyen-vram/.venv/bin/python}
 MODELE=${ACVRAM_MODELE_MESURE:-/mnt/AI_GENERATOR/models_acvram/Kimi-Linear-35B-kda-nvfp4}
 PORT=${MLA_ABBA_PORT:-8097}
+# Le contexte suit la plus longue invite (+ 64 générés + marge) : à 16 512, le plan exilait encore 1 MLP (amendement 3)
+export MLA_ABBA_LONGUEURS=${MLA_ABBA_LONGUEURS:-8192,16384}
+CTX=$(( $(tr ',' '\n' <<< "$MLA_ABBA_LONGUEURS" | sort -n | tail -1) + 128 ))
 NOM=kimi-zzs
 SMI=${BRAS_NVIDIA_SMI:-nvidia-smi}
 . "$ICI/serveur-bras.sh"
@@ -29,7 +32,7 @@ rm -f "$O"/A1.json "$O"/B1.json "$O"/B2.json "$O"/A2.json   # un bras en échec 
 # VRAM rendue = au plus l'occupation d'avant + 1 Gio : le bras suivant ne part jamais sur une carte encore tenue
 mio0=$($SMI -i "${BRAS_CARTE:-0}" --query-gpu=memory.used --format=csv,noheader,nounits)
 export BRAS_VRAM_MAX_MIO=$((mio0 + 1024))
-echo "== $(date +%T) arbre $ARBRE ($ATTENDU) · modèle $MODELE · VRAM avant $mio0 Mio · sortie $O"
+echo "== $(date +%T) arbre $ARBRE ($ATTENDU) · modèle $MODELE · L $MLA_ABBA_LONGUEURS ctx $CTX · VRAM avant $mio0 Mio · sortie $O"
 
 if [ -z "${MLA_ABBA_LANCEUR:-}" ]; then
     echo "== $(date +%T) étape 0 : tests/test_mla_causal_zzs.py sur carte"
@@ -59,7 +62,7 @@ for bras in A1 B1 B2 A2; do
     else
         bras_servir "$PORT" "$O/serveur-$bras.log" "${interrupteur[@]}" PYTHONPATH="$ARBRE" ACVRAM_ARBRE="$ARBRE" \
             CUDA_VISIBLE_DEVICES=0 "$PY" -m acvram serve "$MODELE" --port "$PORT" --served-name "$NOM" \
-            --max-model-len 16512 --max-batch 1 --no-prefix-cache || exit 70
+            --max-model-len "$CTX" --max-batch 1 --no-prefix-cache || exit 70
     fi
     bras_pret "$PORT" "$NOM" "$BRAS_PID" "${MLA_ABBA_DELAI_S:-480}" || { bras_arreter "$BRAS_PID" "$PORT" || true; exit 71; }
     (cd / && "$PY" "$ICI/mla-causal-abba.py" bras "http://127.0.0.1:$PORT" "$NOM" "$O/$bras.json" 2>&1 \

@@ -113,3 +113,27 @@ le GPU a réalisé 342,7 ms sur une borne de 364, soit 94 %, et le mur garde des
 échantillonnage, HTTP). J'ai donc posé le bas à environ 70 % de la borne (0,7 × 36 ≈ 25), comme à 8 k où la bande au mur
 (−18 à −26 %) valait 70 à 100 % de la borne GPU. Le seuil FAUX (15 %, soit 42 % de la borne) reste en dessous de tout ce que
 le −24,4 % laisse attendre. Il juge le mécanisme, pas la précision de ma bande.
+
+## Amendement 3 du 02/10 (14 h 1x), après la prise de 13:53, AVANT toute mesure à 14 k ou 12 k
+
+La prise de 13:53 (`poste5-zzs-b`) a rejoué l'étape 0, identique (E1(a) tombe, E2 vert). Puis le nouveau contrôle a refusé
+le bras A1 : à `--max-model-len 16512`, le plan exile encore 1 MLP (19,3 Gio de poids et 7,16 Gio d'activations réservées
+pour 29,5 libres), et les graphes sont coupés. Aucun chiffre. Le « 17 562 tiendrait sans exil » du premier serveur était une
+borne basse, fausse ici. L'arbre importé était bien le worktree (ligne `ARBRE` du journal).
+
+**Preuve à sec, par le planificateur, sur le vrai manifeste** (`outils/gpu/mesure/zzs-plan-a-sec.py`). Le rig est lu par
+nvidia-smi ; `_plan_from_manifest(max_concurrent_seqs=1)` tourne avec `torch.cuda.mem_get_info` remplacé ; aucun contexte
+CUDA n'est créé. **Calibration, qui peut rendre faux** : la mémoire libre F est la seule inconnue. F = 30 208 Mio reproduit
+au mot près les DEUX plans observés : à 32 896, « 6 MLP de plus… 15,7 Gio pour 29,5 libres » (exil 5) ; à 16 512, « 1 MLP de
+plus… 19,3 pour 29,5 ». Avec F = 30 720 ou plus, la simulation n'exilait rien à 16 512 : elle aurait été fausse.
+
+| contexte | F = 30 208 (calibré) | F − 0,5 Gio | F − 1 Gio |
+|---|---|---|---|
+| 14 464 (L = 14 336) | **résident** (0 MLP, 0 expert partiel) | 1 couche à experts partiels | 1 MLP |
+| 12 416 (L = 12 288) | **résident** | **résident** | 1 couche à experts partiels |
+
+14 336 tient, avec une marge inférieure à 0,5 Gio. 12 288 tient avec une marge de 0,5 à 1 Gio. Ordre de la prise, comme
+convenu avec chef : 14 336 d'abord, puis 12 288 aussitôt si le contrôle de régime refuse A1. Bandes (écrites avant toute
+mesure à ces longueurs ; même règle qu'à l'amendement 2, bas = 0,7 × la borne, borne extrapolée du ht9) :
+**14 336 : −23 à −33 % (borne −33,3 %) ; 12 288 : −22 à −31 % (borne −31,3 %) ; FAUX si le gain au mur est < 15 %**.
+Le contexte du serveur suit L (max(L) + 128).

@@ -228,3 +228,9 @@ def test_bras_refuse_une_requete_rendue_sans_jetons(tmp_path):
     finally:
         srv.kill()
     assert r.returncode != 0 and "0 jetons" in r.stderr, r.stderr[-500:]
+
+
+def test_chaque_longueur_servie_a_sa_bande_scellee():
+    for L in (8192, 12288, 14336, 16384, 32768):
+        assert L in abba.BANDES
+    assert all(L in abba.BANDES for L in abba.LONGUEURS)
