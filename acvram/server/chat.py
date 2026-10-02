@@ -161,8 +161,11 @@ class Tokenizer:
 
                     env = Environment(trim_blocks=True, lstrip_blocks=True)
                     env.globals["raise_exception"] = raise_exception
-                    # evp : globale que transformers fournit (chat_template_utils) ; sans elle, le gabarit de gpt-oss
-                    # (date du message système) levait UndefinedError → repli ChatML, invite fausse pour ce modèle
+                    # evp (poste1 558999068) et 8 alias Mistral 24B (poste2 fcf81b22f) : globale que transformers
+                    # fournit (chat_template_utils) ; sans elle, tout gabarit qui s'en sert pour dater le message
+                    # système (gpt-oss ; Mistral ariel-alloy/cydonia/cydonia-magnum-diamond/dolphin-mistral-glm47)
+                    # lève UndefinedError au rendu → repli ChatML SILENCIEUX (`apply_chat_template` l'attrape dans
+                    # son `except Exception` générique), signalé seulement par le premier avertissement stderr.
                     env.globals["strftime_now"] = lambda fmt: __import__("datetime").datetime.now().strftime(fmt)
                     env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
 

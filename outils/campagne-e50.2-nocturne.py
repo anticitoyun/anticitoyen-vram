@@ -62,7 +62,48 @@ DELAI_POLL_PAUSE_S = 10
 RAM_LIBRE_MIN_PRECHARGE_OCTETS = 40 * 1024**3  # 40 Gio, ordre utilisatrice 01/10
 DISQUE_LENT_PREFIXE = "/mnt/4TO_SATACMR_2022"  # disque à plateaux (sdd), gain du préchargement
 
-PLAFOND_DEFAUT_S = 15 * 60  # 15 min/alias tant que le calibrage n'a pas parlé (ordre chef)
+PLAFOND_DEFAUT_S = 15 * 60  # 15 min/alias tant qu'aucun chargement tenu n'est connu de ce provider
+MARGE_CHARGEMENT_S = 180  # marge nommée au-delà du chargement le plus long réellement SERVI
+_RE_CHARGEMENT = re.compile(r"^=== chargement (\S+) \((\S+)\) (\d\d):(\d\d):(\d\d)$")
+_RE_TENU = re.compile(r"^  (\S+) : tps=")
+
+
+def _plafond_depuis_journal(chemin_journal, provider, marge=MARGE_CHARGEMENT_S):
+    """Dérive le plafond de ce provider du chargement le plus long réellement SERVI dans
+    `chemin_journal` (un alias qui termine dans un `BILAN tenu`, jamais un timeout ni un
+    échec) : écart entre son horodatage `=== chargement` et celui du chargement SUIVANT
+    (même format que `_charger`, seul relevé horodaté du journal), + `marge`. Bug trouvé
+    02/10 (chef) : l'ancien calibrage ne mesurait qu'UN SEUL alias par provider (le
+    premier rencontré, réussi ou non, chargement+bancs confondus) puis gelait le plafond
+    pour tout le reste de la campagne — un alias rapide calibrait un seuil trop juste pour
+    les suivants, plus lents à froid (42/45 timeouts du 02/10, tous `llamacpp`). Ici, TOUS
+    les chargements tenus du journal comptent, et seul le temps de CHARGEMENT (pas les
+    bancs) est mesuré. Remonte `PLAFOND_DEFAUT_S` si le journal ne contient aucun cas tenu
+    de ce provider (premier passage, rien à dériver)."""
+    try:
+        lignes = Path(chemin_journal).read_text().splitlines()
+    except OSError:
+        return PLAFOND_DEFAUT_S
+    tenus = {m.group(1) for ligne in lignes if (m := _RE_TENU.match(ligne))}
+    chargements = []  # (secondes_dans_le_jour, alias, provider)
+    for ligne in lignes:
+        m = _RE_CHARGEMENT.match(ligne)
+        if m:
+            alias, prov, h, mi, s = m.groups()
+            chargements.append((int(h) * 3600 + int(mi) * 60 + int(s), alias, prov))
+    plus_long = 0
+    for i, (t, alias, prov) in enumerate(chargements):
+        if prov != provider or alias not in tenus:
+            continue
+        if i + 1 >= len(chargements):
+            continue
+        dt = chargements[i + 1][0] - t
+        if dt < 0:  # franchissement de minuit entre les deux chargements
+            dt += 24 * 3600
+        plus_long = max(plus_long, dt)
+    if plus_long == 0:
+        return PLAFOND_DEFAUT_S
+    return plus_long + marge
 
 
 def _taille_gguf_octets(dossier):
@@ -145,7 +186,7 @@ def simuler():
             besoins.append("refus")
         print(f"  {m.alias:55s} [{m.provider:9s}] -> {','.join(besoins)}")
     total_s = len(autos) * PLAFOND_DEFAUT_S
-    print(f"durée prédite au plafond par défaut (15 min/alias, à resserrer par calibrage) : "
+    print(f"durée prédite au plafond par défaut (15 min/alias, dérivé ensuite du journal par provider) : "
           f"{total_s/3600:.1f} h pour {len(autos)} alias, continu (plus de fenêtre horaire, "
           f"pause coopérative via {FICHIER_PAUSE})")
     n_llamacpp = sum(1 for m in autos if m.provider == "llamacpp")
@@ -439,7 +480,11 @@ def _garde_version_paquet(journal, version_depart):
 def executer(journal, duree_max_par_moteur):
     c = [m for m in cible() if not _raison_hors_perimetre(m)]
     bilan = {"tenu": [], "timeout": [], "refus": [], "echec": [], "sautes": [], "garde": []}
-    calibrage = {}
+    # plafond dérivé du journal (chargements déjà TENUS), jamais recalibré en vol sur un
+    # seul alias (bug du 02/10) — un provider absent de `duree_max_par_moteur` au départ
+    # reçoit ici le plafond du plus long chargement tenu connu, ou PLAFOND_DEFAUT_S.
+    for prov in {m.provider for m in c}:
+        duree_max_par_moteur.setdefault(prov, _plafond_depuis_journal(journal, prov))
     version_paquet = _version_paquet()
     with open(journal, "a") as f:
         f.write(f"=== moteur mesuré : paquet acvram {version_paquet} "
@@ -504,8 +549,10 @@ def executer(journal, duree_max_par_moteur):
                 else:
                     raisons.append(f"banc-refus rc={rc3}, non reconnu")
         except TimeoutError as e:
-            raisons.append(str(e))
+            timeout_leve = True
             bilan["timeout"].append((m.alias, str(e)))
+        else:
+            timeout_leve = False
         finally:
             for p in procs_prechargement:
                 p.terminate()
@@ -526,16 +573,11 @@ def executer(journal, duree_max_par_moteur):
             _parc.ecrire_note(m.alias, nouveau_refus, nouveau_tps, ancien_qual, ancien_usage)
             bilan["tenu"].append((m.alias, f"tps={nouveau_tps} refus={nouveau_refus} "
                                    f"(paquet acvram {version_paquet})"))
-        elif raisons:
+        elif raisons and not timeout_leve:
+            # bug du 02/10 (chef) : un timeout levé ci-dessus ne retombe plus ici — il
+            # est déjà compté UNE fois dans bilan["timeout"], jamais une deuxième fois en
+            # « refus » (ce bilan ne garde que les VRAIS rc/parse de banc).
             bilan["refus"].append((m.alias, "; ".join(raisons)))
-
-        dt = time.time() - debut
-        if m.provider not in calibrage:
-            calibrage[m.provider] = dt
-            duree_max_par_moteur[m.provider] = min(PLAFOND_DEFAUT_S, max(60, int(dt * 2)))
-            with open(journal, "a") as f:
-                f.write(f"=== calibrage {m.provider} : {dt:.0f}s mesurés, "
-                        f"plafond resserré à {duree_max_par_moteur[m.provider]}s\n")
 
     with open(journal, "a") as f:
         f.write(f"=== FIN {time.strftime('%H:%M:%S')} (paquet acvram {version_paquet} au départ)\n")
