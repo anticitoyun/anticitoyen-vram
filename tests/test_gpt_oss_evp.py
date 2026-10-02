@@ -494,3 +494,21 @@ def test_arrondi_egalite_vers_le_code_pair():
     t = mxfp4_vers_nvfp4(blocs, ech, arrondir=True)
     v = dequantize_nvfp4(t, torch.float32)[0, 32:] / 2.0 ** (110 - 127)
     assert v[0::2].tolist() == [0.0] * 16 and v[1::2].tolist() == [2.0] * 16
+
+
+def test_aucune_pile_groupee_pour_gpt_oss(jouet_oss):
+    """evp vitesse (poste2, 02/10, a994dacb4) : un serveur mort à la chauffe dans le Marlin MoE (K=2880, g16) — servi depuis
+    un arbre SANS evp, où gpt-oss passait pour un MoE ordinaire et prenait les piles groupées, qui ignorent biais d'experts et
+    SwiGLU bornée (sortie fausse, et noyau qui refuse la forme). Ici : chaque bloc d'experts gpt-oss REFUSE ses piles
+    (moe.py `_try_build_stacks`, refus nommé) et ne sert que par la boucle par expert, la seule au bit de transformers.
+    Cassure : retirer le refus `swiglu_oss` → piles construites → rouge."""
+    from acvram.engine.loader import load_model
+    from acvram.engine.moe import MoEBlock
+    _, _, out = jouet_oss
+    blocs = [m for m in load_model(out, dtype=torch.float32, device_override="cpu").model.modules()
+             if isinstance(m, MoEBlock)]
+    assert blocs and all(b.act == "swiglu_oss" for b in blocs)
+    for b in blocs:
+        assert b._try_build_stacks() is False
+        assert "boucle par expert" in b.__dict__.get("_refus_pile", "")
+        assert getattr(b, "_stacks_marlin", None) is None and b._stacks is None
