@@ -8,25 +8,28 @@
 - **scellé** : `revue/poste1-evp-vitesse-scelle-02-10.md`, issue 3.
 - **mesuré** : 3 tentatives acvram (b=1, b=12, b=1 rejoué) toutes mortes avant d'être prêtes ;
   llama.cpp b=1 et b=12 tenus.
-- **verdict** : **ÉCHEC côté acvram — issue 3 du scellé.** Cause identique et reproductible aux
-  3 tentatives (`scratchpad/poste2-evp-vitesse-02-10/acvram-{b1,b12,b1-rejoue}.log:8`) :
+- **verdict (CORRIGÉ 02/10, cause réelle trouvée par poste1)** : **pas un échec moteur — mesure
+  INVALIDE, arbre servi sans les pièces evp.** `mesure.sh:14` posait
+  `BRAS_CWD="$RACINE"` où `$RACINE` est ce worktree (`poste2-banc`, branche `poste2-banc`) : ni
+  558999068 (gabarit gpt-oss) ni les correctifs `marlin_port`/`moe.py` spécifiques à evp n'y
+  sont fusionnés. `outils/carte.sh` résout `ACVRAM_ARBRE` depuis le cwd de l'appelant
+  (`outils/carte.sh:33-34`), donc le serveur acvram a chargé gpt-oss-20b comme un MoE
+  ORDINAIRE, sans le chemin evp — le noyau Marlin qu'il a appelé n'est pas celui que le scellé
+  mesure. La trace brute reste exacte et reproductible 3/3
+  (`scratchpad/poste2-evp-vitesse-02-10/acvram-{b1,b12,b1-rejoue}.log:8`) :
   ```
   RuntimeError: marlin_mm, .../marlin_moe_wna16/ops.cu:495, Invalid thread config:
   thread_m_blocks = 4, thread_k = -1, thread_n = -1, num_threads = -1
   for MKN = [16376, 2880, 2880] and num_bits = 4, group_size = 16, has_act_order = 0,
   is_k_full = 1, has_zp = 0, is_zp_float = 0, max_shared_mem = 101376
   ```
-  Pile d'appel : `acvram/engine/moe.py:1031` (`_forward_prefill_grouped`) →
-  `acvram/kernels/marlin_port/__init__.py:767` (`gemm_moe`) → noyau Marlin MoE (`ops.cu:495`).
-  Le serveur meurt AVANT d'ouvrir le port (jamais atteint `/v1/models`) : la cause est dans la
-  CHAUFFE interne au démarrage (prefill groupé synthétique, M=16 376 constant aux 3 essais,
-  indépendant du prompt réel), pas dans une requête du client. `num_bits=4, group_size=16`
-  pointe la quantification MXFP4→NVFP4 des experts de gpt-oss-20b spécifiquement (modèle
-  jamais encore chargé par ce chemin avant aujourd'hui — bd evp). **Pas une pièce vitesse à
-  moi** : hors mandat de cette mesure, à remonter à qui tient `marlin_port`/`moe.py`
-  (poste1 probablement, conception initiale du GEMM groupé).
-  Conformément à l'issue 3 : aucun rapport A/L publié, le chiffre llama.cpp seul n'est **pas**
-  un comparatif, donné ici pour mémoire seulement :
+  mais elle décrit le GEMM groupé de `poste2-banc` (`moe.py:1031` → `marlin_port/__init__.py:767`
+  → `ops.cu:495`), pas celui d'evp — **ne pas l'attribuer à poste1 ni à `marlin_port` evp**, ce
+  point de la note initiale était faux. Correctif posé : `mesure.sh` refuse désormais de
+  mesurer si l'arbre servi n'est pas EXACTEMENT `ATTENDU_SHA` (sha de main donné par chef
+  après sa suite). Rejeu à refaire depuis ce sha, après la preuve de service d'poste1.
+  Conformément à l'issue 3 du scellé (mesure invalide = rien de publiable) : aucun rapport A/L,
+  le chiffre llama.cpp seul n'est **pas** un comparatif, donné ici pour mémoire seulement :
   - b=1 : décodage 389,22 tok/s (dispersion 2,72 %), préfill 9950 tok/s, 955 jetons/kJ.
   - b=12 : décodage agrégé 828,61 tok/s (dispersion 17,16 %), TTFT mural 0,495 s,
     2403 jetons/kJ.
@@ -41,6 +44,7 @@ C'est exactement cette branche — la cause est écrite ci-dessus, fichier et li
 
 ## Suite
 
-Bug moteur distinct de ma pièce e50.2 et du correctif ChatML (`poste2-e50.2-verdict-relance-
-02-10.md`, `fcf81b22f`) — à ouvrir en bead séparé si chef confirme, propriétaire probable
-poste1 (`marlin_port`). Mon rejeu e50.2 suit, après poste6.
+Mesure à refaire une fois le sha de main (après poste6 → poste5 → chef → preuve de service
+d'poste1) donné ; `ATTENDU_SHA` obligatoire dans `mesure.sh`, refus sinon. Sans rapport avec ma
+pièce e50.2 ni le correctif ChatML (`poste2-e50.2-verdict-relance-02-10.md`, `fcf81b22f`), qui
+restent valides. Mon rejeu e50.2 suit, après poste6 et poste5.
