@@ -93,3 +93,25 @@ Instrument joué à sec avant la carte (02/10 15:29-15:32, processeur, Devstral,
 poste2) : il va au bout ; (i) 0 élément différent sur les cinq projections et sur le `F.linear` nu (attendu : le produit bf16
 du processeur ne dépend pas de M) ; (ii) 21 éléments sur 2 457 600 à 1 ulp, 12 lignes sur 600 ; témoins à 0. Chargement
 135,7 s (disque dur, sur processeur). Lanceur : `scratchpad/poste6-s1-dense/carte-h4.sh` (une seule prise `carte.sh`).
+
+## Troisième bras de la micro-prise — prédiction écrite AVANT (02/10 16 h, ordre chef après le lot duck.ai `poste4-224` 8463edd58)
+
+Ce que le lot rapporte (non vérifié par moi) : cuBLAS bf16 et le SDPA flash choisissent leur découpage selon la forme de
+l'appel ; `use_deterministic_algorithms` ne garantit que la répétition d'un même appel. Levier nommé :
+`torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False`. Vérifié à sec : le réglage existe dans le torch
+installé (2.14.0+cu130), vaut `True` par défaut, et acvram ne le pose nulle part.
+
+Bras (iii) : les mêmes produits de la couche 0 (`q_proj`, `gate_proj`, et le `F.linear` nu), M = 7 865 contre 4 096 + 3 769,
+réglage à `False` ; plus la part des éléments qui changent entre réglage `True` et `False` au même M, et le temps d'un appel
+dans chaque réglage (3 répétitions, synchronisées — indicatif, pas une cellule).
+
+| mesure | prédit | faux si |
+|---|---|---|
+| (iii) produits, réglage `False`, M = 7 865 contre deux morceaux | **< 1 % des éléments** (attendu 0-0,3 %) : l'accumulation en pleine précision n'arrondit qu'à la fin, le découpage ne se voit presque plus | ≥ 10 % : le réglage ne retire pas la dépendance à M (ou torch ne le transmet pas à ce chemin) |
+| témoin (iii) : même M deux fois, réglage `False` | 0 | ≠ 0 |
+| sortie `False` contre `True`, même M | **20-60 % des éléments changent** d'1 ulp : le réglage change la sortie servie | < 1 % : il ne change rien, donc n'agit pas |
+| temps d'un `F.linear` 7 865 × 5 120 → 5 120, `False` contre `True` | 1,0 à 2 × plus lent | > 3 × |
+
+Conséquence à écrire quel que soit le résultat : un réglage qui retire la dépendance à M change aussi tous les logits
+servis (règle « une optimisation qui change la sortie… ») — ce ne serait pas un correctif à poser par défaut, mais un
+régime à juger par sa propre garde de qualité et son coût en débit. Cette minute de carte ne juge ni l'un ni l'autre.
