@@ -108,6 +108,7 @@ VARIABLES_LUES = {
     "ACVRAM_PREFILL_TRANCHES",  # engine/runner.py : 284 b, préfill par lot coupé à la frontière d'instantané des hybrides (défaut 1)
     "ACVRAM_PREFILL_MORCEAU",   # engine/runner.py : kv31b levier 2 étape 1, préfill de l'attention par morceaux de N jetons (défaut 0 = OFF)
     "ACVRAM_PREFILL_RELIRE_KV",  # engine/attention.py : lic, témoin — un seul tenant relit ses K/V depuis le cache (défaut 0)
+    "ACVRAM_PRELECTURE",  # engine/loader.py : B2, fils de prélecture des fragments avant le chargement (défaut 1, 0 = jamais)
     "ACVRAM_PREFILL_MORCEAU_AU_DELA",  # engine/runner.py : d19, morceaux d'attention au-delà du tenu (défaut 4096, 0 = jamais)
     "ACVRAM_PREFILL_TRANSITOIRES",  # engine/attention.py : d19, K/V bf16 transitoires par couche pendant les morceaux (défaut 1)
     "ACVRAM_PREFILL_BIAIS_MORCEAUX",  # engine/attention.py : d19, biais bas-droite pour les morceaux (défaut 1)

@@ -290,3 +290,5 @@ DEFAUTS_PAR_VERSION["0.7.16"] = DEFAUTS_PAR_VERSION["0.7.15"]
 # 5v7 : survivants des piles regroupés (PILES_COMPACTER) — mêmes valeurs, 7,4 Gio de segments rendus sur Coder-30B.
 DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_CHARGEMENT": "1", "PILES_COMPACTER": "1"},
                                  DEFAUTS_PAR_VERSION["0.7.16"][1])
+# 0.7.18 (en préparation, B2) : PRELECTURE=1 (prélecture des fragments au chargement, aucun octet changé).
+DEFAUTS_PAR_VERSION["0.7.18"] = ({**DEFAUTS_PAR_VERSION["0.7.17"][0], "PRELECTURE": "1"}, DEFAUTS_PAR_VERSION["0.7.17"][1])

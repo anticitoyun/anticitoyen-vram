@@ -36,6 +36,80 @@ from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN, MoEBl
 __all__ = ["LoadedModel", "load_model"]
 
 
+# B2 (poste6 02/10, verdict poste6-colibri-flux-experts) : fils de prélecture des fragments (0 = jamais). `safe_open` rend
+# des vues d'un mmap : à froid chaque tenseur se lit par défauts de page, un fil, 128 Kio d'avance — 0,4-0,6 Go/s mesurés
+# sur un NVMe qui en rend 3,3. La prélecture remplit le cache de pages en amont ; le chemin de chargement ne change pas.
+_PRELECTURE = max(0, int(os.environ.get("ACVRAM_PRELECTURE", "1") or 0))
+_PRELECTURE_PAS = 128 * 1024          # le noyau borne chaque readahead(2) à une E/S (≥ read_ahead_kb, 128 Kio par défaut)
+
+
+def _readahead(fd: int, debut: int, octets: int) -> None:
+    """readahead(2) : remplit le cache de pages sans copie vers le processus. Isolé pour être remplaçable (tests)."""
+    import ctypes
+    libc = _readahead.__dict__.get("libc")
+    if libc is None:
+        libc = _readahead.libc = ctypes.CDLL(None, use_errno=True)
+        libc.readahead.argtypes = [ctypes.c_int, ctypes.c_int64, ctypes.c_size_t]
+    libc.readahead(fd, debut, octets)
+
+
+def _prelire(fichiers: list[str], fils: Optional[int] = None) -> Optional[dict]:
+    """Lance la prélecture de ``fichiers`` en arrière-plan et rend son bilan (rempli par les fils : ``octets``,
+    ``secondes``, ``fini`` — un `threading.Event`), ou None si elle est coupée, sans objet ou refusée.
+
+    Lecture seule, hors du chemin des tenseurs : une erreur ici ne change rien au chargement, elle arrête la prélecture.
+    Refusée quand les fragments ne logent pas dans la RAM disponible : le cache de pages se viderait à mesure."""
+    import threading
+    n = _PRELECTURE if fils is None else int(fils)
+    fichiers = [f for f in dict.fromkeys(fichiers) if os.path.isfile(f)]
+    if n <= 0 or not fichiers or not hasattr(os, "posix_fadvise"):
+        return None
+    total = sum(os.path.getsize(f) for f in fichiers)
+    try:
+        dispo = next(int(l.split()[1]) * 1024 for l in open("/proc/meminfo") if l.startswith("MemAvailable:"))
+    except (OSError, StopIteration):
+        dispo = 0
+    if dispo and total > 0.8 * dispo:
+        print(f"[acvram] prélecture coupée : {total / 2**30:.1f} Gio de fragments pour {dispo / 2**30:.1f} Gio de RAM disponible",
+              flush=True)
+        return None
+    bilan = {"octets": 0, "secondes": 0.0, "fini": threading.Event(), "fichiers": len(fichiers), "total": total}
+    file_ = list(fichiers)
+    verrou = threading.Lock()
+    t0 = time.perf_counter()
+    vivants = [n]
+
+    def corps() -> None:
+        try:
+            while True:
+                with verrou:
+                    if not file_:
+                        return
+                    f = file_.pop(0)
+                fd = os.open(f, os.O_RDONLY)
+                try:
+                    taille, o = os.fstat(fd).st_size, 0
+                    while o < taille:
+                        _readahead(fd, o, _PRELECTURE_PAS)
+                        o += _PRELECTURE_PAS
+                    with verrou:
+                        bilan["octets"] += taille
+                finally:
+                    os.close(fd)
+        except Exception as exc:                                  # noqa: BLE001 — jamais une panne de chargement
+            bilan["erreur"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            with verrou:
+                vivants[0] -= 1
+                if vivants[0] == 0:
+                    bilan["secondes"] = time.perf_counter() - t0
+                    bilan["fini"].set()
+    for _ in range(n):
+        threading.Thread(target=corps, name="acvram-prelecture", daemon=True).start()
+    print(f"[acvram] prélecture : {len(fichiers)} fragment(s), {total / 2**30:.1f} Gio, {n} fil(s) (ACVRAM_PRELECTURE)", flush=True)
+    return bilan
+
+
 class _ShardReader:
     """Accès paresseux aux tenseurs d'un ensemble de fragments safetensors."""
 
@@ -291,6 +365,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 if _kernels._PROJ_MARLIN and plan_du_manifeste else None)
     _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
+    reader.prelecture = _prelire([os.path.join(path, fn) for fn in manifest["weight_map"].values()])     # B2
     group_size = manifest.get("options", {}).get("group_size", 128)
 
     def dev(name: str) -> torch.device:
