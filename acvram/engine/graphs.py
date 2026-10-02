@@ -1048,7 +1048,7 @@ class GraphRunner:
             def deux(*forme):
                 return [torch.zeros(*forme, dtype=torch.long).pin_memory() for _ in range(2)]
             et = entry["etage"] = {"tour": 0, "positions": deux(b * ql), "slots": deux(b * ql),
-                                   "seq_lens": deux(b), "tables": deux(b, nblk),
+                                   "seq_lens": deux(b), "tables": deux(b, nblk), "anneau": deux(b),
                                    "tokens": deux(b * ql)}
         return et
 
@@ -1081,6 +1081,10 @@ class GraphRunner:
         entry["slots"].copy_(sl, non_blocking=True)
         entry["seq_lens"].copy_(sq, non_blocking=True)
         entry["tables"].copy_(tb, non_blocking=True)
+        an = et["anneau"][k]; an.fill_(-1)
+        if batch.anneau:
+            an[:b_reel] = torch.tensor(batch.anneau, dtype=torch.long)
+        entry["anneau"].copy_(an, non_blocking=True)
         if os.environ.get("ACVRAM_TRACE_PTRS"):
             sl = batch.slot_mapping.tolist(); po = batch.positions.tolist()
             print(f"[graphe-FORMES] clé {entry['key']} seq_lens={batch.seq_lens} "
@@ -1108,6 +1112,7 @@ class GraphRunner:
             "slots": torch.zeros(b * ql, dtype=torch.long, device=d),
             "tables": torch.zeros(b, nblk, dtype=torch.long, device=d),
             "seq_lens": torch.zeros(b, dtype=torch.long, device=d),
+            "anneau": torch.full((b,), -1, dtype=torch.long, device=d),      # levier 2 : créneaux d'anneau du lot
         }
         if self.sampler_graphe:
             entry["sortie"] = torch.zeros(2, b * ql, dtype=torch.int64, device=d)
@@ -1150,6 +1155,8 @@ class GraphRunner:
                 w_.global_scale_float()
 
         def step() -> torch.Tensor:
+            from . import attention as _att
+            _att._ANNEAU_FIXE = entry["anneau"]            # levier 2 : adresse statique capturée avec le graphe
             out = m.decode_fixed(entry["x"], entry["positions"],
                                  entry["slots"], entry["tables"],
                                  entry["seq_lens"], max_pos, q_len=ql)

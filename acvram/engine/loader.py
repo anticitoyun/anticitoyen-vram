@@ -426,8 +426,11 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # besoin de place libre au moment ou elle concatene.
     a_allouer: list = []
     embed_charge = embed.is_cuda                 # pièce 146 (i) : déjà dans `libre`, ne pas le recompter
+    _poser_anneau(spec, plan, manifest, dev, max_model_len, embed_charge)          # levier 2 : avant tout plancher
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
                          reserve=_reserve_prefill(spec, max_model_len, manifest, plan), embed_charge=embed_charge)
+    if torch.cuda.is_available() and max_model_len and plan.kv_budget:
+        print(f"[acvram] {reserve_prefill_texte(spec, max_model_len, manifest, plan)}", flush=True)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
     _signaler_falaise(plan, max_model_len, lambda n: _reserve_prefill(spec, n, manifest, plan))
     # Pièce 146 (a) : la capacité du chemin par défaut, bornée au MÊME instant que B (poids pas encore chargés),
@@ -699,7 +702,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=nkv, head_dim=hd,
-                    num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "muse_glimmer":
@@ -726,7 +730,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "starcoder2":
@@ -750,7 +755,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "falcon_h1":
@@ -778,7 +784,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type == "nemotron_h":
@@ -837,7 +844,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
-                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+                    head_dim=spec.head_dim, num_blocks=_blocs_couche(spec, i, n_blocks, lp.exec_device), dtype=kv_fmt, device=str(d),
+                    anneau=_anneau_couche(spec, i)))
             continue
 
         if spec.model_type in ("lfm2", "lfm2_moe") and spec.layer_types[i] == "conv":
@@ -1406,7 +1414,29 @@ def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev:
     # pas au-dessus de sa cible, quatre tours d'exil rendaient « 3 Mio
     # manquants » et le refus (poste3, essai a803254).
     jetons = int(max_model_len or 2048)
+    R = int(getattr(spec, "kv_anneau", 0) or 0)
+    if R and spec.couches_fenetre:
+        # levier 2 : une couche en anneau ne coûte que R blocs par séquence, quelle que soit sa longueur
+        fen = set(spec.couches_fenetre)
+        fen_ici = sum(1 for lp in plan.layers if lp.index in fen and lp.exec_device == dev and spec.couche_a_kv(lp.index))
+        return int(bpt * ((ici - fen_ici) * jetons + fen_ici * R * 16) // total)
     return bpt * jetons * ici // total
+
+
+def _kv_plancher_prevu(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev: str) -> int:
+    """g6r (poste6 02/10) : le plancher qu'aura UNE séquence de ``max_model_len`` une fois l'anneau posé, pour ce qui se
+    décide AVANT `_poser_anneau` (`kv_min` de `_reajuster_plan`, critère de `_plafonner_mlp_prefill`) quand le plan a été
+    dimensionné sous l'anneau (`plan.kv_anneau`). Sans lui le plancher était celui du KV plein (gemma-4-31B à 65 536 :
+    30,2 Gio), le KV ne cédait jamais et 39/60 MLP partaient en RAM hôte pour loger 9,44 Gio de cache là où une séquence
+    en demande 5,45 (G1, 01/10). Plan au KV plein : le plancher d'avant, à l'identique."""
+    R = int(getattr(plan, "kv_anneau", 0) or 0)
+    if not R or int(getattr(spec, "kv_anneau", 0) or 0):
+        return _kv_plancher(plan, spec, max_model_len, dev)
+    spec.kv_anneau = R
+    try:
+        return _kv_plancher(plan, spec, max_model_len, dev)
+    finally:
+        spec.kv_anneau = 0
 
 
 def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
@@ -1455,7 +1485,10 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
         print(f"[acvram] budget KV sous le plancher d'une séquence de {max_model_len} "
               f"jetons ({manque / 2**20:.0f} Mio manquants) : exil supplémentaire (tour {tour + 1})",
               file=sys.stderr)
+        sans = getattr(plan, "sans_tampons_denses", False)
         _reajuster_plan(plan, manifest, top_k=top_k, reserve=reserve + supplement)
+        if sans and not plan.sans_tampons_denses:
+            reserve += _tampons_denses(plan)       # g6r stabilité : l'exil est apparu ici, le pool compte désormais
     # kv31b (poste6 30/09, edz définitif : 15 refus gemma-4-31B à 32 768) : dire la fenêtre qui TIENT, pas seulement
     # « réduire max_model_len ». Le lanceur (acvram-serveur) relit cette ligne et relance à cette fenêtre si le client
     # l'accepte (CTX_CLIENT_MIN), sinon refuse en nommant les deux chiffres.
@@ -1557,6 +1590,67 @@ def _sans_marlin(calcul):
         _k._PROJ_MARLIN = garde
 
 
+# levier 2 (poste6 01/10) : créneaux d'anneau réservés par appareil (séquences simultanées sous l'anneau), posés par
+# `_kv_blocks_per_device`, lus à la création des caches des couches à fenêtre
+ANNEAU_SEQS: dict = {}
+_KV_ANNEAU_MODE = (os.environ.get("ACVRAM_KV_ANNEAU") or "auto").strip().lower()      # auto | 1 | 0 (regime.VARIABLES)
+# plongements (poste6 02/10) : auto (la table bf16 quitte la carte avant le premier MLP), hote (toujours : bras de mesure),
+# carte (jamais : le comportement d'avant)
+_EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
+
+
+def _a_des_puits(manifest: Optional[dict]) -> bool:
+    """Modèle à puits d'attention (gpt-oss, `self_attn.sinks`) : ses couches à fenêtre passent par `attention_puits` /
+    `decode_attention_puits_fixe`, que l'anneau n'a jamais joués — l'anneau lui est refusé (fusion du 02/10 : les deux
+    chemins gardés, sans les croiser)."""
+    return any(nom.endswith("self_attn.sinks") for nom in (manifest or {}).get("tensors", {}))
+
+
+def _anneau_couche(spec: ModelSpec, i: int) -> int:
+    """R si la couche ``i`` est à fenêtre glissante et que l'anneau est posé (`spec.kv_anneau`), sinon 0."""
+    R = int(getattr(spec, "kv_anneau", 0) or 0)
+    return R if (R and i in set(spec.couches_fenetre)) else 0
+
+
+def _blocs_couche(spec: ModelSpec, i: int, n_blocks: int, dev: str) -> int:
+    """Blocs du cache de la couche ``i`` : les blocs paginés partagés, ou créneaux × R pour une couche en anneau."""
+    R = _anneau_couche(spec, i)
+    return int(ANNEAU_SEQS.get(dev, 1)) * R if R else n_blocks
+
+
+def _poser_anneau(spec: ModelSpec, plan: Plan, manifest: dict, dev, max_model_len: Optional[int],
+                  embed_charge: bool = False) -> int:
+    """Levier 2 : `ACVRAM_KV_ANNEAU` = auto (défaut : l'anneau n'est pris QUE si le KV plein d'une séquence de `max_model_len` ne
+    tient pas — rien ne change pour les contextes qui tenaient), 1 (toujours, bras de mesure), 0 (jamais). Pose `spec.kv_anneau` = R."""
+    mode = _KV_ANNEAU_MODE
+    R = spec.anneau_R()
+    spec.kv_anneau = 0
+    if not R or mode in ("0", "off", "non"):
+        return 0
+    if _a_des_puits(manifest):
+        if mode == "1":
+            print("[acvram] KV en anneau refusé (ACVRAM_KV_ANNEAU=1) : modèle à puits d'attention (gpt-oss), chemin non couvert",
+                  flush=True)
+        return 0
+    motif = "ACVRAM_KV_ANNEAU=1"
+    if mode != "1" and int(getattr(plan, "kv_anneau", 0) or 0):
+        motif = getattr(plan, "kv_anneau_motif", "") or "plan dimensionné sous l'anneau"      # g6r : décidé au plan
+    elif mode != "1":
+        if not torch.cuda.is_available() or not max_model_len or not plan.kv_budget:
+            return 0
+        bornes = _borner_kv_par_la_vram(plan, manifest, dev, reserve=0, embed_charge=embed_charge) or {}
+        plein = min((_fenetre_qui_tient(plan, spec, manifest, t.name, int(bornes.get(t.name, plan.kv_budget[t.name])), 0, max_model_len)
+                     for t in plan.tiers if t.kind == "gpu" and t.name in plan.kv_budget), default=int(max_model_len))
+        if plein >= int(max_model_len):
+            return 0
+        motif = f"le KV plein ne tient que {plein} jetons pour {max_model_len} demandés"
+    spec.kv_anneau = R
+    print(f"[acvram] KV en anneau : {len(spec.couches_fenetre)} couches à fenêtre glissante ({spec.sliding_window}) gardent R={R} blocs "
+          f"par séquence ({motif}) ; les {spec.couches_avec_kv - len(spec.couches_fenetre)} couches pleines restent paginées ; "
+          f"cache de préfixe coupé", flush=True)
+    return R
+
+
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
                           max_model_len: Optional[int]) -> dict[str, int]:
     """Répartit le budget KV de chaque appareil en blocs, partagés entre ses couches.
@@ -1575,12 +1669,32 @@ def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
     """
     out: dict[str, int] = {}
     layers_on = {}
+    fen_on = {}
+    R = int(getattr(spec, "kv_anneau", 0) or 0)
+    fen = set(spec.couches_fenetre) if R else set()
     for lp in plan.layers:
         if not spec.couche_a_kv(lp.index):
             continue
+        if lp.index in fen:
+            fen_on[lp.exec_device] = fen_on.get(lp.exec_device, 0) + 1
+            continue                                   # levier 2 : une couche en anneau ne prend rien au pool paginé
         layers_on[lp.exec_device] = layers_on.get(lp.exec_device, 0) + 1
+    ANNEAU_SEQS.clear()
     for dev, budget in plan.kv_budget.items():
         n_layers = max(1, layers_on.get(dev, 1))
+        if R and fen_on.get(dev, 0):
+            # anneaux : au plus un quart du budget, au moins un créneau, jamais plus que les séquences planifiées
+            # g6r : et jamais pris sur le plancher d'UNE séquence de max_model_len — au plancher (5,45 Gio sur gemma à
+            # 65 536) le quart donnait 3 créneaux, 0,82 Gio ôtés aux couches pleines : 54 800 jetons pour 65 536 promis
+            kv_fmt0 = _kv_format(plan, dev)
+            bloc = KVCacheConfig(num_layers=1, num_kv_heads=spec.num_key_value_heads, head_dim=spec.head_dim,
+                                 num_blocks=1, dtype=kv_fmt0).bytes_per_block()
+            par_seq = fen_on[dev] * R * bloc
+            au_dessus = int(budget) - _kv_plancher(plan, spec, max_model_len, dev) if max_model_len else int(budget)
+            seqs = max(1, min(int(getattr(plan, "kv_planned_seqs", 0) or 1), int(budget // 4 // max(1, par_seq)),
+                              1 + max(0, au_dessus) // max(1, par_seq)))
+            ANNEAU_SEQS[dev] = seqs
+            budget = max(0, int(budget) - seqs * par_seq)
         per_layer = budget // n_layers
         # Les octets d'un bloc dépendent du FORMAT du palier (int8 8,125
         # bits, lm4 4,125) : compter en int8 un cache lm4 lui volait la moitié
@@ -1678,7 +1792,7 @@ def _compter_experts_manifest(manifest: dict) -> dict:
 
 
 def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0,
-                    kv_min: Optional[dict] = None) -> None:
+                    kv_min: Optional[dict] = None, embed_exilable: bool = False) -> None:
     """Fait descendre en RAM hôte les MLP des dernières couches d'un GPU
     dont les poids réels dépassent la capacité de l'étage.
 
@@ -1780,6 +1894,16 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
                 bpt = int(getattr(plan, "kv_bytes_per_token", 0) or 0)
                 if bpt:
                     plan.kv_max_tokens = int(sum(plan.kv_budget.values()) // bpt)
+        # Plongements (poste6 02/10) : la table bf16 sort AVANT le premier MLP. Elle ne sert qu'au gather d'entrée (une
+        # ligne par jeton : 3 µs à b=1, 11 µs à b=12, mesurés) ; la tête liée a sa propre copie quantifiée (`_tete_liee`).
+        # Un MLP exilé coûte 8,8 ms par jeton et coupe les graphes. gemma-4-31B à 65 536 : 2,62 Gio rendus pour 1,95
+        # manquants, 12 MLP exilés → 0. À la planification seulement (``embed_exilable``) : au chargement la table est
+        # déjà sur la carte.
+        if embed_exilable and plan.embed_device == dev and _EMBED_MODE != "carte" and embed:
+            force = _EMBED_MODE in ("hote", "hôte")
+            if force or utilise() > capacite - marge:
+                plan.embed_device = "cpu"                  # dit une fois, sur le plan RETENU (`_plan_from_manifest`)
+                plan.embed_exile = not force
         while utilise() > capacite - marge:
             # Candidats déjà résidents (couche entière) OU déjà à moitié
             # (placement par expert antérieur, dont on peut encore réduire
@@ -1821,6 +1945,7 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
                               else "gpu")
             deplacees += 1
         if deplacees:
+            plan.sans_tampons_denses = False        # g6r stabilité : un poids exilé → le pool de tampons existera
             print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
                   f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres, "
                   f"activations de préfill réservées {reserve / 2**30:.2f} Gio)",
@@ -1990,7 +2115,7 @@ def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
 
 def _replanifier(manifest: dict, spec: "ModelSpec",
                  max_model_len: Optional[int] = None,
-                 max_concurrent_seqs: Optional[int] = None) -> "Plan | None":
+                 max_concurrent_seqs: Optional[int] = None, kv_anneau: int = 0) -> "Plan | None":
     """Rejoue TOUJOURS le planificateur avec l'état actuel de la machine.
 
     Le plan est écrit une fois pour toutes à la conversion, et `_reajuster_plan`
@@ -2043,7 +2168,8 @@ def _replanifier(manifest: dict, spec: "ModelSpec",
                 else int(d.get("kv_planned_seqs") or 0) or PlannerOptions().max_concurrent_seqs)
         neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx,
                                                        max_concurrent_seqs=slots,
-                                                       kv_jusqu_a_la_demande=max_model_len is not None))
+                                                       kv_jusqu_a_la_demande=max_model_len is not None,
+                                                       kv_anneau=int(kv_anneau or 0)))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
               f"conservé", flush=True)
@@ -2208,6 +2334,12 @@ def _mlp_exiles(plan: Plan) -> int:
     return sum(1 for l in plan.layers if l.mlp_storage == "cpu")
 
 
+def _poids_exiles(plan: Plan) -> int:
+    """MLP exilés, plus un si la table de plongements a dû quitter la carte : pour `_plafonner_mlp_prefill`, qui préfère
+    un plafond de préfill à tout exil — un plan qui tenait avec sa table sur la carte la garde."""
+    return _mlp_exiles(plan) + (1 if getattr(plan, "embed_exile", False) else 0)
+
+
 def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, planifier,
                            manifest: Optional[dict] = None) -> bool:
     """a5v (28/09, pièce 294 de poste5) : un modèle DENSE dont la réserve de préfill d un seul tenant exile des MLP
@@ -2233,7 +2365,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
     def poser(c: Optional[int]) -> None:
         spec.mlp_prefill_plafond = c
         spec.prefill_morceau_plafond = c if morceaux else None
-    plein = _mlp_exiles(plan)
+    plein = _poids_exiles(plan)
     if plein == 0:
         return False
 
@@ -2244,11 +2376,11 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
         with contextlib.redirect_stdout(io.StringIO()):
             p = planifier()
         if p is None or not torch.cuda.is_available():
-            return plein if p is None else _mlp_exiles(p), True
+            return plein if p is None else _poids_exiles(p), True
         bornes = _borner_kv_par_la_vram(p, manifest_de(p), lambda nom: torch.device(nom),
                                         reserve=_reserve_prefill(spec, ctx, manifest_de(p), p))
-        tient = all(int(bornes[n]) >= _kv_plancher(p, spec, ctx, n) for n in bornes)
-        return _mlp_exiles(p), tient
+        tient = all(int(bornes[n]) >= _kv_plancher_prevu(p, spec, ctx, n) for n in bornes)
+        return _poids_exiles(p), tient
 
     def exiles(c: int) -> int:
         return essai(c)[0]
@@ -2267,7 +2399,7 @@ def _plafonner_mlp_prefill(spec, max_model_len: Optional[int], plan: Plan, plani
         motif = "plancher KV tenu, réserve d'un seul tenant refusée"
     else:
         critere = lambda c: exiles(c) <= plancher                       # a5v : le plus grand plafond sans exil de plus
-        motif = f"seul tenant à {ctx} : {plein} MLP exilés ; plafonnée : {plancher}"
+        motif = f"seul tenant à {ctx} : {plein} poids exilés ; plafonnée : {plancher} (table de plongements comprise)"
     bas, haut = m, ctx                                              # critere(bas) vrai ; critere(ctx) faux
     while haut - bas > 1024:
         milieu = (bas + haut) // 2 // 1024 * 1024
@@ -2386,18 +2518,52 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
     13,1 Gio et faisait refuser l'instrument de préfill (poste3, fla-17-09)."""
     if spec is None:
         return 0
+    return sum(_reserve_prefill_detail(spec, max_model_len, manifest, plan).values())
+
+
+def _reserve_prefill_detail(spec, max_model_len: Optional[int], manifest: dict, plan: Optional[Plan] = None) -> dict:
+    """Les termes de `_reserve_prefill`, nommés : activations (formule), excès mesuré par la dernière chauffe, transitoires
+    Marlin, tampons denses (0 quand le plan ne les compte pas)."""
     ctx = int(max_model_len or 8192)
-    reserve = int(spec.activations_prefill_bytes(ctx)) + _octets_marlin(manifest) \
-        + _plus_grosse_nvfp4_marlin_bytes(manifest) + _exces_mesure(spec, ctx, manifest)
-    if plan is not None and plan.layers:
-        reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
+    d = {"activations": int(spec.activations_prefill_bytes(ctx)),
+         "marlin": _octets_marlin(manifest) + _plus_grosse_nvfp4_marlin_bytes(manifest),
+         "exces_chauffe": _exces_mesure(spec, ctx, manifest), "tampons_denses": 0}
+    if plan is not None and plan.layers and not getattr(plan, "sans_tampons_denses", False):
+        d["tampons_denses"] = _tampons_denses(plan)
         # P1 disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile
         # Marlin REMPLACE la pile NVFP4 (MoEBlock._try_build_stacks la libère
         # après le repack, même masse : codes K·N/2 + échelles K·N/16) — la
         # réserve « seconde disposition » de 5a0f6c4 (Σ mlp_bytes, 17,04 Gio
         # sur Coder : 21/48 couches exilées, poste3 18/09) n'existe plus.
         # tests/test_marlin_prefill_p1.py : Σ × 1, jamais × 2.
-    return reserve
+    return d
+
+
+def reserve_prefill_texte(spec, max_model_len: Optional[int], manifest: dict, plan: Optional[Plan] = None) -> str:
+    """La réserve de préfill du plan, terme à terme — ce que le pic de la chauffe doit rester dessous. Le verdict carte du
+    02/10 (g6r stabilité) devait la recomposer du journal et d'un rejeu à sec : elle est dite au chargement."""
+    d = _reserve_prefill_detail(spec, max_model_len, manifest, plan)
+    g = 2**30
+    denses = (f"tampons denses {d['tampons_denses'] / g:.2f}" if d["tampons_denses"]
+              else "tampons denses non comptés" if plan is not None and getattr(plan, "sans_tampons_denses", False) else "tampons denses 0")
+    plafond = getattr(spec, "prefill_morceau_plafond", None) or getattr(spec, "mlp_prefill_plafond", None)
+    return (f"réserve de préfill du plan : {sum(d.values()) / g:.2f} Gio à {int(max_model_len or 8192)} jetons "
+            f"(activations {d['activations'] / g:.2f}{f' au plafond {plafond}' if plafond else ''}, excès de chauffe "
+            f"{d['exces_chauffe'] / g:.2f}, Marlin {d['marlin'] / g:.2f}, {denses})")
+
+
+# g6r stabilité (poste6 02/10) : faux = la réserve des tampons denses est comptée dans tous les cas (le comportement
+# d'avant ; témoin des tests)
+_RELACHE_TAMPONS = True
+
+
+def _tampons_denses(plan: Plan) -> int:
+    """Octets du pool de tampons des poids denses EXILÉS (`_pool_dense` : `_DENSE_SLOTS` jeux de la plus grosse couche)."""
+    return _DENSE_SLOTS * max((int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers), default=0)
+
+
+def _exil_dense(plan: Plan) -> bool:
+    return any(l.mlp_storage == "cpu" or l.attn_storage == "cpu" for l in plan.layers)
 
 
 def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
@@ -2406,16 +2572,92 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
     if spec is not None:
-        def planifier():
-            p = _replanifier(manifest, spec, max_model_len=max_model_len, max_concurrent_seqs=max_concurrent_seqs)
+        def chaine(anneau: int = 0, relache: bool = False):
+            """Le plan réajusté, plafond de préfill compris, au KV plein (0) ou sous l'anneau (R) ; ``relache`` : sans la
+            réserve des tampons denses tant qu'aucun poids dense n'est exilé."""
+            def planifier():
+                p = _replanifier(manifest, spec, max_model_len=max_model_len, max_concurrent_seqs=max_concurrent_seqs,
+                                 kv_anneau=anneau)
+                if p is not None:
+                    p.sans_tampons_denses = sans = bool(relache) and not _exil_dense(p)
+                    for _ in range(2 if sans else 1):
+                        _reajuster_plan(p, manifest, top_k=spec.num_experts_per_tok or 8,
+                                        reserve=_reserve_prefill(spec, max_model_len, manifest, p),
+                                        kv_min={d: _kv_plancher_prevu(p, spec, max_model_len, d) for d in (p.kv_budget or {})},
+                                        embed_exilable=True)
+                        if p.sans_tampons_denses:
+                            break                  # aucun exil : la réserve allégée était la bonne
+                return p
+            import contextlib
+            import io
+            # la sortie d'une chaîne n'est dite que si son plan est retenu : celle du plan écarté (plein quand l'anneau
+            # gagne) annonçait des exils qui n'ont pas lieu
+            with contextlib.redirect_stdout(io.StringIO()) as dit:
+                p = planifier()
+                if p is not None and _plafonner_mlp_prefill(spec, max_model_len, p, planifier, manifest):
+                    p = planifier()
             if p is not None:
-                _reajuster_plan(p, manifest, top_k=spec.num_experts_per_tok or 8,
-                                reserve=_reserve_prefill(spec, max_model_len, manifest, p),
-                                kv_min={d: _kv_plancher(p, spec, max_model_len, d) for d in (p.kv_budget or {})})
+                p._dit = dit.getvalue()
             return p
-        neuf = planifier()
-        if neuf is not None and _plafonner_mlp_prefill(spec, max_model_len, neuf, planifier, manifest):
-            neuf = planifier()
+
+        def cout(p) -> tuple:
+            """(le plancher d'une séquence manque-t-il ?, MLP exilés) — ce que le chargement paierait avec ce plan."""
+            manque = any(int(v) < _kv_plancher_prevu(p, spec, max_model_len, d) for d, v in (p.kv_budget or {}).items())
+            return (1 if manque else 0, _mlp_exiles(p))
+        plafonds = (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
+
+        # `_exces_mesure` dit UNE fois par modèle ce qu'il applique de la dernière chauffe — dans la première chaîne jouée.
+        # Quand cette chaîne est écartée, sa sortie l'est aussi : le journal du service ne disait plus que la réserve
+        # avait été calée (prise g6r stabilité du 02/10, second chargement). Ces lignes survivent à l'écart.
+        annonces: list[str] = []
+
+        def essayer(anneau: int, relache: bool):
+            spec.mlp_prefill_plafond, spec.prefill_morceau_plafond = plafonds
+            p = chaine(anneau, relache)
+            if p is not None:
+                annonces.extend(l for l in p._dit.splitlines()
+                                if l.startswith("[acvram] réserve de préfill") and l not in annonces)
+            return p, (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
+        R = spec.anneau_R() if (max_model_len and _KV_ANNEAU_MODE not in ("0", "off", "non")
+                                and not _a_des_puits(manifest)) else 0
+        premier, plafonds_choisis = essayer(R if (R and _KV_ANNEAU_MODE == "1") else 0, False)
+        neuf = premier
+        # g6r : poids résidents d'abord. Le KV plein à réserve complète reste le défaut (tout contexte qui tenait sans exil
+        # garde son plan à l'identique). S'il exile des poids ou ne loge pas une séquence, on rejoue, dans l'ordre : sous
+        # l'anneau (réserve complète : gemma-4-31B à 16 384 et 27 648 y tiennent sans exil, plans inchangés), puis les
+        # deux mêmes plans SANS la réserve des tampons denses — elle ne sert qu'à des poids exilés ; comptée, elle exilait
+        # 2 MLP de gemma-4-31B à 65 536 un chargement sur deux. Un essai n'est retenu que s'il coûte moins ; le premier
+        # sans exil arrête la recherche.
+        if neuf is not None and cout(neuf) != (0, 0):
+            sous_anneau = bool(R and not neuf.kv_anneau)
+            suite = [(R, False)] if sous_anneau else []
+            if _RELACHE_TAMPONS:
+                suite += [(neuf.kv_anneau, True)] + ([(R, True)] if sous_anneau else [])
+            for anneau, relache in suite:
+                p, pl = essayer(anneau, relache)
+                if p is None or (relache and not p.sans_tampons_denses):
+                    continue                        # un exil a ramené la réserve complète : c'est l'essai précédent
+                if cout(p) < cout(neuf):
+                    if p.kv_anneau and not premier.kv_anneau:
+                        p.kv_anneau_motif = (f"le KV plein d'une séquence de {max_model_len} jetons "
+                                             + ("ne tient pas" if cout(premier)[0] else f"exile {cout(premier)[1]} MLP")
+                                             + f" ; sous l'anneau : {cout(p)[1]} exilé(s)")
+                    neuf, plafonds_choisis = p, pl
+                if cout(neuf) == (0, 0):
+                    break
+        spec.mlp_prefill_plafond, spec.prefill_morceau_plafond = plafonds_choisis
+        if neuf is not None and neuf.sans_tampons_denses:
+            neuf._dit = getattr(neuf, "_dit", "") + (
+                f"[acvram] réserve des tampons denses ({_tampons_denses(neuf) / 2**30:.2f} Gio) non comptée : le plan n'exile "
+                f"aucun poids dense, le pool n'existera pas\n")
+        if neuf is not None:
+            dit = getattr(neuf, "_dit", "")
+            print("".join(l + "\n" for l in annonces if l not in dit.splitlines()) + dit, end="", flush=True)
+            if neuf.embed_device == "cpu" and any(t.kind == "gpu" for t in neuf.tiers):
+                table = _octets_reels(manifest)[2]
+                print(f"[acvram] table de plongements ({table / 2**30:.2f} Gio) en RAM hôte "
+                      f"({'avant tout MLP : le plan débordait' if neuf.embed_exile else 'ACVRAM_EMBED=hote' if _EMBED_MODE in ('hote', 'hôte') else 'plan'}) ; "
+                      f"la tête de sortie reste sur {neuf.lm_head_device}", flush=True)
         # a5v : sans chauffe (Engine direct, eval), une invite au-delà du plafond passerait d un seul tenant dans une
         # réserve qui ne la couvre plus — le seuil est posé ici ; la chauffe le remplace par le tenu prouvé. None sinon.
         from . import attention as _att

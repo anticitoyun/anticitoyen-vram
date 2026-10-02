@@ -53,13 +53,16 @@ while [ $((SECONDS - t0)) -lt 780 ]; do
 done
 echo "# prêt=$rc après $((SECONDS - t0)) s"
 if [ "$rc" = 0 ]; then
-  code=$(curl -s -m 300 -o "$SORTIE/completion.json" -w '%{http_code}' -H 'Content-Type: application/json' \
+  t1=$SECONDS
+  code=$(curl -s -m 600 -o "$SORTIE/completion.json" -w '%{http_code}' -H 'Content-Type: application/json' \
     --data-binary "@$SORTIE/requete.json" "http://127.0.0.1:$PORT/v1/completions")
+  echo "# requête 1 : $((SECONDS - t1)) s (préfill + 32 jetons, mur)"          # levier 2 : temps d'une reprise sans cache
   # REQUETES=2 : la même requête une seconde fois sur le même serveur — témoin « reprise après le cache de préfixe »
   # (K/V de l'invite relus depuis le cache, int8 ici) : l'écart témoin dont un morceaux ne doit pas s'éloigner de > 2×.
   for i in $(seq 2 "${REQUETES:-1}"); do
-    curl -s -m 300 -o "$SORTIE/completion-$i.json" -H 'Content-Type: application/json' --data-binary "@$SORTIE/requete.json" \
-      "http://127.0.0.1:$PORT/v1/completions" >/dev/null; echo "# requête $i : $(wc -c < "$SORTIE/completion-$i.json") o (témoin reprise)"
+    t2=$SECONDS
+    curl -s -m 600 -o "$SORTIE/completion-$i.json" -H 'Content-Type: application/json' --data-binary "@$SORTIE/requete.json" \
+      "http://127.0.0.1:$PORT/v1/completions" >/dev/null; echo "# requête $i : $(wc -c < "$SORTIE/completion-$i.json") o (témoin reprise), $((SECONDS - t2)) s mur"
   done
   curl -s -m 10 -o "$SORTIE/metrics.json" "http://127.0.0.1:$PORT/metrics"
   echo "# complétion : HTTP $code ($(wc -c < "$SORTIE/completion.json") o — contenu NON lu, § 6) ; metrics $(wc -c < "$SORTIE/metrics.json") o"

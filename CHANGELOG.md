@@ -18,6 +18,26 @@
   contre fp64), et 2 réponses gloutonnes sur 6 divergent. Le défaut ne changera qu'après une garde de qualité (perplexité de
   décodage à 8 192 + 512 jetons).
 
+### gemma-4-31B à 65 536 jetons : cache KV en anneau, cible KV par séquence, plongements en RAM hôte (poste6, levier 2, g6r)
+
+* **Cache KV en anneau** (`ACVRAM_KV_ANNEAU`, défaut `auto` ; `1` toujours, `0` jamais) : les couches à fenêtre glissante
+  ne gardent que R blocs par séquence (gemma-4 : R = 67) — une séquence de 65 536 jetons coûte 5,45 Gio de cache au lieu de
+  30,2. Au bit du cache plein à 16 384 et 27 648 (carte, 01/10). Sous l'anneau le cache de préfixe est coupé et un lot à
+  images refusé. En `auto`, l'anneau n'est pris que si le plan au cache plein exile des poids ou ne loge pas une séquence :
+  un contexte qui tenait garde son plan à l'identique.
+* **Cible KV du planificateur** : sous l'anneau le cache se dimensionne en séquences × octets d'une séquence, et cède jusqu'au
+  plancher d'une séquence avant tout poids (avant : 9,44 Gio de cache et 39 MLP sur 60 en RAM hôte).
+* **Table de plongements en RAM hôte avant tout MLP** (`ACVRAM_EMBED`, défaut `auto` ; `hote`, `carte`) : quand le plan
+  déborde encore, la table bf16 (2,62 Gio sur gemma-4-31B) quitte la carte avant le premier MLP ; la tête de sortie garde sa
+  copie quantifiée. Mêmes ids table hôte / table sur la carte (carte, 8 192). Ligne de régime : `plongements=hôte|carte`.
+* **Réserve des tampons denses** : elle n'est plus comptée quand le plan n'exile aucun poids dense (le pool n'existe que
+  sous exil). Comptée, elle faisait exiler 2 MLP un chargement sur deux dès que la chauffe avait enregistré un excès.
+* **Mesuré sur carte (02/10)** : gemma-4-31B, 65 536 jetons tenus, 0 couche exilée, NOMINAL, 31 j/s sur une invite de
+  61 942 jetons (la veille : 39 exilées, 3,5 j/s) ; deux chargements consécutifs dans le même régime, mêmes ids.
+  `acvram-memoire/revue/poste6-g6r-stabilite-verdict-carte-02-10.md`.
+* **Corrigé en chemin** : l'appareil de calcul du modèle n'est plus celui de la table de plongements (tour de vision, chauffe
+  du contexte : avec une table en RAM hôte la chauffe ne jugeait plus la réserve de la carte).
+
 ## 0.7.17 (01/10/2026)
 
 ### Piles d'experts MoE construites au chargement, avant le KV (aym)
