@@ -44,6 +44,10 @@ port = 5011
 [moteurs.jan]
 present = false
 port = 1337
+[moteurs.colibri]
+present = false
+port = 8095
+chemin = ""                               # dossier du dépôt colibri cloné (contient c/coli)
 
 [extras]                                  # facultatif : ComfyUI, Open WebUI, contexte courant llama.cpp
 # comfy_start = ""

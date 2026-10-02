@@ -275,3 +275,23 @@ def test_la_reserve_du_plan_se_dit_terme_a_terme(carte, monkeypatch):
     assert ("tampons denses non comptés" in texte) == bool(plan.sans_tampons_denses)
     plan.sans_tampons_denses = False
     assert "tampons denses 1." in LD.reserve_prefill_texte(spec, 65536, man, plan) or "tampons denses 0." in LD.reserve_prefill_texte(spec, 65536, man, plan)
+
+
+def test_anneau_refuse_a_un_modele_a_puits(carte, monkeypatch, capsys):
+    """Fusion du 02/10 avec les puits d'attention de gpt-oss (evp) : les deux chemins sont gardés sans se croiser — un modèle
+    à puits ne prend jamais l'anneau (ni en auto, ni forcé), et sans puits rien ne change (tests ci-dessus)."""
+    man = _manifest()
+    assert not LD._a_des_puits(man)
+    man["tensors"]["model.layers.0.self_attn.sinks"] = {"format": "bf16", "shape": [32]}
+    assert LD._a_des_puits(man)
+    spec = _spec()
+    try:
+        plan = LD._plan_from_manifest(man, spec, max_model_len=65536)
+    except Exception:                                   # noqa: BLE001 — le plan plein peut refuser 65 536 : seul l'anneau compte ici
+        plan = None
+    assert plan is None or plan.kv_anneau == 0
+    monkeypatch.setattr(LD, "_KV_ANNEAU_MODE", "1")
+    plan1 = LD._plan_from_manifest(_manifest(), _spec(), max_model_len=4096)
+    spec1 = _spec()
+    assert LD._poser_anneau(spec1, plan1, man, lambda n: n, 4096, False) == 0 and spec1.kv_anneau == 0
+    assert "KV en anneau refusé" in capsys.readouterr().out

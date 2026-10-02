@@ -54,7 +54,7 @@ from .console import GALERIE, PAGE
 from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
 from .chat import Tokenizer, render_chat
-from .chat import extraire_appels, messages_pour_gabarit
+from .chat import FluxHarmony, extraire_appels, messages_pour_gabarit, normaliser_harmony
 from .chat import FiltreAppels, blocs_anthropic, messages_anthropic, outils_anthropic
 from .chat import ProcesseurVision, charger_processeur_vision, preparer_images
 from .protocol import (ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
@@ -402,6 +402,7 @@ def _avertir_logprobs_graphe() -> None:
 def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                model_name: str, served_paths: Optional[dict] = None) -> FastAPI:
     service = EngineService(engine, tokenizer, model_name)
+    harmony = bool(getattr(tokenizer, "harmony", False))     # gpt-oss : voir chat.FluxHarmony
     app = FastAPI(title="acvram", version="0.1.0",
                   description="anticitoyen VRAM/RAM — inférence compatible OpenAI")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
@@ -1173,7 +1174,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             return StreamingResponse(
                 _stream_chat(service, request_id, q, model_name, len(prompt_ids),
                              bool((req.stream_options or {}).get("include_usage")),
-                             bool(req.tools)),
+                             bool(req.tools), harmony),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -1183,10 +1184,10 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             n_out = out.completion_tokens
             if out.finished:
                 reason = out.finish_reason or "stop"
+        message, reason = _choix_final(text, reason, bool(req.tools), harmony)
         return ChatCompletionResponse(
             model=model_name,
-            choices=[ChatChoice(message=_message_finale(text, bool(req.tools)),
-                                finish_reason=_raison_finale(text, reason, bool(req.tools)))],
+            choices=[ChatChoice(message=message, finish_reason=reason)],
             usage=Usage(prompt_tokens=len(prompt_ids), completion_tokens=n_out,
                         total_tokens=len(prompt_ids) + n_out))
 
@@ -1252,9 +1253,15 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                           "content_block": {"type": "text", "text": ""}})
                 n_out, raison = 0, "end_turn"
                 filtre = FiltreAppels() if outils else None
+                # gpt-oss : le raisonnement (canal analysis) n'est pas rendu sur cette route — un bloc
+                # « thinking » exige une signature que Claude Code renvoie et que nous ne savons pas produire
+                fh = FluxHarmony() if harmony else None
                 async for out in service.collect(request_id, q):
                     n_out = out.completion_tokens
-                    delta = filtre.pousser(out.text_delta) if filtre else out.text_delta
+                    brut = out.text_delta
+                    if fh:
+                        brut = fh.pousser(brut)[1] + (fh.finir()[1] if out.finished else "")
+                    delta = filtre.pousser(brut) if filtre else brut
                     if delta:
                         yield ev("content_block_delta",
                                  {"type": "content_block_delta", "index": 0,
@@ -1298,6 +1305,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             n_out = out.completion_tokens
             if out.finished:
                 raison = stop_reason(out.finish_reason or "stop")
+        if harmony:
+            text = normaliser_harmony(text)[1]
         blocs, a_appel = blocs_anthropic(text, outils)
         if a_appel:
             raison = "tool_use"
@@ -1492,9 +1501,21 @@ def _raison_finale(text: str, reason: str, outils: bool) -> str:
     return "tool_calls" if outils and extraire_appels(text)[1] else reason
 
 
+def _choix_final(text: str, reason: str, outils: bool, harmony: bool = False) -> tuple[ChoiceMessage, str]:
+    """Réponse hors flux : message (raisonnement harmony à part) et finish_reason."""
+    raisonnement = ""
+    if harmony:
+        raisonnement, text = normaliser_harmony(text)
+    message = _message_finale(text, outils)
+    if raisonnement:
+        message.reasoning_content = raisonnement
+    return message, _raison_finale(text, reason, outils)
+
+
 async def _stream_chat(service: EngineService, request_id: str,
                        q: asyncio.Queue, model: str, prompt_tokens: int,
-                       include_usage: bool, outils: bool = False) -> AsyncIterator[str]:
+                       include_usage: bool, outils: bool = False,
+                       harmony: bool = False) -> AsyncIterator[str]:
     cid = new_id("chatcmpl")
     first = ChatCompletionChunk(
         id=cid, model=model,
@@ -1507,6 +1528,7 @@ async def _stream_chat(service: EngineService, request_id: str,
     # de savoir s'il ouvre la balise.
     total, pend, retenu = "", "", False
     premier_jeton = None
+    fh = FluxHarmony() if harmony else None
     try:
         async for out in service.collect(request_id, q):
             n_out = out.completion_tokens
@@ -1518,14 +1540,25 @@ async def _stream_chat(service: EngineService, request_id: str,
                 premier_jeton = _dt.datetime.now()
                 print(f"[mesure] {cid} premier jeton "
                       f"{premier_jeton.strftime('%H:%M:%S.%f')[:-3]}", flush=True)
-            if out.text_delta:
-                total += out.text_delta
+            texte_delta = out.text_delta
+            if fh:
+                raison_h, texte_delta = fh.pousser(texte_delta)
+                if out.finished:
+                    r2, t2 = fh.finir()
+                    raison_h, texte_delta = raison_h + r2, texte_delta + t2
+                if raison_h:
+                    chunk = ChatCompletionChunk(
+                        id=cid, model=model,
+                        choices=[ChunkChoice(delta=DeltaMessage(reasoning_content=raison_h))])
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+            if texte_delta:
+                total += texte_delta
                 if not outils:
-                    delta = out.text_delta
+                    delta = texte_delta
                 elif retenu:
                     delta = ""
                 else:
-                    pend += out.text_delta
+                    pend += texte_delta
                     if "<tool_call>" in pend:
                         retenu = True
                         delta, pend = pend[:pend.index("<tool_call>")], ""

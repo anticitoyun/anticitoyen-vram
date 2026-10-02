@@ -575,6 +575,14 @@ def load_model(path: str, plan: Optional[Plan] = None,
                       f"({source})", flush=True)
 
             experts = []
+            # evp (gpt-oss) : SwiGLU bornée (constantes de transformers : alpha 1,702, limit 7 — une autre borne n'est
+            # pas celle que le moteur calcule, refus nommé), biais lus par `_linear` (`….bias` à côté du poids)
+            act_experts = "silu"
+            if spec.swiglu_limit:
+                from .attention import _OSS_LIMIT
+                if spec.swiglu_limit != _OSS_LIMIT:
+                    raise ValueError(f"swiglu_limit={spec.swiglu_limit} : seul {_OSS_LIMIT} (gpt-oss) est servi")
+                act_experts = "swiglu_oss"
             for e in range(n_experts):
                 # `residents is None` : comportement d'aujourd'hui, uniforme
                 # (`elin` retombe sur `streamed_mlp`). Sinon, CHAQUE expert
@@ -584,7 +592,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 experts.append(MLP(
                     elin(f"mlp.experts.{e}.gate_proj.weight", streamed=s),
                     elin(f"mlp.experts.{e}.up_proj.weight", streamed=s),
-                    elin(f"mlp.experts.{e}.down_proj.weight", streamed=s)))
+                    elin(f"mlp.experts.{e}.down_proj.weight", streamed=s), act=act_experts))
             shared = None
             shared_gate = None
             if manifest["tensors"].get(p + "mlp.shared_expert.gate_proj.weight"):
@@ -969,6 +977,11 @@ def load_model(path: str, plan: Optional[Plan] = None,
             layers.append(DecoderLayerGDN(i, gdn, mlp_gdn, in_norm, post_norm, d, mlp_device=mlp_dev))
             continue
 
+        # evp (gpt-oss) : fenêtre glissante sur les couches `sliding_attention` et puits par tête. Ce chemin générique ne
+        # posait aucune fenêtre : seul un modèle à puits (gpt-oss) la reçoit ici — les autres restent au bit d'avant.
+        puits = manifest["tensors"].get(p + "self_attn.sinks")
+        fenetre = (spec.sliding_window if (puits and spec.layer_types and i < len(spec.layer_types)
+                                           and spec.layer_types[i] == "sliding_attention") else 0)
         attn = Attention(
             spec,
             lin("self_attn.q_proj.weight", streamed_attn),
@@ -978,7 +991,10 @@ def load_model(path: str, plan: Optional[Plan] = None,
             rope,
             norm_opt("self_attn.q_norm.weight"),
             norm_opt("self_attn.k_norm.weight"),
-            output_gate=spec.attn_output_gate)
+            output_gate=spec.attn_output_gate,
+            window=fenetre)
+        if puits:
+            attn.sinks = reader.get(p + "self_attn.sinks").to(dtype).to(d)
 
         mlp: torch.nn.Module = faire_mlp()
 
@@ -1583,6 +1599,13 @@ _KV_ANNEAU_MODE = (os.environ.get("ACVRAM_KV_ANNEAU") or "auto").strip().lower()
 _EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
 
 
+def _a_des_puits(manifest: Optional[dict]) -> bool:
+    """Modèle à puits d'attention (gpt-oss, `self_attn.sinks`) : ses couches à fenêtre passent par `attention_puits` /
+    `decode_attention_puits_fixe`, que l'anneau n'a jamais joués — l'anneau lui est refusé (fusion du 02/10 : les deux
+    chemins gardés, sans les croiser)."""
+    return any(nom.endswith("self_attn.sinks") for nom in (manifest or {}).get("tensors", {}))
+
+
 def _anneau_couche(spec: ModelSpec, i: int) -> int:
     """R si la couche ``i`` est à fenêtre glissante et que l'anneau est posé (`spec.kv_anneau`), sinon 0."""
     R = int(getattr(spec, "kv_anneau", 0) or 0)
@@ -1603,6 +1626,11 @@ def _poser_anneau(spec: ModelSpec, plan: Plan, manifest: dict, dev, max_model_le
     R = spec.anneau_R()
     spec.kv_anneau = 0
     if not R or mode in ("0", "off", "non"):
+        return 0
+    if _a_des_puits(manifest):
+        if mode == "1":
+            print("[acvram] KV en anneau refusé (ACVRAM_KV_ANNEAU=1) : modèle à puits d'attention (gpt-oss), chemin non couvert",
+                  flush=True)
         return 0
     motif = "ACVRAM_KV_ANNEAU=1"
     if mode != "1" and int(getattr(plan, "kv_anneau", 0) or 0):
@@ -2590,7 +2618,8 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                 annonces.extend(l for l in p._dit.splitlines()
                                 if l.startswith("[acvram] réserve de préfill") and l not in annonces)
             return p, (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
-        R = spec.anneau_R() if (max_model_len and _KV_ANNEAU_MODE not in ("0", "off", "non")) else 0
+        R = spec.anneau_R() if (max_model_len and _KV_ANNEAU_MODE not in ("0", "off", "non")
+                                and not _a_des_puits(manifest)) else 0
         premier, plafonds_choisis = essayer(R if (R and _KV_ANNEAU_MODE == "1") else 0, False)
         neuf = premier
         # g6r : poids résidents d'abord. Le KV plein à réserve complète reste le défaut (tout contexte qui tenait sans exil

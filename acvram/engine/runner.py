@@ -1217,6 +1217,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     ids.add(v)
                 elif isinstance(v, list):
                     ids.update(int(x) for x in v if isinstance(x, int))
+        # evp (gpt-oss) : en harmony, <|end|> ferme un MESSAGE (l'analyse), pas le tour — un manifeste converti avant le
+        # correctif le porte dans ses fins (FINS_DE_TOUR) et la génération s'arrêtait avant le canal final ou l'appel.
+        if self.tokenizer is not None:
+            ids -= set(getattr(self.tokenizer, "fins_de_message", lambda: [])())
         return ids
 
     def _positions_images(self, seq: "Sequence") -> None:

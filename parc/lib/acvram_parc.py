@@ -27,8 +27,9 @@ MOTEURS_CONNUS = {
     "tabby":    ("TabbyAPI",        5000, "/v1/model",  "CLE_TABBY",    ""),
     "yals":     ("YALS",            5011, "/v1/models", "CLE_YALS",     ""),
     "jan":      ("Jan",             1337, "/v1/models", "CLE_JAN",      ""),
+    "colibri":  ("colibrì",         8095, "/v1/models", "CLE_COLIBRI",  ""),
 }
-ORDRE_MOTEUR = {"acvram": 0, "vllm": 1, "rapide": 2, "llamacpp": 3, "tabby": 4, "yals": 5, "jan": 6}
+ORDRE_MOTEUR = {"acvram": 0, "vllm": 1, "rapide": 2, "llamacpp": 3, "tabby": 4, "yals": 5, "jan": 6, "colibri": 7}
 
 DEFAUTS = {
     "chemins": {

@@ -198,6 +198,14 @@ ETOILE=$("$PY" "$ICI/outils/qualite-e50-bareme.py" "$S_COMPOSITE" "$ACC_MMLU" "$
 
 echo "S=$S_COMPOSITE mmlu=$ACC_MMLU gsm8k=$ACC_GSM8K humaneval=$PASS_HE -> $ETOILE"
 
+# Chemins des échantillons par tâche (§4, McNemar item par item côté campagne-qualite-e50.py —
+# cette ligne est la seule chose que campagne-qualite-e50.py lit pour reconstruire le détail).
+for T in mmlu_e50_hsm mmlu_e50_law mmlu_e50_ccs gsm8k_e50; do
+  P=$(find "$SORTIE/mmlu_gsm8k" -name "samples_${T}_*.jsonl" | head -1)
+  echo "SAMPLES $T: ${P:-?}"
+done
+echo "SAMPLES humaneval_e50: $SAMPLES_HE"
+
 HEAD=$(git -C "$ICI" rev-parse --short HEAD)
 DATE_J=$(date +%d/%m)
 TSV_E50=${ACVRAM_E50_TSV:-$ICI/outils/qualite-e50.tsv}   # surchargeable par les tests (faux serveur)

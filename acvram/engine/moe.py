@@ -92,7 +92,7 @@ class MoEBlock(nn.Module):
         # activation des experts : le chemin groupé la reproduit (SiLU par
         # défaut, GELU-tanh pour Gemma 4)
         a = getattr(experts[0], "act", "silu") if experts else "silu"
-        self.act = "gelu_tanh" if str(a).startswith("gelu") else "silu"
+        self.act = "gelu_tanh" if str(a).startswith("gelu") else ("swiglu_oss" if a == "swiglu_oss" else "silu")
         # Histogramme de routage par expert : voir _compter_routage. None tant
         # qu'aucun pas ne l'a réservé (aucun forward encore, ou couche dense).
         self._usage_routage: Optional[torch.Tensor] = None
@@ -199,6 +199,12 @@ class MoEBlock(nn.Module):
     def _try_build_stacks(self) -> bool:
         from ..quant.int4 import INT4Tensor
         from ..quant.nvfp4 import NVFP4Tensor
+        if self.act == "swiglu_oss":
+            # evp (gpt-oss) : biais gate_up/down et SwiGLU bornée — les noyaux groupés (Marlin, MMA, GEMV de pile) ne
+            # connaissent ni l'un ni l'autre. Refus NOMMÉ : la boucle par expert (MLP avec biais) sert, au bit de la
+            # référence torch ; un chemin groupé avec biais viendra après la justesse, mesuré.
+            self.__dict__["_refus_pile"] = "gpt-oss : biais d'experts et SwiGLU bornée (boucle par expert)"
+            return False
 
         # « pile d'experts hétérogène » recouvrait trois causes distinctes
         # sous un seul message (graphs.py) : impossible de savoir, sans
@@ -1538,7 +1544,9 @@ class MoEBlock(nn.Module):
             w = self.router.qweight.weight.to(dtype_voulu)
             cache[dtype_voulu] = w
         if w is not None:
-            return F.linear(x.to(dtype_voulu), w)
+            # evp : routeur à biais (gpt-oss) — un routeur sans biais (tous les autres) garde l'appel d'avant, au bit
+            b = getattr(self.router, "bias", None)
+            return F.linear(x.to(dtype_voulu), w, None if b is None else b.to(dtype_voulu))
         return self.router(x).to(dtype_voulu)
 
     def _routeur_compact(self, x: torch.Tensor):

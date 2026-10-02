@@ -264,6 +264,8 @@ class CompletionRequest(_SamplingFields):
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
     content: Optional[str] = ""
+    # gpt-oss (harmony) : canal analysis, rendu à part comme le fait vLLM ; None pour les autres modèles
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[list[dict[str, Any]]] = None
 
 
@@ -286,6 +288,7 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[list[dict[str, Any]]] = None
 
 
