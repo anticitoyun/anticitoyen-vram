@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# colibri-serveur — sert un conteneur colibri (JustVugg/colibri, bd anticitoyen-vram-076) sur
+# http://127.0.0.1:PORT/v1 via `coli serve`, pour les MoE trop gros pour acvram (GLM-5.3-Flash,
+# DeepSeek V4 Flash…). Sur le modèle de llamacpp-serveur/vllm-serveur : un seul gros moteur à la
+# fois, verrou carte.sh, garde carte_rendue. Construction (make qwen36 CUDA=1 CUDA_ARCH=sm_120)
+# séparée : voir outils/construire-colibri.sh — ce script ne compile rien.
+# Usage : colibri-serveur <dossier-modele> [famille]
+#   dossier-modele : conteneur colibri (config.json + poids int4), ex. ~/Models/qwen36_i4_gs64
+#   famille        : binaire engine à utiliser (défaut : qwen36, seule famille construite ici)
+#   dossier colibri (dépôt cloné) : [moteurs.colibri] chemin dans parc.toml, ou COLIBRI_DIR
+set -uo pipefail
+
+PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
+_ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
+set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
+
+c_d=$'\e[2m'; c_v=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_d=''; c_v=''; c_r=''; c_0=''; }
+err() { printf '%s%s%s\n' "$c_r" "$*" "$c_0" >&2; }
+
+[ $# -ge 1 ] || { err "Usage : colibri-serveur <dossier-modele> [famille]"; exit 1; }
+MODELE="$1"; FAMILLE="${2:-qwen36}"
+[ -d "$MODELE" ] || { err "dossier-modele introuvable : $MODELE"; exit 1; }
+
+COLIBRI_DIR="${COLIBRI_DIR:-${PARC_CHEMIN_COLIBRI:-/mnt/AI_GENERATOR/colibri}}"
+COLI="$COLIBRI_DIR/c/coli"
+BIN="$COLIBRI_DIR/c/$FAMILLE"
+[ -x "$COLI" ] || { err "coli introuvable : $COLI (dossier colibri inconnu : [moteurs.colibri] chemin dans parc.toml, ou COLIBRI_DIR)"; exit 1; }
+[ -x "$BIN" ]  || { err "binaire $FAMILLE absent : $BIN (construire d'abord : outils/construire-colibri.sh $FAMILLE)"; exit 1; }
+
+PORT="${PARC_PORT_COLIBRI:-8095}"
+[ -r "$HOME/.config/ia-secrets.env" ] && . "$HOME/.config/ia-secrets.env"
+CLE="${CLE_COLIBRI:-${PARC_CLE_COLIBRI:-colibri-local}}"
+mkdir -p "$COLIBRI_DIR"
+
+_remplaces=()   # PID arrêtés ici : la garde de carte les attend morts
+# un seul gros moteur à la fois : stopper vLLM et llama.cpp s'ils tournent (même règle que les deux autres lanceurs)
+if [ -f /mnt/AI_GENERATOR/vLLM/serveur.pid ]; then
+  _remplaces+=("$(cat /mnt/AI_GENERATOR/vLLM/serveur.pid)")
+  kill "${_remplaces[-1]}" 2>/dev/null && sleep 6
+fi
+if [ -f /mnt/AI_GENERATOR/llamacpp/serveur.pid ]; then
+  _remplaces+=("$(cat /mnt/AI_GENERATOR/llamacpp/serveur.pid)")
+  kill "${_remplaces[-1]}" 2>/dev/null && sleep 3
+fi
+
+# arrêt de l'instance colibri précédente (par PID enregistré, jamais pkill -f)
+if [ -f "$COLIBRI_DIR/serveur.pid" ]; then
+  ancien=$(cat "$COLIBRI_DIR/serveur.pid"); _remplaces+=("$ancien")
+  kill "$ancien" 2>/dev/null && sleep 3
+  kill -9 "$ancien" 2>/dev/null
+fi
+
+# filet de sécurité : tuer le vrai propriétaire du port (pid-file parfois faux)
+pport=$(ss -tlnp 2>/dev/null | grep "127.0.0.1:$PORT" | grep -oP 'pid=\K[0-9]+' | head -1)
+[ -n "$pport" ] && { _remplaces+=("$pport"); kill "$pport" 2>/dev/null; sleep 4; kill -9 "$pport" 2>/dev/null; }
+
+# libère la VRAM des serveurs orphelins (même garde que llamacpp-serveur/vllm-serveur)
+[ -x "$HOME/.local/bin/liberer-vram" ] && "$HOME/.local/bin/liberer-vram" >/dev/null 2>&1
+
+# Garde partagée des lanceurs : parc/lib/carte_rendue.py (ne tue rien).
+_carte_rendue=${PARC_CARTE_RENDUE:-$(dirname "$(readlink -f "$0")")/../lib/carte_rendue.py}
+[ -f "$_carte_rendue" ] || _carte_rendue=/usr/share/acvram-parc/lib/carte_rendue.py
+if [ -f "$_carte_rendue" ]; then
+  python3 "$_carte_rendue" --nom colibri --remplace "${_remplaces[*]:-}" --cartes "0" || exit 1
+else
+  err "avertissement : $_carte_rendue introuvable — démarrage sans attendre la carte"
+fi
+
+printf '%sDémarrage coli serve : %s (%s, port %s)%s\n' "$c_d" "$(basename "$MODELE")" "$FAMILLE" "$PORT" "$c_0"
+CMD=(env COLI_MODEL="$MODELE" "$COLI" serve --host 127.0.0.1 --port "$PORT" --api-key "$CLE" --gpu auto)
+
+# Le serveur PREND LE VERROU carte.sh (mode service) : sinon une mesure le croit libre (REGLES § 2).
+# Repli sans verrou, avec avertissement, si carte.sh est introuvable.
+_ici=$(dirname "$(readlink -f "$0")")
+CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
+if [ -x "$CARTE_SH" ]; then
+  srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="colibri-$FAMILLE-$(basename "$MODELE")" ACVRAM_SERVICE_LOG="$COLIBRI_DIR/serveur.log" \
+            ACVRAM_CARTE="${ACVRAM_CARTE:-0}" \
+            "$CARTE_SH" "${CMD[@]}") \
+      || { err "carte.sh a refuse le verrou de la carte (voir ci-dessus)"; exit 1; }
+  echo "$srv_pid" > "$COLIBRI_DIR/serveur.pid"
+else
+  err "avertissement : $CARTE_SH introuvable — serveur lance SANS verrou carte"
+  setsid nohup "${CMD[@]}" >> "$COLIBRI_DIR/serveur.log" 2>&1 < /dev/null &
+  echo $! > "$COLIBRI_DIR/serveur.pid"
+fi
+
+for _ in $(seq 1 450); do
+  if curl -s -m 2 -H "Authorization: Bearer $CLE" "http://127.0.0.1:$PORT/v1/models" 2>/dev/null | grep -q '"id"'; then
+    printf '%scoli serve prêt sur 127.0.0.1:%s (%s)%s\n' "$c_v" "$PORT" "$(basename "$MODELE")" "$c_0"
+    exit 0
+  fi
+  kill -0 "$(cat "$COLIBRI_DIR/serveur.pid")" 2>/dev/null || { err "coli serve mort au démarrage (voir $COLIBRI_DIR/serveur.log)"; exit 1; }
+  sleep 2
+done
+err "coli serve n'a pas ouvert le port $PORT en 900 s (voir $COLIBRI_DIR/serveur.log)"
+exit 1
