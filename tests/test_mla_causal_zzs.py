@@ -72,9 +72,9 @@ def test_chaque_morceau_ne_traite_que_les_cles_vues(monkeypatch, _regime_servi):
         x0_attendu = [256, 300] if causal else [300, 300]
         assert vues["thr,sr->ths"] == x0_attendu + attendu, (causal, vues)
         assert vues["ths,sr->thr"] == x0_attendu + attendu, (causal, vues)
-    assert M.regime_causal_texte() == "mla_causal=0(temoin)"
-    _bras(monkeypatch, True)
     assert M.regime_causal_texte() == ""
+    _bras(monkeypatch, True)
+    assert M.regime_causal_texte() == "mla_causal=1(opt-in)"
 
 
 def _ecarts(monkeypatch, dev, dt, t0, t, formes, decalage=None):
@@ -147,3 +147,19 @@ def test_e2_sous_temoin_fp64_formes_kimi_sur_carte(monkeypatch, _regime_servi):
     dBA, dBref, dAref, ys = _ecarts(monkeypatch, "cuda", torch.float32, 3000, 1000, (2304, 32, 128, 64, 512, 128))
     assert dAref > 0
     assert dBref <= 2 * dAref and dBA <= 2 * dAref, (dBA, dBref, dAref)
+
+
+def test_la_troncature_est_opt_in_defaut_off():
+    """Verdict du 02/10 (chef) : la troncature change la sortie (E1 au bit faux, 2 réponses gloutonnes sur 6 divergent) ;
+    elle reste OPT-IN tant que la garde de PPL de décodage à 8 192 + 512 n'est pas passée. Casse si le défaut bascule —
+    dans le registre, dans le module, ou dans un processus neuf sans aucune variable ACVRAM_*."""
+    import os
+    import subprocess
+    import sys
+    from acvram import regime
+    assert next(v for v in regime.VARIABLES if v.nom == "MLA_CAUSAL").defaut == "0"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ACVRAM_")}
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    out = subprocess.run([sys.executable, "-c", "from acvram.engine import mla; print(mla._MLA_CAUSAL, repr(mla.regime_causal_texte()))"],
+                         env=env, capture_output=True, text=True, timeout=180)
+    assert out.stdout.strip().splitlines()[-1] == "False ''", out.stdout[-500:] + out.stderr[-500:]

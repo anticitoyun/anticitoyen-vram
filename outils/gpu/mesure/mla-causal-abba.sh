@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zzs : ABBA en service sur Kimi-Linear-35B, A = ACVRAM_MLA_CAUSAL=0 (témoin), B = défaut, UN arbre figé, UNE prise.
+# zzs : ABBA en service sur Kimi-Linear-35B, A = défaut (toutes les clés), B = ACVRAM_MLA_CAUSAL=1 (opt-in), UN arbre, UNE prise.
 #   ACVRAM_POSTE=poste5 ACVRAM_NOM=poste5-zzs ACVRAM_TYPE=mesure ACVRAM_DUREE_MAX=2400 ATTENDU=<HEAD> \
 #     outils/carte.sh bash outils/gpu/mesure/mla-causal-abba.sh
 # Étape 0 : tests/test_mla_causal_zzs.py sur carte (E1(a) au bit, E2 fp32, bras cassant) ; rouge → arrêt, carte rendue.
@@ -54,7 +54,7 @@ else
 fi
 
 for bras in A1 B1 B2 A2; do
-    if [ "${bras:0:1}" = A ]; then interrupteur=(env ACVRAM_MLA_CAUSAL=0); else interrupteur=(env -u ACVRAM_MLA_CAUSAL); fi
+    if [ "${bras:0:1}" = A ]; then interrupteur=(env -u ACVRAM_MLA_CAUSAL); else interrupteur=(env ACVRAM_MLA_CAUSAL=1); fi
     echo "== $(date +%T) bras $bras (${interrupteur[*]})"
     if [ -n "${MLA_ABBA_LANCEUR:-}" ]; then
         # shellcheck disable=SC2086
@@ -73,12 +73,12 @@ done
 
 if [ -z "${MLA_ABBA_LANCEUR:-}" ] && [ "${NSYS:-1}" != 0 ]; then
     for v in A B; do
-        if [ $v = A ]; then interrupteur=(env ACVRAM_MLA_CAUSAL=0); else interrupteur=(env -u ACVRAM_MLA_CAUSAL); fi
+        if [ $v = A ]; then interrupteur=(env -u ACVRAM_MLA_CAUSAL); else interrupteur=(env ACVRAM_MLA_CAUSAL=1); fi
         echo "== $(date +%T) nsys p81 $v"
         "${interrupteur[@]}" SORTIE="$O/nsys-$v" ATTENDU="$ATTENDU" bash "$ICI/nsys-kda-p81.sh" | tail -3
     done
     # preuve que l'interrupteur a pris dans le pilote nsys (sa ligne de régime), comme /metrics pour les serveurs
-    grep -q 'mla_causal=0(temoin)' "$O/nsys-A/pilote.log" && ! grep -q 'mla_causal=0(temoin)' "$O/nsys-B/pilote.log" \
+    grep -q 'mla_causal=1(opt-in)' "$O/nsys-B/pilote.log" && ! grep -q 'mla_causal=1(opt-in)' "$O/nsys-A/pilote.log" \
         || echo "AVERTISSEMENT : nsys A/B — l'interrupteur n'a pas pris comme attendu (voir pilote.log), traces non comparables"
 fi
 { date +%FT%T; $SMI --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; } > "$O/apres.txt"

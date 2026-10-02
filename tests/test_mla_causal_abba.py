@@ -23,9 +23,9 @@ FAUX = textwrap.dedent('''
     import json, os, sys, time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     port, nom = int(sys.argv[1]), sys.argv[2]
-    temoin = os.environ.get("ACVRAM_MLA_CAUSAL", "1") == "0"
-    regime = ("[régime] ACVRAM_MLA_CAUSAL=0" if temoin else "[régime] défaut") + " extension=oui torch=faux" \\
-        + (" mla_causal=0(temoin)" if temoin else "") + " mla_prep=grille"
+    optin = os.environ.get("ACVRAM_MLA_CAUSAL", "0") == "1"
+    regime = ("[régime] ACVRAM_MLA_CAUSAL=1" if optin else "[régime] défaut") + " extension=oui torch=faux" \\
+        + (" mla_causal=1(opt-in)" if optin else "") + " mla_prep=grille"
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a): pass
         def _json(self, d):
@@ -39,7 +39,7 @@ FAUX = textwrap.dedent('''
         def do_POST(self):
             req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             p = req["prompt"]
-            time.sleep(len(p) * 4e-6 * (1.0 if temoin else 0.6))
+            time.sleep(len(p) * 4e-6 * (0.6 if optin else 1.0))
             n, s = req["max_tokens"], sum(p)
             if len(p) > int(os.environ.get("FAUX_REFUS", "99999")):
                 n = 0                                    # le vrai serveur refuse sans erreur HTTP : 0 jeton
@@ -61,8 +61,8 @@ def _port():
 
 
 def _bras(temoin, ms8, ms32, jetons=None, lp=None):
-    regime = ("[régime] ACVRAM_MLA_CAUSAL=0" if temoin else "[régime] défaut") + " torch=x" \
-        + (" mla_causal=0(temoin)" if temoin else "")
+    regime = ("[régime] défaut" if temoin else "[régime] ACVRAM_MLA_CAUSAL=1") + " torch=x" \
+        + ("" if temoin else " mla_causal=1(opt-in)")
     m = {}
     for L, ms in (("8192", ms8), ("16384", ms32)):
         m[L] = [{"k": k, "mur_prefill_ms": ms + k * 0.01, "jetons": list(jetons or ["a", "b", "c"]),
@@ -96,17 +96,17 @@ def test_comparer_faux_si_le_gain_a_16k_est_sous_15_pourcent(tmp_path, capsys):
     assert rc == 9 and "FAUX (gain < 15 %)" in out, out
 
 
-def test_comparer_refuse_un_a_sans_temoin_ou_un_b_avec(tmp_path, capsys):
+def test_comparer_refuse_un_b_sans_opt_in_ou_un_a_avec(tmp_path, capsys):
     a1, b1, b2, a2 = _quatre()
     rc, out = _comparer(tmp_path, a1, b1, b2, _bras(False, 1400.0, 16000.0), capsys)
-    assert rc == 5 and "A2 sans" in out, out
+    assert rc == 5 and "A2 porte" in out and "bras inversés" in out, out
     rc, out = _comparer(tmp_path, a1, _bras(True, 1100.0, 9500.0), b2, a2, capsys)
-    assert rc == 5 and "bras inversés" in out, out
+    assert rc == 5 and "B1 sans" in out, out
 
 
 def test_comparer_refuse_un_regime_qui_differe_par_autre_chose(tmp_path, capsys):
     a1, b1, b2, a2 = _quatre()
-    b2["regime"] = b2["regime"].replace("défaut", "ACVRAM_GLUE_COMPACT=0")
+    a2["regime"] = a2["regime"].replace("défaut", "ACVRAM_GLUE_COMPACT=0")
     rc, out = _comparer(tmp_path, a1, b1, b2, a2, capsys)
     assert rc == 5 and "autre chose que mla_causal" in out, out
 
@@ -168,11 +168,11 @@ def test_abba_de_bout_en_bout_contre_le_faux_serveur(tmp_path):
     sortie = out.read_text()
     assert rc == 0, (rc, sortie[-2000:], err.read_text()[-2000:])
     assert "étape 0 et nsys OMIS" in sortie
-    assert "RÉGIMES : A = B + « mla_causal=0(temoin) »" in sortie
+    assert "RÉGIMES : B = A + « mla_causal=1(opt-in) »" in sortie
     assert "TÉMOINS A1 = A2 et B1 = B2" in sortie and "E1(b) : jetons ET logprobs IDENTIQUES" in sortie
     for bras in ("A1", "B1", "B2", "A2"):
         d = json.loads((tmp_path / "o" / f"{bras}.json").read_text())
-        assert (abba.TEMOIN in d["regime"]) == (bras[0] == "A"), d["regime"]
+        assert (abba.MARQUE in d["regime"]) == (bras[0] == "B"), d["regime"]
         assert [len(s["jetons"]) for L in d["mesures"] for s in d["mesures"][L]] == [abba.N_GEN, abba.N_GEN]
     # le coût suit l'interrupteur jusque dans le serveur : B (0,6 × A) plus court que A aux deux longueurs
     assert sortie.count("mur du préfill : A") == 2
