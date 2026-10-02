@@ -37,3 +37,34 @@ au témoin ; le facteur 10 de Devstral ne s'y reproduit pas → il vient de ce q
 sur ~7 projections × 40 couches × toutes les lignes), à confirmer par une micro-prise de 30 s (un `F.linear` bf16 de la
 couche 0 de Devstral à M = 7 865 contre 4 096 + 3 769). Si G est faux (rapport ≥ 5 à sec), H4 n'est pas nécessaire et la
 cause est lisible sur processeur — je la nommerai.
+
+## Résultats à sec (02/10 15:26, APRÈS le scellé ; rien ci-dessus n'a été retouché)
+
+`scratchpad/poste6-s1-dense/bissection.py`, jouet de la CI sur processeur, 20 séquences de 400 jetons, 8 s, carte tenue en
+`service` par poste2 (pas une mesure).
+
+| | prédit | à sec | |
+|---|---|---|---|
+| H1 SDPA selon la longueur des clés | premier écart = sortie du SDPA, q/k/v égaux | **tous les premiers écarts sont une sortie de SDPA à q, k, v égaux au bit** : [128, 256, 400] → 13 cas sur 20 (couche 0 : 5, couche 1 : 4, couche 2 : 3, couche 3 : 1), 7 sans aucun écart ; [200, 400] → 3 sur 20 | confirmée |
+| H2 K/V transitoires différents | écartée | couche 0 : q, k, v égaux au bit 20/20 dans les trois découpages | écartée |
+| H3 masque bas-droite | écartée | un seul morceau [400] : 0 écart sur 20 | écartée |
+| H4 GEMM selon M | invisible à sec | MLP à entrée égale et sortie différente : 0 cas ; projections égales | invisible, comme prévu |
+| G rapport morceaux / témoin | 0,3-1,5 | écart des logprobs (top-10, dernière position) : morceaux médiane 0, max 0,0028 (14 nuls sur 20) ; témoin reprise médiane 0,0038, max 0,0057 → **rapport ≤ 0,5** | sous la fourchette (le sens était le bon, pas la valeur) ; le seuil « ≥ 5 » n'est pas atteint |
+| P propagation | croît ≥ 1,5 × | sortie SDPA : 0,0001 → 0,0020 → 0,0039 → 0,0039 par couche ; entrée du MLP : 0,0039 → 0,031 | tenu |
+
+**Lecture.** Sur processeur, la seule cause qui existe est H1 — `acvram/engine/layers.py:1063`, `attention()` : le SDPA
+réduit les clés selon la longueur de l'appel — et elle pèse au plus LA MOITIÉ du témoin reprise. Le facteur 10,6 de Devstral
+sur carte ne s'y reproduit pas : il vient de ce que seule la carte ajoute. Deux candidats, que le processeur ne sépare pas :
+
+* **H4, la GEMM cuBLAS bf16 qui dépend de M** — mesurée sur carte le 27/09 (276i : `k_proj` couche 0, 1 ulp sur 38 % des
+  éléments entre deux M). Les morceaux changent M (7 865 → 4 096 + 3 769) pour les sept produits de chacune des 40 couches,
+  sur toutes les lignes : `kernels/__init__.py:1352` (`F.linear(xr, W…)` du chemin Marlin dépaqueté) et le MLP
+  (`attention.py`, `MLP._forward_un`). La reprise, elle, ne recalcule qu'une dizaine de lignes à M inchangé.
+* **H1 sur carte** : le SDPA « flash » de la carte peut dépendre de la longueur plus fortement que celui du processeur.
+
+**Ce qui trancherait** (≈ 1 min de carte, une prise, à écrire au scellé avant) : avec les poids de la couche 0 de Devstral,
+(i) `F.linear` de `q_proj` et `gate_proj` à M = 7 865 contre 4 096 + 3 769 — part des éléments qui diffèrent ; (ii)
+`attention()` sur les mêmes q, k, v en un appel contre deux morceaux — écart maximal. Prédit : (i) 20-50 % des éléments à
+1 ulp, (ii) < 1 % — donc H4.
+Réponse à l'ordre : trois hypothèses jouées à sec — H1 confirmée mais trop petite (≤ 0,5 × le témoin), H2 et H3 écartées ;
+H4 reste, par élimination et par la mesure du 27/09, non par cette bissection.
