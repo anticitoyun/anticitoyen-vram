@@ -36,3 +36,27 @@ Ordre des essais : KV plein, KV plein sans tampons, anneau, anneau sans tampons 
 Seuil du verdict carte (chef) : les trois conditions aux DEUX chargements ; une seule manquante = non tenu.
 Issue qui me gênerait : au second chargement la réserve sans tampons (2,95 + 0,74 + 0,12 = 3,81 Gio) passe SOUS le pic
 mesuré (4,09) — « pic ≤ réservé » serait alors faux par 0,28 Gio même en NOMINAL stable ; je le lirai tel quel.
+
+## Résultats à sec (02/10 13 h 2x, APRÈS le scellé ; rien ci-dessus n'a été retouché)
+
+| | prédit | à sec | |
+|---|---|---|---|
+| T1 65 536, excès 0 | plan identique | identique (0 exilé, KV 5,45 Gio, 4 096 blocs, plafond 5 120, réserve complète 4,69 Gio) | tenu |
+| T2 65 536, excès 11 Kio/jeton | 0 exilé, plafond 4 096 | **0 exilé**, mêmes KV et blocs, réserve sans tampons 4,66 Gio ; plafond **6 144**, non 4 096 | tenu sur l'exil ; détail du plafond FAUX |
+| T3 excès 22 | 0 à 2 exilés | 0 exilé, plafond 4 096 | — |
+| T4 témoins | identiques | 4 096 / 8 192 / 27 648 / 41 984 identiques ; **16 384 identique seulement après réordonnancement** | tenu au 2e essai, dit |
+| T5 anneau interdit | refus | refus | tenu |
+
+Écart au correctif scellé, dit : j'avais écrit l'ordre « KV plein, KV plein sans tampons, anneau, anneau sans tampons ».
+À 16 384 le KV plein sans tampons tenait sans exil (table en RAM hôte, KV 8,1 Gio) et remplaçait l'anneau qui tenait déjà :
+un plan qui tenait changeait. Ordre retenu : KV plein, anneau, puis les deux sans tampons — la réserve allégée n'entre en jeu
+que si aucun plan à réserve complète ne tient sans exil.
+Tests : `test_le_regime_ne_change_pas_au_second_chargement` (cherche sur la réplique l'excès qui fait exiler la réserve
+complète, puis exige 0 exilé et le même plan avec le correctif) et `test_un_exil_rend_la_reserve_des_tampons` ; cassure
+vérifiée sur copie (réserve toujours comptée : 1 rouge). Lot ciblé 8 fichiers : 49 passés, joué de 13:18:08 à 13:18:20, entre
+la rendue de poste5 (`mesure`, 13:18:07) et la prise d'poste1 (`service`).
+Aveu : mes rejeux de simulation (≈ 40 s de processeur, un cœur, nice 19) ont tourné pendant la prise `mesure` poste5-zzs
+(13:11-13:18) ; aucun pytest.
+
+Reste carte : `scratchpad/poste6-g6r/carte-g6r-2.sh` (deux chargements consécutifs à 65 536, puis ids) — seuil : même régime,
+mêmes ids, pic ≤ réservé, aux DEUX chargements.

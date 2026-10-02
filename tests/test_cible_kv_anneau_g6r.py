@@ -204,3 +204,38 @@ def test_appareil_de_calcul_n_est_pas_celui_de_la_table(monkeypatch):
     m = Moteur()
     m.model = SimpleNamespace(appareil=torch.device("cuda:0"), embed_tokens=torch.zeros(2, 2))
     assert m._libre_apres_chauffe() == (5 * G, 32 * G)
+
+
+# --- stabilité du régime (scellé revue/poste6-g6r-stabilite-scelle-02-10.md) : sur carte le régime alternait d'un chargement
+# à l'autre — la chauffe du NOMINAL enregistre un excès de réserve, et au chargement suivant la réserve des tampons denses
+# (des poids EXILÉS) suffisait à exiler les MLP qui la rendaient nécessaire.
+
+def test_le_regime_ne_change_pas_au_second_chargement(carte, monkeypatch, capsys):
+    def charger(exces_kio):
+        monkeypatch.setattr(LD, "_exces_mesure", lambda spec, n, manifest: exces_kio * 1024 * int(n))
+        return _charger(65536)
+    s1, p1, b1 = charger(0)                                                   # premier chargement : aucun excès connu
+    assert LD._mlp_exiles(p1) == 0 and p1.kv_anneau == 67
+    monkeypatch.setattr(LD, "_RELACHE_TAMPONS", False)                        # témoin : la réserve complète, comme avant
+    exces = next((e for e in range(2, 60, 2) if LD._mlp_exiles(charger(e)[1]) > 0), None)
+    assert exces is not None, "témoin : aucun excès de chauffe ne fait exiler la réplique — le test ne prouverait rien"
+    monkeypatch.setattr(LD, "_RELACHE_TAMPONS", True)
+    capsys.readouterr()
+    s2, p2, b2 = charger(exces)                                               # second chargement : l'excès est appliqué
+    assert LD._mlp_exiles(p2) == 0, f"l'alternance est revenue : {LD._mlp_exiles(p2)} MLP exilés avec {exces} Kio/jeton d'excès"
+    assert (p2.kv_anneau, p2.embed_device, p2.kv_budget, b2) == (p1.kv_anneau, p1.embed_device, p1.kv_budget, b1)
+    assert p2.sans_tampons_denses and "réserve des tampons denses" in capsys.readouterr().out
+    man = _manifest()
+    avec = LD._reserve_prefill(s2, 65536, man, p2)
+    p2.sans_tampons_denses = False
+    assert LD._reserve_prefill(s2, 65536, man, p2) - avec == LD._tampons_denses(p2) > 0
+
+
+def test_un_exil_rend_la_reserve_des_tampons(carte):
+    """La réserve allégée ne vaut que sans poids exilé : dès que `_reajuster_plan` exile un MLP, le drapeau tombe."""
+    spec, man = _spec(), _manifest()
+    plan = LD._plan_from_manifest(man, spec, max_model_len=4096)
+    assert not LD._exil_dense(plan)
+    plan.sans_tampons_denses = True
+    LD._reajuster_plan(plan, man, reserve=40 * G)                             # réserve absurde : tout doit sortir
+    assert LD._mlp_exiles(plan) > 0 and plan.sans_tampons_denses is False

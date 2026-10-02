@@ -275,6 +275,9 @@ class Plan:
     kv_anneau_motif: str = ""
     # plongements (02/10) : vrai quand `loader._reajuster_plan` a sorti la table de la carte pour éviter un exil de MLP
     embed_exile: bool = False
+    # g6r stabilité (02/10) : vrai quand le plan n'exile aucun poids dense ET a été dimensionné sans la réserve du pool de
+    # tampons des poids exilés (`loader._reserve_prefill`) ; remis à faux par `_reajuster_plan` au premier exil.
+    sans_tampons_denses: bool = False
 
     def to_dict(self) -> dict:
         return {
