@@ -197,3 +197,6 @@
  mv /mnt/4TO_SATACMR_2022/Modeles/GLM-4.7-Flash-bf16 /mnt/4TO_SATACMR_2022/Modeles/models/    # 62 Go
 # ComfyUI (/mnt/AI_GENERATOR/ComfyUI_PARTAGE/models/LLM, llm_gguf, text_encoders ≈ 115 Go) : recommandation = laisser à ComfyUI
 
+## E — orphelins (manifest/config cassé, chargement acvram impossible, alias retiré des menus 02/10)
+# /mnt/AI_GENERATOR/models_acvram/deepseek-coder-6.7b-nvfp4    #   3.8 Go — acvram_manifest.json/config.json pointent un chemin d'entraînement DeepSeek interne (/3fs-jd/...), cassé depuis la conversion ; alias acvram-deepseek-coder-6-7b-nvfp4 retiré de ~/.kimi-code/config.toml (sauvegarde config.toml.avant-retrait-6-7b-02-10)
+
