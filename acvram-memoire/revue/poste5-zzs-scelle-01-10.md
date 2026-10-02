@@ -105,3 +105,11 @@ borné à ≈ −1,60 s, soit **−36 %**. Prédiction au mur à 16 k : **−25 
 inférieur à 15 %**. Ce critère remplace celui de 32 k, qui reste écrit pour une carte où 32 k tiendrait. L'instrument
 prouve désormais le régime résident avant toute requête (`/metrics` : graphes, repli_eager, kv_max_tokens ≥ L + 64), et il
 refuse toute réponse privée de ses 64 jetons (rc 7).
+
+**Ordre de rédaction (demandé par chef) : l'amendement 2 a été écrit APRÈS avoir lu le −24,4 % du nsys à 8 k.** Le haut
+de la bande (−36 %) n'en dépend pas : c'est la borne à rendement égal, extrapolée depuis la décomposition du ht9 (1 415,9 ms,
+mesurée la veille) par la même règle que les bornes de 8 k et 32 k. Le bas (−25 %) n'est PAS indépendant du chiffre lu. À 8 k,
+le GPU a réalisé 342,7 ms sur une borne de 364, soit 94 %, et le mur garde des parts hors GPU que le nsys ne voit pas (pilote,
+échantillonnage, HTTP). J'ai donc posé le bas à environ 70 % de la borne (0,7 × 36 ≈ 25), comme à 8 k où la bande au mur
+(−18 à −26 %) valait 70 à 100 % de la borne GPU. Le seuil FAUX (15 %, soit 42 % de la borne) reste en dessous de tout ce que
+le −24,4 % laisse attendre. Il juge le mécanisme, pas la précision de ma bande.
