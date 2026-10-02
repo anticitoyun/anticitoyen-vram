@@ -1047,6 +1047,7 @@ def _affiner_couches(spec: ModelSpec, path: str) -> None:
     norm: dict[int, int] = {}
     partage: dict[int, int] = {}
     experts: dict[int, set] = {}
+    fusionnes: dict[int, int] = {}                     # experts empilés [E, …] : E lu sur la première dimension
     for nom, forme in tenseurs.items():
         if not nom.startswith("model.layers."):
             continue
@@ -1060,9 +1061,21 @@ def _affiner_couches(spec: ModelSpec, path: str) -> None:
         if "norm" in nom.rsplit(".", 2)[-2:][0] or nom.endswith("norm.weight"):
             norm[i] = norm.get(i, 0) + n
         elif ".mlp." in nom or ".feed_forward." in nom:
+            queue = nom.split(".experts.")[1] if ".experts." in nom else ""
+            # gu1 : experts FUSIONNÉS d'une source HF (gpt-oss : `experts.gate_up_proj_blocks` [E, sortie, nb, 16]) — le
+            # suffixe n'est pas un numéro d'expert (6 suffixes comptés comme 6 experts) et un octet MXFP4 porte DEUX codes
+            # E2M1 ; les échelles E8M0 ne sont pas des paramètres. Le plan donnait 36,3 Go pour un 120b de ≈ 68,8.
+            if queue.endswith("_scales"):
+                continue
+            if queue.endswith("_blocks"):
+                n *= 2
             mlp[i] = mlp.get(i, 0) + n
-            if ".experts." in nom:
-                experts.setdefault(i, set()).add(nom.split(".experts.")[1].split(".")[0])
+            if queue:
+                tete = queue.split(".")[0]
+                if tete.isdigit():
+                    experts.setdefault(i, set()).add(tete)
+                else:
+                    fusionnes[i] = max(fusionnes.get(i, 0), int(forme[0]))
             else:
                 partage[i] = partage.get(i, 0) + n      # routeur et expert partagé
         else:
@@ -1075,7 +1088,7 @@ def _affiner_couches(spec: ModelSpec, path: str) -> None:
         if i not in attn and i not in mlp:
             couches.append(l)                           # couche absente : on garde l'estimation
             continue
-        n_ex = len(experts.get(i, ()))
+        n_ex = len(experts.get(i, ())) or fusionnes.get(i, 0)
         couches.append(LayerSpec(i, attn.get(i, 0), mlp.get(i, 0), norm.get(i, l.norm_params),
                                  n_ex > 0, n_ex,
                                  min(l.n_experts_active, n_ex) if n_ex else 0,

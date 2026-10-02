@@ -413,3 +413,62 @@ def test_jouet_pas_de_decodage_contre_transformers(jouet_oss):
                                 torch.tensor([slot(n)]), False))[0].float()
     assert ecart < 2e-3, ecart
     assert float((y0.reshape(-1) - ref).abs().max() / ref.abs().max()) > 5e-2
+
+
+# -- evp 120b : 18 octaves (2 tenseurs sur 13 824 du gpt-oss-120b, scratchpad/poste1-evp-120b/etendue.log) -----------
+# Cassures éprouvées : `_reporter_sous_plancher` neutralisé → test_18_octaves_report_exact rouge ; repli bf16 retiré
+# d'`iter_gpt_oss` → test_iter_gpt_oss_repli_bf16_exact_et_nomme rouge (EtendueInexacte remonte et arrête la conversion).
+def _bloc_codes(mags, g):
+    """Un bloc MXFP4 de 32 (16 octets) dont les |codes| sont tirés dans ``mags`` (indices E2M1), signes au hasard."""
+    m = torch.tensor(mags)[torch.randint(0, len(mags), (32,), generator=g)]
+    nib = (m | (torch.randint(0, 2, (32,), generator=g) << 3)).to(torch.uint8)
+    return nib[0::2] | (nib[1::2] << 4)
+
+
+def test_18_octaves_report_exact():
+    """Un bloc 18 octaves sous le plus haut, codes {0, 1, 2, 3, 4, 6} : l'octave passe sur les codes, au bit."""
+    from acvram.quant.mxfp4 import mxfp4_dequant, mxfp4_vers_nvfp4
+    from acvram.quant.nvfp4 import dequantize_nvfp4
+    g = torch.Generator().manual_seed(7)
+    blocs = torch.randint(0, 256, (4, 3, 16), generator=g, dtype=torch.uint8)
+    ech = torch.randint(115, 128, (4, 3), generator=g, dtype=torch.uint8)
+    ech[0, 0], ech[3, 2] = 128, 110                      # 18 octaves
+    blocs[3, 2] = _bloc_codes([0, 2, 4, 5, 6, 7], g)     # |codes| / 2 tous E2M1
+    t = mxfp4_vers_nvfp4(blocs, ech)
+    assert torch.equal(dequantize_nvfp4(t, torch.float32), mxfp4_dequant(blocs, ech))
+
+
+def test_18_octaves_code_impair_refuse():
+    from acvram.quant.mxfp4 import EtendueInexacte, mxfp4_vers_nvfp4
+    g = torch.Generator().manual_seed(8)
+    blocs = torch.randint(0, 256, (2, 2, 16), generator=g, dtype=torch.uint8)
+    ech = torch.full((2, 2), 120, dtype=torch.uint8)
+    ech[0, 0], ech[1, 1] = 128, 110
+    blocs[1, 1] = _bloc_codes([1], g)                    # 0,5 / 2 = 0,25 : pas un code E2M1
+    with pytest.raises(EtendueInexacte, match="report d'octave"):
+        mxfp4_vers_nvfp4(blocs, ech)
+
+
+def test_iter_gpt_oss_repli_bf16_exact_et_nomme(tmp_path, capsys):
+    import json
+    from safetensors.torch import save_file
+    from acvram.quant.mxfp4 import iter_gpt_oss, mxfp4_dequant
+    from acvram.quant.nvfp4 import NVFP4Tensor
+    g = torch.Generator().manual_seed(9)
+    E, H, I = 2, 64, 64
+    sd = {}
+    for proj, rangs in (("gate_up_proj", 2 * I), ("down_proj", H)):
+        sd[f"model.layers.0.mlp.experts.{proj}_blocks"] = torch.randint(0, 256, (E, rangs, H // 32, 16), generator=g,
+                                                                        dtype=torch.uint8)
+        sd[f"model.layers.0.mlp.experts.{proj}_scales"] = torch.full((E, rangs, H // 32), 120, dtype=torch.uint8)
+        sd[f"model.layers.0.mlp.experts.{proj}_bias"] = torch.zeros(E, rangs, dtype=torch.bfloat16)
+    b, s = sd["model.layers.0.mlp.experts.down_proj_blocks"], sd["model.layers.0.mlp.experts.down_proj_scales"]
+    s[1, 0, 0], s[1, 5, 1] = 128, 110                    # expert 1, down : 18 octaves …
+    b[1, 5, 1] = _bloc_codes([1, 3], g)                  # … et des codes 0,5 / 1,5 sous le plancher
+    save_file(sd, str(tmp_path / "m.safetensors"))
+    json.dump({"weight_map": {k: "m.safetensors" for k in sd}}, open(tmp_path / "model.safetensors.index.json", "w"))
+    sortie = dict(iter_gpt_oss(str(tmp_path)))
+    w = sortie["model.layers.0.mlp.experts.1.down_proj.weight"]
+    assert w.dtype == torch.bfloat16 and torch.equal(w.float(), mxfp4_dequant(b[1], s[1]))
+    assert isinstance(sortie["model.layers.0.mlp.experts.0.down_proj.weight"], NVFP4Tensor)
+    assert "experts.1.down_proj.weight servi en bf16 exact" in capsys.readouterr().out
