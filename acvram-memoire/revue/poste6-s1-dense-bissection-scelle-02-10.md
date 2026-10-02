@@ -115,3 +115,6 @@ dans chaque réglage (3 répétitions, synchronisées — indicatif, pas une cel
 Conséquence à écrire quel que soit le résultat : un réglage qui retire la dépendance à M change aussi tous les logits
 servis (règle « une optimisation qui change la sortie… ») — ce ne serait pas un correctif à poser par défaut, mais un
 régime à juger par sa propre garde de qualité et son coût en débit. Cette minute de carte ne juge ni l'un ni l'autre.
+
+Script étendu rejoué à sec (02/10 16:11-16:14, processeur, T = 300) : le troisième bras va au bout ; sur processeur le
+réglage n'a aucun effet (0 élément différent partout, temps × 1,00) — attendu, il ne concerne que cuBLAS.
