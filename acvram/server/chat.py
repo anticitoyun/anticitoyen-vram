@@ -18,7 +18,7 @@ import threading
 import uuid
 from typing import Any, Optional
 
-__all__ = ["Tokenizer", "load_tokenizer", "render_chat",
+__all__ = ["Tokenizer", "load_tokenizer", "render_chat", "FluxHarmony", "normaliser_harmony",
            "ProcesseurVision", "charger_processeur_vision", "preparer_images"]
 
 
@@ -41,12 +41,18 @@ class Tokenizer:
         # "jinja" (gabarit du modèle), "chatml" (pas de gabarit → ChatML natif),
         # "chatml-repli" (jinja présent mais illisible → repli, cf. render_chat).
         self.gabarit_effectif = "jinja" if template else "chatml"
+        # gpt-oss (evp) : le format harmony sépare raisonnement, réponse et appels d'outils par des jetons
+        # SPÉCIAUX (<|channel|>, <|message|>, <|call|>…). Les retirer au décodage rendait au client
+        # « analysis…assistantfinal… » sans aucun appel lisible : on les garde, `FluxHarmony` les lit.
+        self.harmony = all(_id_jeton(backend, t) is not None for t in ("<|channel|>", "<|message|>", "<|start|>"))
 
     # -- encode / decode --------------------------------------------------
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         return self.backend.encode(text, add_special_tokens=add_special_tokens).ids
 
-    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+    def decode(self, ids: list[int], skip_special_tokens: Optional[bool] = None) -> str:
+        if skip_special_tokens is None:
+            skip_special_tokens = not self.harmony
         return self.backend.decode(ids, skip_special_tokens=skip_special_tokens)
 
     @property
@@ -155,6 +161,9 @@ class Tokenizer:
 
                     env = Environment(trim_blocks=True, lstrip_blocks=True)
                     env.globals["raise_exception"] = raise_exception
+                    # evp : globale que transformers fournit (chat_template_utils) ; sans elle, le gabarit de gpt-oss
+                    # (date du message système) levait UndefinedError → repli ChatML, invite fausse pour ce modèle
+                    env.globals["strftime_now"] = lambda fmt: __import__("datetime").datetime.now().strftime(fmt)
                     env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
 
                     # iqm : le `tojson` de transformers (chat_template_utils), que vLLM sert aussi. Celui de Jinja
@@ -521,6 +530,135 @@ class FiltreAppels:
         sortie = self.total[self.emis:]
         self.emis = len(self.total)
         return sortie
+
+
+# -- harmony (gpt-oss, evp) ------------------------------------------------------
+# Une réponse harmony est une suite de messages « <|start|>assistant to=… <|channel|>canal …<|message|>corps<|fin|> »
+# (le premier commence directement à <|channel|> : le gabarit a déjà écrit « <|start|>assistant »). Canal
+# analysis → raisonnement (reasoning_content, comme vLLM) ; final et commentary sans destinataire → texte ;
+# destinataire functions.X → appel, réécrit en « <tool_call>{json}</tool_call> » pour que `extraire_appels`,
+# `FiltreAppels` et `blocs_anthropic` le lisent sans chemin propre à gpt-oss.
+_H_MESSAGE = "<|message|>"
+_H_FINS = ("<|end|>", "<|return|>", "<|call|>", "<|start|>")
+_H_MARQUES = ("<|start|>", "<|channel|>", "<|message|>", "<|end|>", "<|return|>", "<|call|>",
+              "<|constrain|>", "<|endoftext|>")
+_H_CANAL = re.compile(r"<\|channel\|>\s*([A-Za-z_]+)")
+_H_DEST = re.compile(r"to=([^\s<]+)")
+
+
+def _id_jeton(backend: Any, texte: str) -> Optional[int]:
+    try:
+        return backend.token_to_id(texte)
+    except Exception:                                # noqa: BLE001 — backend de test sans vocabulaire
+        return None
+
+
+def _sans_marques(texte: str) -> str:
+    for m in _H_MARQUES:
+        texte = texte.replace(m, "")
+    return texte
+
+
+def _debut_de_marque(texte: str) -> int:
+    """Indice à partir duquel ``texte`` peut être le début d'une marque coupée entre deux deltas."""
+    k = texte.rfind("<")
+    if k >= 0 and any(m.startswith(texte[k:]) for m in _H_MARQUES):
+        return k
+    return len(texte)
+
+
+class FluxHarmony:
+    """Lit une sortie harmony au fil de l'eau. ``pousser(delta)`` et ``finir()`` rendent
+    (raisonnement, texte) nouveaux ; le texte porte les appels sous forme ``<tool_call>``.
+    Un appel n'est rendu qu'entier (fermé par <|call|>, ou JSON lisible à la fin) : un corps
+    tronqué reste du texte, jamais un appel inventé."""
+
+    def __init__(self) -> None:
+        self.buf, self.entete, self.dans_corps = "", "", False
+        self.genre, self.nom, self.corps = "texte", "", ""
+        self.vu_message = False
+
+    def _ouvrir(self, entete: str) -> None:
+        canal = _H_CANAL.search(entete)
+        dest = _H_DEST.search(entete)
+        self.corps, self.nom = "", ""
+        if dest and dest.group(1).startswith("functions."):
+            self.genre, self.nom = "appel", dest.group(1)[len("functions."):]
+        elif canal and canal.group(1) == "analysis":
+            self.genre = "raison"
+        else:
+            self.genre = "texte"
+        self.dans_corps, self.vu_message = True, True
+
+    def _appel(self, ferme: bool) -> str:
+        corps = self.corps.strip()
+        try:
+            args: Any = json.loads(corps)
+        except json.JSONDecodeError:
+            if not ferme:
+                return corps
+            args = corps
+        return "<tool_call>" + json.dumps({"name": self.nom, "arguments": args}, ensure_ascii=False) + "</tool_call>"
+
+    def pousser(self, delta: str) -> tuple[str, str]:
+        self.buf += delta
+        raison, texte = [], []
+        while True:
+            if not self.dans_corps:
+                # l'en-tête s'accumule à part : <|message|> peut arriver coupé entre deux deltas
+                self.entete, self.buf = self.entete + self.buf, ""
+                i = self.entete.find(_H_MESSAGE)
+                if i < 0:
+                    break
+                self.buf = self.entete[i + len(_H_MESSAGE):]
+                self._ouvrir(self.entete[:i])
+                self.entete = ""
+                continue
+            fins = [(self.buf.find(m), m) for m in _H_FINS if m in self.buf]
+            if fins:
+                j, m = min(fins)
+                morceau, self.buf = self.buf[:j], self.buf[j + len(m):]
+            else:
+                k = _debut_de_marque(self.buf)
+                morceau, self.buf = self.buf[:k], self.buf[k:]
+            if self.genre == "appel":
+                self.corps += morceau
+            elif self.genre == "raison":
+                raison.append(morceau)
+            else:
+                texte.append(morceau)
+            if not fins:
+                break
+            self.dans_corps = False
+            if self.genre == "appel":
+                texte.append(self._appel(ferme=(m == "<|call|>")))
+        return "".join(raison), "".join(texte)
+
+    def finir(self) -> tuple[str, str]:
+        raison, texte = self.pousser("")
+        reste = self.buf
+        self.buf = ""
+        if self.dans_corps:
+            if self.genre == "appel":
+                self.corps += reste
+                texte += self._appel(ferme=False)
+            elif self.genre == "raison":
+                raison += _sans_marques(reste)
+            else:
+                texte += _sans_marques(reste)
+        elif not self.vu_message:
+            # aucune marque harmony du tout : le modèle a répondu en clair, on rend le texte tel quel
+            texte += _sans_marques(self.entete)
+        self.entete = ""
+        return raison, texte
+
+
+def normaliser_harmony(texte: str) -> tuple[str, str]:
+    """Sortie harmony entière -> (raisonnement, texte avec appels ``<tool_call>``)."""
+    f = FluxHarmony()
+    r1, t1 = f.pousser(texte)
+    r2, t2 = f.finir()
+    return r1 + r2, t1 + t2
 
 
 # -- images : AutoProcessor -> requête interne ---------------------------------
