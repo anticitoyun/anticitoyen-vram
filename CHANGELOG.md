@@ -21,10 +21,11 @@
 * **Table de plongements en RAM hôte avant tout MLP** (`ACVRAM_EMBED`, défaut `auto` ; `hote`, `carte`) : quand le plan
   déborde encore, la table bf16 (2,62 Gio sur gemma-4-31B) quitte la carte avant le premier MLP ; la tête de sortie garde sa
   copie quantifiée. Mêmes ids table hôte / table sur la carte (carte, 8 192). Ligne de régime : `plongements=hôte|carte`.
+* **Réserve des tampons denses** : elle n'est plus comptée quand le plan n'exile aucun poids dense (le pool n'existe que
+  sous exil). Comptée, elle faisait exiler 2 MLP un chargement sur deux dès que la chauffe avait enregistré un excès.
 * **Mesuré sur carte (02/10)** : gemma-4-31B, 65 536 jetons tenus, 0 couche exilée, NOMINAL, 31 j/s sur une invite de
-  61 942 jetons (la veille : 39 exilées, 3,5 j/s). **Limite connue** : au chargement suivant la réserve de préfill mesurée
-  par la chauffe fait exiler 2 MLP (régime DÉGRADÉ, 35 j/s mesurés), puis le régime revient — il alterne d'un redémarrage à
-  l'autre. `acvram-memoire/revue/poste6-g6r-plongements-verdict-carte-02-10.md`.
+  61 942 jetons (la veille : 39 exilées, 3,5 j/s) ; deux chargements consécutifs dans le même régime, mêmes ids.
+  `acvram-memoire/revue/poste6-g6r-stabilite-verdict-carte-02-10.md`.
 * **Corrigé en chemin** : l'appareil de calcul du modèle n'est plus celui de la table de plongements (tour de vision, chauffe
   du contexte : avec une table en RAM hôte la chauffe ne jugeait plus la réserve de la carte).
 
