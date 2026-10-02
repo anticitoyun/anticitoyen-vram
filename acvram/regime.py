@@ -424,6 +424,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("EMBED", "auto", ("acvram.engine.loader", "_EMBED_MODE"), None,
              "plongements (02/10) : auto (défaut) — la table bf16 quitte la carte avant le premier MLP quand le plan déborde ; "
              "hote : toujours (bras de mesure) ; carte : jamais. Régime « plongements=hôte »"),
+    Variable("PRELECTURE", "1", ("acvram.engine.loader", "_PRELECTURE"), None,
+             "B2 (02/10) : fils qui remplissent le cache de pages des fragments (readahead par pas de 128 Kio) pendant le "
+             "chargement ; 0 : jamais. Ne change aucun octet chargé ; coupée si les fragments dépassent 80 % de la RAM disponible"),
     Variable("PREFILL_MORCEAU_AU_DELA", "4096", ("acvram.engine.runner", "_MORCEAU_AU_DELA"), None,
              "d19 (01/10) : au-delà du tenu d'un seul tenant (chauffe), l'attention d'un dense sans récurrence passe par morceaux de N "
              "jetons (régime « morceaux>S ») — sous le tenu rien ne change ; 0 = jamais (l'invite au-delà reçoit 400 comme avant)"),
