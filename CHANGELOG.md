@@ -9,6 +9,15 @@
   4,9 s ; à chaud inchangé (+0,05 s). Aucun octet chargé ne change (test d'identité de tous les tenseurs avec et sans) ;
   coupée si les fragments dépassent 80 % de la RAM disponible. `acvram-memoire/revue/poste6-prelecture-verdict-02-10.md`.
 
+### Troncature causale du cœur MLA au préfill, en option (zzs)
+
+* `ACVRAM_MLA_CAUSAL=1` limite les scores, le masque, le softmax et le produit par V de chaque morceau du préfill aux clés
+  que ce morceau voit, au lieu de toutes les clés puis du masque. Sur Kimi-Linear-35B (RTX 5090, b=1), le préfill gagne
+  24 % au GPU à 8 192 jetons, et 27 % à 8 192 et 31 % à 12 288 au mur. Le décodage ne change pas.
+* **Désactivée par défaut** : la sortie n'est pas identique au bit (l'écart reste dans l'erreur d'arrondi du chemin complet
+  contre fp64), et 2 réponses gloutonnes sur 6 divergent. Le défaut ne changera qu'après une garde de qualité (perplexité de
+  décodage à 8 192 + 512 jetons).
+
 ## 0.7.17 (01/10/2026)
 
 ### Piles d'experts MoE construites au chargement, avant le KV (aym)
