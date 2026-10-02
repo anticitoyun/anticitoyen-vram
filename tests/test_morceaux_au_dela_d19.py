@@ -161,29 +161,56 @@ def test_j3b_fenetre_qui_tient_devstral_65536(monkeypatch):
     print(f"d19 J3 b : fenêtre Devstral à 65 536 demandés, base 15 Gio : {avec} avec morceaux, {sans} sans")
 
 
-def test_j4_etats_par_forward_tranches_au_bit_de_la_passe_dense(converted, monkeypatch):
+def test_j4_etats_par_forward_tranches_sous_le_temoin_reprise(converted, monkeypatch):
     """Instrument qualité (scratchpad/d19-qualite.py) : les états cachés de toutes les lignes rendus par `forward_tranches`
-    (lots-morceaux avec K/V transitoires, return_hidden) sont au bit de `model(batch, return_hidden=True)` sur le jouet (cache int8)."""
+    (lots-morceaux avec K/V transitoires, return_hidden) équivalent à ceux de `model(batch, return_hidden=True)` SOUS LE
+    TÉMOIN REPRISE (REGLES § 4) : écart ≤ 2 × celui de la même invite passée en deux fois, la seconde relisant ses K/V du
+    cache int8 — jamais « au bit ».
+
+    Ce test affirmait l'égalité au bit sur UNE séquence (02/10 : seul rouge de la suite avec carte, écart 0,015625 = 1 ulp
+    bf16). Elle tenait par chance : le SDPA réduit les clés par blocs qui suivent la LONGUEUR de l'appel (`layers.attention`),
+    et un morceau n'a pas la longueur du seul tenant. Sur processeur aussi : 82 écarts sur 120 (40 séquences tirées au
+    hasard × 3 découpages), dont [128, 256, 400] pour d'autres ids que ceux d'origine ; le jouet converti avec la carte a
+    d'autres poids, la chance tourne. Contrôles : le seuil doit pouvoir rendre faux (une invite dont UN jeton change le
+    dépasse) et le témoin ne doit pas être nul."""
     from acvram.engine.model import ForwardBatch
     from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
     eng = _moteur(converted, monkeypatch)
     model = eng.model
-    ids = [(7 + i * 13) % 200 + 3 for i in range(400)]
-    n = len(ids)
-
-    def lot(blocs, debut, fin, rang=None, total=None):
-        slots = torch.tensor([blocs[i // BLOCK_SIZE] * BLOCK_SIZE + i % BLOCK_SIZE for i in range(debut, fin)], dtype=torch.long)
-        b = ForwardBatch(tokens=torch.tensor(ids[debut:fin]), positions=torch.arange(debut, fin), seq_lens=[fin], query_lens=[fin - debut],
-                         block_tables=[torch.tensor(blocs)], slot_mapping=slots, is_prefill=True)
-        if rang is not None:
-            b.morceau = (rang, total, n, True)
-        return b
+    n = 400
     nb = (n + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
     blocs_a = BlockAllocator(nb, enable_prefix_cache=False).allocate(nb)
-    with torch.no_grad():
-        ha = model(lot(blocs_a, 0, n), return_hidden=True)
-        bornes = [128, 256, 400]
-        lots = [lot(blocs_a, 0 if j == 0 else bornes[j - 1], f, j, len(bornes)) for j, f in enumerate(bornes)]
-        assert model.tranches_possibles(lots, False)
-        hb = torch.cat(model.forward_tranches(lots, return_hidden=True), 0)
-    assert ha.shape == hb.shape and torch.equal(ha, hb), float((ha.float() - hb.float()).abs().max())
+
+    def ecart(a, b):
+        return float((a.float() - b.float()).abs().max())
+    temoin = candidat = 0.0
+    negatif = float("inf")
+    for graine in range(6):
+        ids = [(7 + i * 13) % 200 + 3 for i in range(n)] if graine == 0 else \
+            torch.randint(3, 250, (n,), generator=torch.Generator().manual_seed(graine)).tolist()
+
+        def lot(seq, debut, fin, rang=None, total=None):
+            slots = torch.tensor([blocs_a[i // BLOCK_SIZE] * BLOCK_SIZE + i % BLOCK_SIZE for i in range(debut, fin)], dtype=torch.long)
+            b = ForwardBatch(tokens=torch.tensor(seq[debut:fin]), positions=torch.arange(debut, fin), seq_lens=[fin],
+                             query_lens=[fin - debut], block_tables=[torch.tensor(blocs_a)], slot_mapping=slots, is_prefill=True)
+            if rang is not None:
+                b.morceau = (rang, total, n, True)
+            return b
+        with torch.no_grad():
+            ha = model(lot(ids, 0, n), return_hidden=True)
+            for bornes in ([128, 256, 400], [257, 400]):
+                lots = [lot(ids, 0 if j == 0 else bornes[j - 1], f, j, len(bornes)) for j, f in enumerate(bornes)]
+                assert model.tranches_possibles(lots, False)
+                hb = torch.cat(model.forward_tranches(lots, return_hidden=True), 0)
+                assert ha.shape == hb.shape
+                candidat = max(candidat, ecart(ha, hb))
+            # témoin reprise : la même invite en deux passes ordinaires, la seconde relit les K/V de la première du cache
+            hr = torch.cat([model(lot(ids, 0, 256), return_hidden=True), model(lot(ids, 256, n), return_hidden=True)], 0)
+            temoin = max(temoin, ecart(ha, hr))
+            # contrôle : une AUTRE invite (un jeton changé en position 10) doit sortir du seuil
+            autre = list(ids); autre[10] = 3 + (autre[10] - 2) % 240
+            negatif = min(negatif, ecart(ha[11:], model(lot(autre, 0, n), return_hidden=True)[11:]))
+    print(f"d19 J4 : morceaux Δ {candidat:.4g}, témoin reprise Δ {temoin:.4g}, autre invite Δ ≥ {negatif:.4g}")
+    assert temoin > 0, "témoin reprise nul : il ne mesure rien, le seuil ne vaudrait pas mieux qu'un « au bit »"
+    assert candidat <= 2 * temoin, f"morceaux Δ {candidat} > 2 × témoin reprise {temoin}"
+    assert negatif > 2 * temoin, f"le seuil ne discrimine pas : une autre invite ne s'écarte que de {negatif} (seuil {2 * temoin})"
