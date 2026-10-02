@@ -137,3 +137,7 @@ convenu avec chef : 14 336 d'abord, puis 12 288 aussitôt si le contrôle de ré
 mesure à ces longueurs ; même règle qu'à l'amendement 2, bas = 0,7 × la borne, borne extrapolée du ht9) :
 **14 336 : −23 à −33 % (borne −33,3 %) ; 12 288 : −22 à −31 % (borne −31,3 %) ; FAUX si le gain au mur est < 15 %**.
 Le contexte du serveur suit L (max(L) + 128).
+
+**Décision de chef (14 h 2x), avant la prise : 12 288 SEUL** (`MLA_ABBA_LONGUEURS=8192,12288`, contexte 12 416), bande
+−22 à −31 %, FAUX si le gain au mur est < 15 %. 14 336 est écarté : avec moins de 0,5 Gio de marge, un chiffre qui dépend
+de la mémoire libre du moment ne se reproduirait pas.
