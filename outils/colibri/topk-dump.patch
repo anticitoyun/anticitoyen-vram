@@ -1,0 +1,86 @@
+Correctif TOPK_DUMP de colibri (bd 076, poste5, 02/10) : c/qwen36.c, fonction tf_nll (mode PPL=1), contre fd93c41.
+Écrit le top-K de chaque position forcée dans TOPK_DUMP, pour la KL@20 entre moteurs du banc KAT
+(revue/poste5-076-banc-kat-protocole-02-10.md). Sans TOPK_DUMP, rien ne change : la ligne de la NLL est intacte.
+Application, depuis la racine du clone, avant `make qwen36 CUDA=1` : git apply --check outils/colibri/topk-dump.patch
+puis git apply. Lecteur et contrôle « −moyenne(logprob_ref) = TF-NLL » : outils/colibri/topk_dump.py.
+Vérification à sec : tests/test_colibri_topk_dump.py (le bloc C est extrait de CE fichier et compilé seul).
+
+--- a/c/qwen36.c
++++ b/c/qwen36.c
+@@ -2444,6 +2444,55 @@
+     }
+ }
+ 
++/* --- TOPK_DUMP (acvram, bd 076) : top-K par position du forçage (tf_nll), pour une KL@K entre moteurs. ---
++ * TOPK_DUMP=<fichier> [TOPK_K=20, 1..256]. Petit-boutiste. En-tête : "CTK1", int32 version=1, int32 K, int32 vocab,
++ * int32 n_positions ; puis par position notée : int32 pos, int32 id_ref, float32 logprob_ref, K x (int32 id, float32
++ * logprob), triés par logprob décroissant (à égalité, l'id le plus petit d'abord). logprob = logit - max - log(Z) sur le
++ * vocabulaire complet, le même Z que la TF-NLL, si bien que -moyenne(logprob_ref) = TF-NLL au float32 près (contrôle du
++ * banc). Un fichier qui ne s'ouvre pas arrête le moteur : jamais de TF-NLL sans le fichier demandé. */
++typedef struct { FILE *f; int k; int *ids; float *vals; } TopkDump;
++
++static void topk_dump_ouvrir(TopkDump *d, int vocab, int npos) {
++    const char *chemin = getenv("TOPK_DUMP");
++    d->f = NULL; d->ids = NULL; d->vals = NULL; d->k = 0;
++    if (!chemin || !*chemin) return;
++    int k = getenv("TOPK_K") ? atoi(getenv("TOPK_K")) : 20;
++    if (k < 1 || k > 256 || k > vocab) { fprintf(stderr, "[topk] TOPK_K=%d hors de 1..256\n", k); exit(1); }
++    d->f = fopen(chemin, "wb");
++    if (!d->f) { perror(chemin); exit(1); }
++    d->k = k;
++    d->ids = malloc((size_t)k * sizeof(int)); d->vals = malloc((size_t)k * sizeof(float));
++    int32_t tete[4] = {1, k, vocab, npos};
++    fwrite("CTK1", 1, 4, d->f); fwrite(tete, sizeof(int32_t), 4, d->f);
++}
++
++static void topk_dump_ecrire(TopkDump *d, const float *logit, int vocab, int pos, int ref, float mx, double Z) {
++    if (!d->f) return;
++    int k = d->k, n = 0;
++    for (int v = 0; v < vocab; v++) {              /* insertion dans un top-K trié : O(vocab · K), K petit */
++        float x = logit[v];
++        if (n == k && x <= d->vals[k - 1]) continue;
++        int j = n < k ? n++ : k - 1;
++        while (j > 0 && d->vals[j - 1] < x) { d->vals[j] = d->vals[j - 1]; d->ids[j] = d->ids[j - 1]; j--; }
++        d->vals[j] = x; d->ids[j] = v;
++    }
++    double lz = log(Z);
++    int32_t p32 = pos, r32 = ref;
++    float lr = (float)((double)logit[ref] - mx - lz);
++    fwrite(&p32, 4, 1, d->f); fwrite(&r32, 4, 1, d->f); fwrite(&lr, 4, 1, d->f);
++    for (int j = 0; j < k; j++) {
++        int32_t i32 = d->ids[j]; float l = (float)((double)d->vals[j] - mx - lz);
++        fwrite(&i32, 4, 1, d->f); fwrite(&l, 4, 1, d->f);
++    }
++}
++
++static void topk_dump_fermer(TopkDump *d) {
++    if (!d->f) return;
++    if (fclose(d->f) != 0) { perror("TOPK_DUMP"); exit(1); }
++    free(d->ids); free(d->vals); d->f = NULL;
++}
++/* --- fin TOPK_DUMP --- */
++
+ static int tf_nll(Model *m, const int *full, int nfull, int np, double *nll_out) {
+     Cfg *c = &m->c;
+     if (nfull > QWEN36_ATTN_MAX_CTX) {
+@@ -2456,17 +2505,20 @@
+     ensure_kv(m);
+     m->kv_len = 0;
+     double nll = 0; int scored = 0;
++    TopkDump td; topk_dump_ouvrir(&td, c->vocab, nfull - np);
+     float *logit = step(m, full, np, 0);
+     for (int i = np; i < nfull; i++) {
+         float mx = logit[0]; for (int v = 1; v < c->vocab; v++) if (logit[v] > mx) mx = logit[v];
+         double Z = 0; for (int v = 0; v < c->vocab; v++) Z += exp((double)logit[v] - mx);
+         nll += -((double)logit[full[i]] - mx - log(Z));
++        topk_dump_ecrire(&td, logit, c->vocab, i, full[i], mx, Z);
+         scored++;
+         free(logit); logit = NULL;
+         if (i == nfull - 1) break;
+         logit = step(m, &full[i], 1, i);
+     }
+     if (logit) free(logit);
++    topk_dump_fermer(&td);
+     *nll_out = nll / scored;
+     return scored;
+ }
