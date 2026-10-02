@@ -378,7 +378,7 @@ def test_jouet_logits_contre_transformers(jouet_oss, n):
     assert float((_logits_oss(loaded.model, prompt) - ref).abs().max() / ref.abs().max()) > 1e-3
 
 
-def test_jouet_pas_de_decodage_contre_transformers(jouet_oss):
+def test_jouet_pas_de_decodage_contre_transformers(jouet_oss, monkeypatch):
     """Préfill de 19 jetons puis UN pas de décodage par le cache paginé (chemin `_decode` → puits à formes fixes) :
     logits du 20e jeton == transformers sur les 20 jetons."""
     from acvram.engine.loader import load_model
@@ -390,6 +390,10 @@ def test_jouet_pas_de_decodage_contre_transformers(jouet_oss):
     hf = _hf_depuis_jouet(cfg, sd)
     with torch.no_grad():
         ref = hf(input_ids=torch.tensor([prompt]), use_cache=False).logits[0, -1].float()
+    # cache bf16 IMPOSÉ : avec une carte visible le plan choisit int8 (suite de chef 02/10 14:11, « 'int8' == 'bf16' ») —
+    # l'écart mesuré ci-dessous est celui d'un cache bf16, avec ou sans carte
+    from acvram.memory import tiering
+    monkeypatch.setattr(tiering, "_KV_FORMAT", "bf16")
     model = load_model(out, dtype=torch.float32, device_override="cpu").model
     alloc = BlockAllocator(model.caches[0].cfg.num_blocks)
     blocks = alloc.allocate(3)

@@ -652,10 +652,14 @@ def _fins_de_tour_du_gabarit(dossier: str) -> list[int]:
     tokenizer.json, sans gabarit, ou sur une lecture impossible (jamais une exception au chargement)."""
     try:
         with open(os.path.join(dossier, "tokenizer.json"), "r", encoding="utf-8") as fh:
-            speciaux = {t["content"]: int(t["id"]) for t in json.load(fh).get("added_tokens", [])
-                        if t.get("special") and t.get("content") in FINS_DE_TOUR}
+            tous = {t["content"]: int(t["id"]) for t in json.load(fh).get("added_tokens", []) if t.get("special")}
     except (OSError, ValueError, KeyError, TypeError):
         return []
+    speciaux = {t: i for t, i in tous.items() if t in FINS_DE_TOUR}
+    if "<|channel|>" in tous and "<|message|>" in tous:
+        # evp : harmony (gpt-oss) — <|end|> ferme l'analyse, pas le tour ; l'ajouter arrêtait la génération avant la
+        # réponse (preuve de service 02/10 14:12 : content vide, 46 jetons d'analyse puis <|end|>)
+        speciaux.pop("<|end|>", None)
     if not speciaux:
         return []
     gabarit = ""

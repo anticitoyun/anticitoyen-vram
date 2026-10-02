@@ -201,3 +201,86 @@ def test_filtre_anthropic_apres_harmony():
     assert "météo" not in sortie and "analysis" not in sortie
     blocs, a_appel = blocs_anthropic(filtre.total, True)
     assert a_appel and blocs[-1]["name"] == "meteo"
+
+
+# -- fin de génération : <|end|> n'est PAS une fin de tour en harmony ----------------------------------------------
+# Preuve de service du 02/10 14:12 (scratchpad/poste1-evp-120b/service20b.sh) : chat sans content, 46 jetons
+# « <|channel|>analysis<|message|>…<|end|> » puis arrêt — la conversion avait mis <|end|> (200007) dans les fins
+# (config.py FINS_DE_TOUR, cité par le gabarit), donc ni réponse finale ni appel d'outil. Cassures éprouvées : sans le
+# retrait au moteur (`Engine._eos_ids`) → test_chat_harmony_a_un_content et test_appel_d_outil_non_perdu rouges ;
+# sans le retrait à la conversion → test_conversion_ne_met_pas_end_dans_les_fins rouge.
+_SPECIAUX = ["<|start|>", "<|channel|>", "<|message|>", "<|end|>", "<|return|>", "<|call|>", "<|constrain|>"]
+
+
+def _tok_harmony():
+    tokenizers = pytest.importorskip("tokenizers")
+    from tokenizers import models, pre_tokenizers
+    mots = ["[UNK]", "analysis", "final", "commentary", "assistant", "to=functions.meteo", "json", "réfléchir",
+            "Paris", '{"ville":"Paris"}']
+    b = tokenizers.Tokenizer(models.WordLevel({m: i for i, m in enumerate(mots)}, unk_token="[UNK]"))
+    b.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    b.add_special_tokens(_SPECIAUX)
+    return Tokenizer(b, {}, None, "test")
+
+
+def _fins_moteur(tok, manifeste_eos):
+    """`Engine._eos_ids` sur un faux moteur : le manifeste du 20b converti avant le correctif porte <|end|>."""
+    from acvram.engine.runner import Engine
+    faux = SimpleNamespace(loaded=SimpleNamespace(manifest={"model": {"eos_token_id": manifeste_eos}}, path=""),
+                           tokenizer=tok)
+    return Engine._eos_ids(faux)
+
+
+def _generer(tok, texte, fins):
+    """Jetons d'une sortie harmony, coupés au PREMIER jeton de fin (règle de `Engine._append`), puis décodés."""
+    ids = []
+    for mot in texte.replace("<|", " <|").replace("|>", "|> ").split():
+        ids.append(tok.backend.token_to_id(mot))
+        if ids[-1] in fins:
+            break
+    return tok.decode(ids)
+
+
+def _fins_du_20b(tok):
+    return [tok.backend.token_to_id(t) for t in ("<|return|>", "<|end|>", "<|call|>")]
+
+
+def test_chat_harmony_a_un_content():
+    from acvram.server.app import _choix_final
+    tok = _tok_harmony()
+    fins = _fins_moteur(tok, _fins_du_20b(tok))
+    sortie = _generer(tok, "<|channel|>analysis<|message|>réfléchir<|end|><|start|>assistant<|channel|>final"
+                           "<|message|>Paris<|return|>", fins)
+    message, fin = _choix_final(sortie, "stop", False, harmony=True)
+    assert message.content.strip() == "Paris" and message.reasoning_content.strip() == "réfléchir" and fin == "stop"
+
+
+def test_appel_d_outil_non_perdu():
+    from acvram.server.app import _choix_final
+    tok = _tok_harmony()
+    fins = _fins_moteur(tok, _fins_du_20b(tok))
+    sortie = _generer(tok, "<|channel|>analysis<|message|>réfléchir<|end|><|start|>assistant<|channel|>commentary "
+                           'to=functions.meteo <|constrain|>json<|message|>{"ville":"Paris"}<|call|>', fins)
+    message, fin = _choix_final(sortie, "stop", True, harmony=True)
+    assert fin == "tool_calls" and message.tool_calls[0]["function"]["name"] == "meteo"
+
+
+def test_hors_harmony_end_reste_une_fin():
+    """Témoin : un gabarit sans harmony (Phi-3) garde <|end|> comme fin de tour."""
+    b = _backend(["<|end|>", "<|user|>"])
+    tok = Tokenizer(b, {}, None, "test")
+    assert not tok.harmony and tok.fins_de_message() == []
+    assert b.token_to_id("<|end|>") in _fins_moteur(tok, [b.token_to_id("<|end|>")])
+
+
+def test_conversion_ne_met_pas_end_dans_les_fins(tmp_path):
+    from acvram.engine.config import _fins_de_tour_du_gabarit
+    ajoutes = [{"id": 200000 + k, "content": t, "special": True} for k, t in enumerate(_SPECIAUX + ["<|endoftext|>"])]
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"added_tokens": ajoutes}))
+    (tmp_path / "chat_template.jinja").write_text(GABARIT)
+    ids = {a["content"]: a["id"] for a in ajoutes}
+    fins = _fins_de_tour_du_gabarit(str(tmp_path))
+    assert ids["<|end|>"] not in fins
+    phi = [a for a in ajoutes if a["content"] not in ("<|channel|>", "<|message|>")]
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"added_tokens": phi}))
+    assert ids["<|end|>"] in _fins_de_tour_du_gabarit(str(tmp_path))      # témoin : hors harmony, inchangé

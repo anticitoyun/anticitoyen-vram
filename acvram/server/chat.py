@@ -50,6 +50,12 @@ class Tokenizer:
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         return self.backend.encode(text, add_special_tokens=add_special_tokens).ids
 
+    def fins_de_message(self) -> list[int]:
+        """Jetons qui ferment un message sans fermer le tour — à ne JAMAIS compter parmi les fins de génération :
+        <|end|> en harmony (fin de l'analyse ; le tour finit par <|return|> ou <|call|>). [] hors harmony."""
+        i = _id_jeton(self.backend, "<|end|>") if self.harmony else None
+        return [i] if i is not None else []
+
     def decode(self, ids: list[int], skip_special_tokens: Optional[bool] = None) -> str:
         if skip_special_tokens is None:
             skip_special_tokens = not self.harmony
