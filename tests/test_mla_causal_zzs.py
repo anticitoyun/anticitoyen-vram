@@ -77,7 +77,7 @@ def test_chaque_morceau_ne_traite_que_les_cles_vues(monkeypatch, _regime_servi):
     assert M.regime_causal_texte() == "mla_causal=1(opt-in)"
 
 
-def _ecarts(monkeypatch, dev, dt, t0, t, formes, decalage=None):
+def _ecarts(monkeypatch, dev, dt, t0, t, formes, decalage=None, dev_ref="cpu"):
     """y du chemin tronqué (B), du chemin complet (A) et la référence fp64 (même module, tout en fp64).
     Rend (|B − A|, |B − ref|, |A − ref|) au max, et les sorties. Le témoin est |A − ref| : l'erreur d'arrondi fp32
     que le chemin servi a déjà (amendement du scellé : un témoin « morceaux de 128 » est nul, la longueur des sommes
@@ -96,8 +96,8 @@ def _ecarts(monkeypatch, dev, dt, t0, t, formes, decalage=None):
     monkeypatch.setattr(M, "_cles_vues", vrai)                 # la référence n'est jamais sabotée
     monkeypatch.setattr(M, "_dt_coeur", lambda **k: torch.float64)
     _bras(monkeypatch, False)
-    mod = _module(H, NH, NOPE, ROPE, RANK, DV, torch.float64, "cpu")
-    ref = _prefill(mod, None if x0 is None else x0.double(), x.double())
+    mod = _module(H, NH, NOPE, ROPE, RANK, DV, torch.float64, dev_ref)
+    ref = _prefill(mod, None if x0 is None else x0.double().to(dev_ref), x.double().to(dev_ref)).cpu()
     m = lambda a, b: float((a - b).abs().max())                                 # noqa: E731
     return m(ys["B"], ys["A"]), m(ys["B"], ref), m(ys["A"], ref), ys
 
@@ -117,36 +117,29 @@ def test_bras_cassant_diagonale_perdue(monkeypatch, _regime_servi):
     assert dBref > 2 * dAref and dBA > 2 * dAref, (dBA, dBref, dAref)
 
 
-carte = pytest.mark.skipif(not torch.cuda.is_available(), reason="E1 au bit : carte requise")
+carte = pytest.mark.skipif(not torch.cuda.is_available(), reason="E2 aux formes de Kimi : carte requise")
 
 
 @carte
 @pytest.mark.parametrize("t0,t", [(0, 8192), (3000, 1000)])
-def test_e1_au_bit_du_chemin_complet_formes_kimi(monkeypatch, _regime_servi, t0, t):
-    """E1 (scellé) : y du préfill MLA au bit entre la troncature et le chemin complet, formes de Kimi-Linear
-    (hidden 2 304, 32 têtes, nope 128, rope 64, rang 512, dv 128), bf16 comme au service, régime servi."""
-    H, NH, NOPE, ROPE, RANK, DV = 2304, 32, 128, 64, 512, 128
-    g = torch.Generator().manual_seed(3)
-    x0 = (torch.randn(t0, H, generator=g) * 0.5).to(torch.bfloat16).cuda() if t0 else None
-    x = (torch.randn(t, H, generator=g) * 0.5).to(torch.bfloat16).cuda()
-    ys = {}
-    for nom, causal in (("A", False), ("B", True)):
-        _bras(monkeypatch, causal)
-        mod = _module(H, NH, NOPE, ROPE, RANK, DV, torch.bfloat16, "cuda")
-        ys[nom] = _prefill(mod, x0, x)
-        torch.cuda.synchronize()
-    if not torch.equal(ys["A"], ys["B"]):
-        d = (ys["A"].float() - ys["B"].float()).abs()
-        raise AssertionError(f"E1 faux (t0={t0}, t={t}) : {int((d > 0).sum())} éléments ≠, max {float(d.max()):.3e}")
+def test_e2_formes_kimi_sur_carte_et_son_bras_cassant(monkeypatch, _regime_servi, t0, t):
+    """Jugement sur carte par E2 sous témoin (REGLES § 4), au régime servi du cœur (tf32 ≤ 2 048 clés vues, fp32 au-delà),
+    formes de Kimi-Linear (hidden 2 304, 32 têtes, nope 128, rope 64, rang 512, dv 128) en fp32 : |B − A| et |B − ref|
+    ≤ 2 × |A − ref|, la référence étant le même module en fp64 (sur la carte : 8 192 jetons en fp64 sur le processeur
+    prendraient des minutes). Le bras cassant (diagonale perdue, passe + d1 − 1) doit rendre faux aux MÊMES formes.
 
-
-@carte
-def test_e2_sous_temoin_fp64_formes_kimi_sur_carte(monkeypatch, _regime_servi):
-    """E2 (scellé amendé) sur carte, au régime servi (tf32 ≤ 2 048 clés vues, fp32 au-delà), formes de Kimi-Linear en
-    fp32, 3 000 jetons de passé puis 1 000 : |B − A| et |B − ref| ≤ 2 × |A − ref| (référence fp64 sur le processeur)."""
-    dBA, dBref, dAref, ys = _ecarts(monkeypatch, "cuda", torch.float32, 3000, 1000, (2304, 32, 128, 64, 512, 128))
-    assert dAref > 0
-    assert dBref <= 2 * dAref and dBA <= 2 * dAref, (dBA, dBref, dAref)
+    Pourquoi pas E1 au bit : il est faux sur carte (verdict poste5-zzs-verdict-02-10 : 262 473 éléments ≠ à 8 192, max
+    3,9e-3 ; 17 357 ≠ à 3 000 + 1 000, max 2,0e-3 — cuBLAS et le softmax choisissent leurs noyaux selon la longueur), et
+    pas même stable sur le processeur (au bit en bf16, 6,7e-8 en fp32 sans passé, 02/10).
+    Pourquoi pas en bf16 : le témoin bf16 (arrondi de la sortie) est trop large pour voir le bras cassant — à sec,
+    formes réduites, 300 + 700 : |B_cassé − ref| 3,35e-3 contre 2 × témoin 3,42e-3. Un E2 bf16 ne pourrait pas rendre
+    faux (REGLES § 3) ; la sortie de service se juge de bout en bout (ABBA, garde PPL du scellé)."""
+    formes = (2304, 32, 128, 64, 512, 128)
+    dBA, dBref, dAref, ys = _ecarts(monkeypatch, "cuda", torch.float32, t0, t, formes, dev_ref="cuda")
+    assert dAref > 0, "témoin nul : la référence fp64 n'est pas une autre arithmétique"
+    assert dBref <= 2 * dAref and dBA <= 2 * dAref, (t0, t, dBA, dBref, dAref)
+    cBA, cBref, cAref, _ = _ecarts(monkeypatch, "cuda", torch.float32, t0, t, formes, decalage=-1, dev_ref="cuda")
+    assert cBref > 2 * cAref and cBA > 2 * cAref, ("bras cassant non vu", t0, t, cBA, cBref, cAref)
 
 
 def test_la_troncature_est_opt_in_defaut_off():
