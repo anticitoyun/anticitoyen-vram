@@ -123,6 +123,8 @@ class ModelSpec:
     # gemma4 : couches locales (fenêtre) / globales (têtes plus larges, RoPE
     # proportionnel), v normalisé, k = v global, softcap final
     sliding_window: int = 0
+    # evp (gpt-oss) : borne de la SwiGLU des experts (`swiglu_limit`, 7 sur les deux gpt-oss) ; 0 = SwiGLU ordinaire
+    swiglu_limit: float = 0.0
     global_head_dim: int = 0
     num_global_key_value_heads: int = 0
     rope_theta_swa: float = 0.0
@@ -602,6 +604,7 @@ _ARCH_ALIASES = {
     "Qwen2MoeForCausalLM": "moe",
     "Qwen3MoeForCausalLM": "moe",
     "MixtralForCausalLM": "moe",
+    "GptOssForCausalLM": "moe",          # evp : puits, fenêtre alternée, experts à biais et SwiGLU bornée
     "DeepseekV2ForCausalLM": "moe",
     "DeepseekV3ForCausalLM": "moe",
     "GemmaForCausalLM": "llama",
@@ -884,6 +887,7 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         mlp_gated=bool(cfg.get("mlp_gated", cfg.get("model_type") != "starcoder2")),
         conv_L_cache=int(cfg.get("conv_L_cache") or 3),
         sliding_window=int(cfg.get("sliding_window") or 0),
+        swiglu_limit=float(cfg.get("swiglu_limit") or 0.0),
         global_head_dim=int(cfg.get("global_head_dim") or 0),
         num_global_key_value_heads=int(cfg.get("num_global_key_value_heads") or 0),
         rope_theta_swa=float(cfg.get("rope_theta_swa") or 0.0),
