@@ -155,6 +155,14 @@ class Tokenizer:
 
                     env = Environment(trim_blocks=True, lstrip_blocks=True)
                     env.globals["raise_exception"] = raise_exception
+                    # 02/10 (diagnostic chef, correctif identique à poste1 558999068) : globale que
+                    # transformers fournit (chat_template_utils) ; sans elle, tout gabarit qui s'en sert
+                    # pour dater le message système (gpt-oss, et les gabarits Mistral des 8 alias
+                    # ariel-alloy/cydonia/cydonia-magnum-diamond/dolphin-mistral-glm47) lève UndefinedError
+                    # au rendu → repli ChatML SILENCIEUX en amont (`apply_chat_template` l'attrape dans son
+                    # `except Exception` générique) : invite fausse pour ces modèles, jamais signalée ailleurs
+                    # qu'au premier avertissement stderr (`_repli_averti`).
+                    env.globals["strftime_now"] = lambda fmt: __import__("datetime").datetime.now().strftime(fmt)
                     env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
 
                     # iqm : le `tojson` de transformers (chat_template_utils), que vLLM sert aussi. Celui de Jinja
