@@ -58,7 +58,7 @@ sur carte ne s'y reproduit pas : il vient de ce que seule la carte ajoute. Deux 
 
 * **H4, la GEMM cuBLAS bf16 qui dépend de M** — mesurée sur carte le 27/09 (276i : `k_proj` couche 0, 1 ulp sur 38 % des
   éléments entre deux M). Les morceaux changent M (7 865 → 4 096 + 3 769) pour les sept produits de chacune des 40 couches,
-  sur toutes les lignes : `kernels/__init__.py:1352` (`F.linear(xr, W…)` du chemin Marlin dépaqueté) et le MLP
+  sur toutes les lignes : `kernels/__init__.py:1350` et `:1353` (`F.linear(xr, W…)` du chemin Marlin dépaqueté) et le MLP
   (`attention.py`, `MLP._forward_un`). La reprise, elle, ne recalcule qu'une dizaine de lignes à M inchangé.
 * **H1 sur carte** : le SDPA « flash » de la carte peut dépendre de la longueur plus fortement que celui du processeur.
 
