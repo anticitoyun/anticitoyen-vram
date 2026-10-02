@@ -429,6 +429,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
     _poser_anneau(spec, plan, manifest, dev, max_model_len, embed_charge)          # levier 2 : avant tout plancher
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
                          reserve=_reserve_prefill(spec, max_model_len, manifest, plan), embed_charge=embed_charge)
+    if torch.cuda.is_available() and max_model_len and plan.kv_budget:
+        print(f"[acvram] {reserve_prefill_texte(spec, max_model_len, manifest, plan)}", flush=True)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
     _signaler_falaise(plan, max_model_len, lambda n: _reserve_prefill(spec, n, manifest, plan))
     # Pièce 146 (a) : la capacité du chemin par défaut, bornée au MÊME instant que B (poids pas encore chargés),
@@ -2488,18 +2490,38 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
     13,1 Gio et faisait refuser l'instrument de préfill (poste3, fla-17-09)."""
     if spec is None:
         return 0
+    return sum(_reserve_prefill_detail(spec, max_model_len, manifest, plan).values())
+
+
+def _reserve_prefill_detail(spec, max_model_len: Optional[int], manifest: dict, plan: Optional[Plan] = None) -> dict:
+    """Les termes de `_reserve_prefill`, nommés : activations (formule), excès mesuré par la dernière chauffe, transitoires
+    Marlin, tampons denses (0 quand le plan ne les compte pas)."""
     ctx = int(max_model_len or 8192)
-    reserve = int(spec.activations_prefill_bytes(ctx)) + _octets_marlin(manifest) \
-        + _plus_grosse_nvfp4_marlin_bytes(manifest) + _exces_mesure(spec, ctx, manifest)
+    d = {"activations": int(spec.activations_prefill_bytes(ctx)),
+         "marlin": _octets_marlin(manifest) + _plus_grosse_nvfp4_marlin_bytes(manifest),
+         "exces_chauffe": _exces_mesure(spec, ctx, manifest), "tampons_denses": 0}
     if plan is not None and plan.layers and not getattr(plan, "sans_tampons_denses", False):
-        reserve += _tampons_denses(plan)
+        d["tampons_denses"] = _tampons_denses(plan)
         # P1 disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile
         # Marlin REMPLACE la pile NVFP4 (MoEBlock._try_build_stacks la libère
         # après le repack, même masse : codes K·N/2 + échelles K·N/16) — la
         # réserve « seconde disposition » de 5a0f6c4 (Σ mlp_bytes, 17,04 Gio
         # sur Coder : 21/48 couches exilées, poste3 18/09) n'existe plus.
         # tests/test_marlin_prefill_p1.py : Σ × 1, jamais × 2.
-    return reserve
+    return d
+
+
+def reserve_prefill_texte(spec, max_model_len: Optional[int], manifest: dict, plan: Optional[Plan] = None) -> str:
+    """La réserve de préfill du plan, terme à terme — ce que le pic de la chauffe doit rester dessous. Le verdict carte du
+    02/10 (g6r stabilité) devait la recomposer du journal et d'un rejeu à sec : elle est dite au chargement."""
+    d = _reserve_prefill_detail(spec, max_model_len, manifest, plan)
+    g = 2**30
+    denses = (f"tampons denses {d['tampons_denses'] / g:.2f}" if d["tampons_denses"]
+              else "tampons denses non comptés" if plan is not None and getattr(plan, "sans_tampons_denses", False) else "tampons denses 0")
+    plafond = getattr(spec, "prefill_morceau_plafond", None) or getattr(spec, "mlp_prefill_plafond", None)
+    return (f"réserve de préfill du plan : {sum(d.values()) / g:.2f} Gio à {int(max_model_len or 8192)} jetons "
+            f"(activations {d['activations'] / g:.2f}{f' au plafond {plafond}' if plafond else ''}, excès de chauffe "
+            f"{d['exces_chauffe'] / g:.2f}, Marlin {d['marlin'] / g:.2f}, {denses})")
 
 
 # g6r stabilité (poste6 02/10) : faux = la réserve des tampons denses est comptée dans tous les cas (le comportement
@@ -2556,9 +2578,17 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
             return (1 if manque else 0, _mlp_exiles(p))
         plafonds = (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
 
+        # `_exces_mesure` dit UNE fois par modèle ce qu'il applique de la dernière chauffe — dans la première chaîne jouée.
+        # Quand cette chaîne est écartée, sa sortie l'est aussi : le journal du service ne disait plus que la réserve
+        # avait été calée (prise g6r stabilité du 02/10, second chargement). Ces lignes survivent à l'écart.
+        annonces: list[str] = []
+
         def essayer(anneau: int, relache: bool):
             spec.mlp_prefill_plafond, spec.prefill_morceau_plafond = plafonds
             p = chaine(anneau, relache)
+            if p is not None:
+                annonces.extend(l for l in p._dit.splitlines()
+                                if l.startswith("[acvram] réserve de préfill") and l not in annonces)
             return p, (spec.mlp_prefill_plafond, spec.prefill_morceau_plafond)
         R = spec.anneau_R() if (max_model_len and _KV_ANNEAU_MODE not in ("0", "off", "non")) else 0
         premier, plafonds_choisis = essayer(R if (R and _KV_ANNEAU_MODE == "1") else 0, False)
@@ -2592,7 +2622,8 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                 f"[acvram] réserve des tampons denses ({_tampons_denses(neuf) / 2**30:.2f} Gio) non comptée : le plan n'exile "
                 f"aucun poids dense, le pool n'existera pas\n")
         if neuf is not None:
-            print(getattr(neuf, "_dit", ""), end="", flush=True)
+            dit = getattr(neuf, "_dit", "")
+            print("".join(l + "\n" for l in annonces if l not in dit.splitlines()) + dit, end="", flush=True)
             if neuf.embed_device == "cpu" and any(t.kind == "gpu" for t in neuf.tiers):
                 table = _octets_reels(manifest)[2]
                 print(f"[acvram] table de plongements ({table / 2**30:.2f} Gio) en RAM hôte "

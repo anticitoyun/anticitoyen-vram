@@ -239,3 +239,39 @@ def test_un_exil_rend_la_reserve_des_tampons(carte):
     plan.sans_tampons_denses = True
     LD._reajuster_plan(plan, man, reserve=40 * G)                             # réserve absurde : tout doit sortir
     assert LD._mlp_exiles(plan) > 0 and plan.sans_tampons_denses is False
+
+
+# --- journal (ordre chef 02/10 14 h) : la ligne « réserve de préfill calée sur la chauffe » se perdait quand la première
+# chaîne de plan, celle qui la dit, était écartée ; et la réserve du plan se dit terme à terme au lieu de se recomposer.
+
+def _avec_chauffe(monkeypatch, exces_kio=11):
+    import acvram
+    man = _manifest()
+    fiche = {"nom": "gemma31b-replique-g6r", "jetons": 65536, "pic_octets": int(4.09 * G), "formule_octets": int(3.35 * G),
+             "exces_par_jeton": exces_kio * 1024, "date": "2026-10-02T13:44:01", "version": acvram.__version__,
+             "empreinte": LD.empreinte_modele(man)}
+    monkeypatch.setattr(LD, "lire_chauffe", lambda nom: dict(fiche))
+    return man
+
+
+def test_la_ligne_de_chauffe_survit_a_une_chaine_ecartee(carte, monkeypatch, capsys):
+    man = _avec_chauffe(monkeypatch)
+    spec = _spec()
+    plan = LD._plan_from_manifest(man, spec, max_model_len=65536)
+    sortie = capsys.readouterr().out
+    assert plan.kv_anneau == 67, "témoin : le premier plan (KV plein) doit être écarté pour que le test prouve quelque chose"
+    assert sortie.count("[acvram] réserve de préfill calée sur la chauffe du 2026-10-02T13:44:01") == 1, sortie[:400]
+    assert "+11 Kio/jeton" in sortie
+
+
+def test_la_reserve_du_plan_se_dit_terme_a_terme(carte, monkeypatch):
+    man = _avec_chauffe(monkeypatch)
+    spec = _spec()
+    plan = LD._plan_from_manifest(man, spec, max_model_len=65536)
+    d = LD._reserve_prefill_detail(spec, 65536, man, plan)
+    assert sum(d.values()) == LD._reserve_prefill(spec, 65536, man, plan) and d["exces_chauffe"] == 11 * 1024 * 65536
+    texte = LD.reserve_prefill_texte(spec, 65536, man, plan)
+    assert f"{sum(d.values()) / G:.2f} Gio à 65536 jetons" in texte and "excès de chauffe 0.69" in texte, texte
+    assert ("tampons denses non comptés" in texte) == bool(plan.sans_tampons_denses)
+    plan.sans_tampons_denses = False
+    assert "tampons denses 1." in LD.reserve_prefill_texte(spec, 65536, man, plan) or "tampons denses 0." in LD.reserve_prefill_texte(spec, 65536, man, plan)
