@@ -2,6 +2,29 @@
 
 ## En préparation (0.7.18)
 
+### gpt-oss (20b, 120b) servi par acvram (poste1, evp)
+
+* **Conversion MXFP4 → NVFP4** des poids gpt-oss, exacte sauf 26 blocs de 16 d'un seul tenseur du 120b
+  (`layers.13.experts.43.down`, une rangée 2^-18 sous le maximum), arrondis au plus proche et nommés au manifeste
+  (`arrondi_mxfp4`) et sur la sortie d'erreur de la conversion.
+* **Format harmony** : le raisonnement sort dans `reasoning_content`, la réponse dans `content` sans marques, les appels
+  d'outils dans `tool_calls`. `<|end|>` n'est plus une fin de tour pour un gabarit harmony (il fermait l'analyse et coupait
+  la réponse) ; les manifestes déjà convertis sont corrigés au chargement.
+* **Justesse** : 20b contre la référence HF déquantifiée, top-1 98,58 %, KL 0,00121 ; 120b contre llama.cpp, top-1 96,0 %,
+  KL 0,0115. Vitesse 20b à b=1 : 41,8 j/s (llama.cpp 386) ; le chemin MoE groupé est la pièce suivante.
+* **`acvram plan`** compte enfin les experts fusionnés d'une source HF MoE (le 120b était annoncé à 36,3 Go au lieu de 66,6).
+* Biais d'un expert exilé déplacé avec ses poids ; réserve d'experts exilés à 3 × k + 2 quand I = H.
+
+### Gabarits Mistral 24B réparés
+
+* `strftime_now` manquait à l'environnement Jinja : les gabarits qui datent leur message système (8 alias Mistral 24B,
+  gpt-oss) levaient une erreur avalée et retombaient silencieusement sur ChatML. Invite correcte désormais.
+
+### colibrì dans le parc (poste3, poste5)
+
+* `outils/construire-colibri.sh` (CUDA sm_120, correctif `TOPK_DUMP` appliqué) et lanceur `colibri-serveur` du parc ;
+  préparation du banc KAT-Coder contre acvram et llama.cpp.
+
 ### Chargement à froid 5,5 × plus rapide (poste6, B2)
 
 * **Prélecture des fragments** (`ACVRAM_PRELECTURE`, défaut 1 ; 0 = jamais) : pendant le chargement, un fil remplit le
