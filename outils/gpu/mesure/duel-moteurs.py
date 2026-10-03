@@ -161,20 +161,27 @@ if CONC > 1:
     file_max, servies_max = [], []
     for essai in range(n_essais):
         m0 = metriques()
-        r1, g1 = [], []
-        mur1 = tour(1, r1, essai * 1000, g1)
-        if g1:
-            file_max.append(max(w for _, _, w in g1))
-            servies_max.append(max(r for _, r, _ in g1))
+        r1 = []
+        mur1 = tour(1, r1, essai * 1000)
         m1 = metriques()
         if m0 and m1 and m0.get("prefill_seconds") is not None:
             serveur.append(round(m1["prefill_seconds"] - m0["prefill_seconds"], 3))
             blocs.append(m1.get("kv_blocks_free"))
             caches.append(m1.get("cached_prompt_tokens"))
         ttfts.append(mur1)
-        rN = []
+        rN, gN = [], []
         x = watts()
-        murN = tour(N, rN, essai * 1000)
+        # releve PENDANT le tour de DECODAGE (ordre chef 02/10, diagnostic poste1
+        # 795f858b5) : le tour a `max_tokens=1` ci-dessus est trop court pour que
+        # `/metrics` voie une file — `running` ne se met a jour qu'en FIN DE PAS
+        # (runner.py:2043), et un prefill seul n'a qu'un pas. Le tour a N jetons est
+        # celui qui dure assez de pas pour que la concurrence SERVIE se lise ; avant
+        # ce correctif, `servies_max_dans_l_ordre` valait 0 pour TOUT moteur, pas
+        # seulement acvram (voir test_duel_moteurs_servies_max_tour_decodage.py).
+        murN = tour(N, rN, essai * 1000, gN)
+        if gN:
+            file_max.append(max(att for _, _, att in gN))
+            servies_max.append(max(run for _, run, _ in gN))
         jetons = sum(c for _, _, c in rN)
         if jetons > 1 and murN > mur1:
             debits.append(jetons / murN)
