@@ -1602,27 +1602,41 @@ _EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
 # pas le réglage »). `exacte` pose `torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False` ;
 # `reduite` (défaut) = le défaut de torch. Cause mesurée sur carte (revue/poste6-s1-dense-h4-verdict-carte-02-10) : les
 # projections étroites k_proj / v_proj (N = 1 024, exclues de Marlin par `_PROJ_MARLIN_MIN_N`, kernels/__init__.py:1270)
-# passent par `F.linear` (kernels/__init__.py:932), et cuBLAS y prend pour certaines formes (M, N ≤ 1 024) une réduction à
+# passent par `F.linear` (kernels/__init__.py:975), et cuBLAS y prend pour certaines formes (M, N ≤ 1 024) une réduction à
 # précision réduite : 15 % (k) et 30 % (v) des éléments différaient entre 7 865 lignes d'un seul tenant et 4 096 + 3 769 —
 # Devstral s'écartait de 10 × son témoin reprise sous les morceaux. Sous `exacte` : morceaux et seul tenant au bit (352
 # valeurs sur 352). Drapeau GLOBAL du processus.
 # POURQUOI OPT-IN (revue/poste6-bf16-reduction-verdict-carte-02-10, seuil scellé avant) : le préfill coûte +2,40 % à
 # M = 4 096 (seuil 2 % ; +0,2 à +0,8 % de 512 à 2 048), et le réglage change AUSSI la sortie servie du seul tenant (premier
 # jeton basculé à 7 865 lignes) : ce n'est pas un réglage neutre, il lui faut la garde de qualité au modèle avant le défaut.
-_BF16_REDUCTION = (os.environ.get("ACVRAM_BF16_REDUCTION") or "reduite").strip().lower()     # exacte | reduite (regime.VARIABLES)
+# `etroite` (03/10, scellés revue/poste6-bf16-etroite-scelle-02-10 et poste6-bf16-prefill-cublas-scelle-03-10) : la
+# réduction exacte n'est posée que le temps des `F.linear` cuBLAS des poids quantifiés au préfill (`kernels.linear_prefill` :
+# chemin naturel, Marlin dépaqueté, vue de pile), le reste du processus garde le défaut de torch. Première forme (k / v
+# seules, verdict carte 03/10) : au bit au noyau et gratuite, mais les morceaux ne rendaient pas le seul tenant — les
+# projections larges passaient encore par cuBLAS réduit ; étendue aux six sites : +2,32 % à M = 4 096 et le moteur dépend
+# encore du découpage par un produit hors d'eux (verdict carte 03/10). Opt-in, défaut `reduite` (tranché par le chef).
+_BF16_REDUCTION = (os.environ.get("ACVRAM_BF16_REDUCTION") or "reduite").strip().lower()     # regime.VARIABLES
+_MODES_ETROITS = {"etroite": "appel"}      # 03/10 : `etroite-tranches` (E9) puis `tranches` (C4 : +7,44 %) retirées
 
 
 def poser_reduction_bf16() -> str:
-    """Pose le drapeau cuBLAS selon `ACVRAM_BF16_REDUCTION`, au chargement du moteur ; rend « exacte » ou « reduite ».
-    Les deux sens sont écrits : un retrait après un chargement « exacte » dans le même processus doit se voir."""
-    exacte = _BF16_REDUCTION == "exacte"
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = not exacte
-    return "exacte" if exacte else "reduite"
+    """Pose le réglage selon `ACVRAM_BF16_REDUCTION`, au chargement du moteur ; rend le mode posé (`reduite` si inconnu).
+    Les deux sens sont écrits : un retrait après un chargement « exacte » dans le même processus doit se voir ; de même la
+    portée étroite est levée si le mode ne la demande plus."""
+    from .. import kernels as _kernels
+    mode = _BF16_REDUCTION if _BF16_REDUCTION in ("exacte", *_MODES_ETROITS) else "reduite"
+    _kernels._REDUCTION_ETROITE = _MODES_ETROITS.get(mode)
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = mode != "exacte"
+    return mode
 
 
 def reduction_bf16_en_vigueur() -> str:
-    """Lu sur le drapeau lui-même, pas sur la variable : c'est lui qui décide du calcul (ligne de régime)."""
-    return "reduite" if torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction else "exacte"
+    """Lu sur le drapeau lui-même et sur la portée posée dans les noyaux, pas sur la variable : c'est eux qui décident du
+    calcul (ligne de régime)."""
+    from .. import kernels as _kernels
+    if not torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction:
+        return "exacte"
+    return next((m for m, p in _MODES_ETROITS.items() if p == _kernels._REDUCTION_ETROITE), "reduite")
 
 
 def _a_des_puits(manifest: Optional[dict]) -> bool:

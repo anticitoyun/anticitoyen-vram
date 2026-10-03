@@ -66,3 +66,13 @@ durée : 3 min 35 s de carte (prévu ≈ 8 min)
   seuil `_PROJ_MARLIN_MIN_N` abaissé) — ne toucherait que les deux projections, donc ni le coût à 4 096 ni C3 s'ils viennent
   d'ailleurs. À sceller avant d'y toucher.
 * Les morceaux forcés restent opt-in (déjà tranché) : sous le défaut `reduite`, un préfill découpé ne rend pas le seul tenant.
+
+## Addendum 02/10 23 h 1x — rejeu avec le comparateur corrigé (même candidat, top-10 complet, `s1-morceaux-comparer.py`)
+
+| prise | témoin reprise (même candidat) | P3 B / A1 | |
+|---|---|---|---|
+| dense `exacte` | 0,0406 sur 10 valeurs, premier jeton basculé | **0 sur 320 valeurs** ≤ 0,0812 | tenu |
+| dense `reduite` | 0,0267 sur 9 valeurs, premier jeton basculé | 0,0613 sur 10 valeurs, premier jeton basculé > 0,0533 | FAUX |
+
+Les 0,041 / 0,052 du point 1 ne regardaient que X et Y ; sur les dix candidats, 0,0406 / 0,0613. Conclusion inchangée.
+Preuve de cassure du test (`tests/test_s1_comparateur_candidat.py`) : l'ancien calcul réintroduit par mutation → 5 tests rouges sur 7.

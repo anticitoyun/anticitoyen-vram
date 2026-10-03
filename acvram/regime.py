@@ -430,7 +430,9 @@ VARIABLES: tuple[Variable, ...] = (
              "02/10 : `exacte` (opt-in) pose torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False au "
              "chargement — sans lui les projections étroites (k/v, N = 1 024) changent de 1 ulp sur 15-30 % de leurs "
              "éléments selon le découpage du préfill ; `reduite` (défaut) : le défaut de torch. Opt-in parce que le préfill "
-             "coûte +2,40 % à M = 4 096 (seuil 2 %) et que la sortie du seul tenant change aussi. Régime « reduction_bf16= »"),
+             "coûte +2,40 % à M = 4 096 (seuil 2 %) et que la sortie du seul tenant change aussi. `etroite` (03/10) : "
+             "réduction exacte le temps des seuls F.linear cuBLAS des poids quantifiés au préfill (kernels.linear_prefill) — "
+             "+2,32 % à M = 4 096, et le moteur dépend encore du découpage par un produit hors d'eux. Régime « reduction_bf16= »"),
     Variable("PRELECTURE", "1", ("acvram.engine.loader", "_PRELECTURE"), None,
              "B2 (02/10) : fils qui remplissent le cache de pages des fragments (readahead par pas de 128 Kio) pendant le "
              "chargement ; 0 : jamais. Ne change aucun octet chargé ; coupée si les fragments dépassent 80 % de la RAM disponible"),

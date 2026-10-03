@@ -18,6 +18,17 @@
   (Devstral, 7 865 jetons : premier jeton basculé). Sous `exacte` : morceaux et seul tenant **au bit** (352 valeurs sur
   352). Opt-in parce que le préfill coûte **+2,40 % à M = 4 096** (+0,2 à +0,8 % de 512 à 2 048) pour un seuil écrit avant
   de 2 %, et que le réglage change aussi la sortie servie du seul tenant. La ligne de régime dit `reduction_bf16=`.
+  `etroite` / `etroite-tranches` (03/10) : la réduction exacte seulement le temps du `F.linear` du chemin NVFP4 naturel
+  (k_proj / v_proj) — au bit du drapeau global sur ces produits, gratuite au moteur (+0,02 % à M = 4 096), mais un
+  préfill découpé ne rend toujours pas le seul tenant : un autre produit cuBLAS du préfill dépend du découpage.
+  Opt-in aussi. `acvram-memoire/revue/poste6-bf16-etroite-verdict-carte-03-10.md`. Étendue le 03/10 aux six `F.linear`
+  cuBLAS des poids quantifiés au préfill (`kernels.linear_prefill` : naturel, Marlin dépaqueté, vue de pile ; `down_proj`
+  K = 32 768 dépendait de M à 18,6 %) : +2,32 % à M = 4 096, et le moteur dépend encore du découpage par un produit
+  hors de ces sites ; un bras « tranches » (blocs de 1 024 lignes, drapeau intact) mesuré à +7,44 % et retiré. Le produit
+  manquant, nommé au profileur : le repli bf16 des couches int8 au préfill (`int8_matmul`, quand `gemm_i8c_cublas` refuse
+  le poids) — 180 GEMM cuBLAS sur Devstral-24B, désormais sous `linear_prefill` ; la ligne de régime dit le chemin int8
+  PRIS (`prefill_int8=repli-bf16×N+cublas×M`) et non plus le seul réglage. `etroite` reste opt-in, défaut inchangé.
+  `acvram-memoire/revue/poste6-bf16-prefill-cublas-verdict-carte-03-10.md`, `poste6-bf16-sonde-verdict-carte-03-10.md`.
   `acvram-memoire/revue/poste6-bf16-reduction-verdict-carte-02-10.md`.
 
 ### Troncature causale du cœur MLA au préfill, en option (zzs)

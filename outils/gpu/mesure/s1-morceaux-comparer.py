@@ -4,6 +4,11 @@
 Lit `scratchpad/poste6-s1-<bras>/{completion.json,metrics.json,serveur.log}` et juge P1-P5 du scellé
 `poste6-s1-morceaux-scelle-carte-30-09.md`. Ne montre jamais le texte généré (REGLES § 6) : ids par sha256 des jetons,
 logprobs par écart maximal. Usage : s1-morceaux-comparer.py [dossier-scratchpad]  → rc 0 si P1-P5 tenus, 1 sinon.
+
+Le témoin reprise et P3 se lisent sur le logprob du MÊME candidat (`ecart_candidats`, 02/10) : jusqu'au 02/10 22 h, quand
+le premier jeton basculait, le script soustrayait les logprobs des deux jetons CHOISIS — deux jetons différents. Sur
+l'invite dense de S1 (deux candidats de tête à 0,01-0,08 l'un de l'autre) il affichait 0,0299 et 0,00403 pour des écarts
+réels de 0,041 et 0,014 (revue/poste6-bf16-reduction-verdict-carte-02-10.md). Test : tests/test_s1_comparateur_candidat.py.
 """
 import hashlib
 import json
@@ -43,6 +48,7 @@ def lire(base: Path, bras: str, fichier: str = "completion.json") -> dict:
     return {
         "n": len(toks),
         "sha_ids": hashlib.sha256("\x1f".join(toks).encode()).hexdigest()[:16],
+        "cles": [hashlib.sha256(k.encode()).hexdigest()[:12] for k in toks],        # même hachage que les clés de `tops`
         "vals": vals, "tops": plat,
         "prompt_tokens": c.get("usage", {}).get("prompt_tokens"),
         "morceaux": int(m.get("engine", {}).get("prefill_morceaux", -1)),
@@ -72,8 +78,39 @@ def ecart(x: dict, y: dict) -> tuple[float, int]:
     return d, n
 
 
-def main() -> int:
-    base = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parents[3] / "scratchpad")
+def ecart_candidats(ref: dict, autre: dict) -> tuple[float, int, int | None]:
+    """(Δ max du logprob du MÊME candidat, valeurs comparées, position de divergence des jetons choisis ou None).
+
+    Position par position tant que les deux suites conditionnent sur le même texte : jusqu'à la première position où les
+    jetons choisis divergent, INCLUSE — au-delà, les distributions ne portent plus sur le même contexte et ne se comparent pas.
+    Candidats comparés : ceux du top de la référence présents dans le top de l'autre. Le jeton CHOISI par la référence doit
+    s'y trouver, sinon inf : il n'y a alors rien de comparable, et soustraire le logprob du jeton choisi par l'autre
+    comparerait deux jetons différents (la faute d'avant)."""
+    d, n = 0.0, 0
+    commun = min(len(ref["cles"]), len(autre["cles"]))
+    for i in range(commun):
+        ka, kb = ref["cles"][i], autre["cles"][i]
+        ta = dict((ref["tops"][i] if i < len(ref["tops"]) else None) or ())
+        tb = dict((autre["tops"][i] if i < len(autre["tops"]) else None) or ())
+        ta.setdefault(ka, ref["vals"][i])
+        tb.setdefault(kb, autre["vals"][i])
+        if ta[ka] is None or tb.get(ka) is None:
+            return float("inf"), n, (i if ka != kb else None)
+        for k, a in ta.items():
+            if a is not None and tb.get(k) is not None:
+                d = max(d, abs(a - tb[k])); n += 1
+        if ka != kb:
+            return d, n, i
+    return d, n, (commun if len(ref["cles"]) != len(autre["cles"]) else None)
+
+
+def _bascule(pos: int | None) -> str:
+    return "" if pos is None else f", jetons choisis divergents à la position {pos} (même candidat comparé jusque-là)"
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    base = Path(argv[0] if argv else Path(__file__).resolve().parents[3] / "scratchpad")
     r = {b: lire(base, b) for b in BRAS}
     ok = True
     for b in BRAS:
@@ -83,26 +120,23 @@ def main() -> int:
     # la chauffe compte ses propres morceaux (2 essais à 10 240 le 01/10) : B > 0, A = 0
     p1 = r["A1"]["morceaux"] == 0 and r["A2"]["morceaux"] == 0 and r["B"]["morceaux"] > 0 and r["B"]["regime_morceaux"] and not r["A1"]["regime_morceaux"]
     d2, n2 = ecart(r["A1"], r["A2"])
-    d3, n3 = ecart(r["A1"], r["B"])
+    d3, n3, v3 = ecart_candidats(r["A1"], r["B"])
     p2 = d2 == 0.0 and n2 > 0
     # REGLES § 4 (chef 01/10) : le seuil des morceaux est 2 × l'écart du témoin reprise (même requête rejouée sur le serveur
     # A1, REQUETES=2 → completion-2.json : K/V de l'invite relus du cache), jamais « au bit » (SDPA par blocs de clés)
     rep = lire(base, "A1", "completion-2.json")
-    dr, nr = ecart(r["A1"], rep) if rep else (float("nan"), 0)
-    if rep and dr == float("inf"):
-        # ids divergents dès le témoin : l'écart se lit sur les logprobs de la position 0 (seul point commun garanti)
-        dr = abs(r["A1"]["vals"][0] - rep["vals"][0]) if r["A1"]["vals"] and rep["vals"] else float("inf")
-    seuil3 = 2 * dr if nr or rep else (0.0 if p2 else 2 * d2)
-    if d3 == float("inf") and r["B"]["vals"] and r["A1"]["vals"]:
-        d3 = abs(r["A1"]["vals"][0] - r["B"]["vals"][0]); n3 = 1       # même lecture pour B : position 0
-    p3 = n3 > 0 and d3 <= seuil3
+    dr, nr, vr = ecart_candidats(r["A1"], rep) if rep else (float("nan"), 0, None)
+    seuil3 = 2 * dr if rep else (0.0 if p2 else 2 * d2)
+    # un témoin incomparable (inf) ne rend pas P3 « tenu » par défaut : un seuil infini ne juge rien
+    p3 = n3 > 0 and seuil3 != float("inf") and d3 <= seuil3
     pt = {r[b]["prompt_tokens"] for b in BRAS}
     p4 = len(pt) == 1 and (r["A1"]["prompt_tokens"] or 0) >= 5120
     p5 = len({r[b]["exil"] for b in BRAS}) == 1
     print(f"P1 prise (B>0, A=0, régime) : {'tenu' if p1 else 'FAUX'}")
     print(f"P2 témoin A1/A2 : Δmax {d2:.3g} sur {n2} valeurs : {'tenu (au bit)' if p2 else 'FAUX — seuil P3 = 2×Δ = ' + format(seuil3, '.3g')}")
-    print(f"témoin reprise A1 (requête rejouée) : Δ {dr:.3g} sur {nr} valeurs" + ("" if rep else " — ABSENT (REQUETES=2 non passé) : seuil = témoin A1/A2"))
-    print(f"P3 B/A1 : Δ {d3:.3g} sur {n3} valeurs ≤ 2 × témoin reprise = {seuil3:.3g} : {'tenu' if p3 else 'FAUX'}")
+    print(f"témoin reprise A1 (requête rejouée) : Δ {dr:.3g} sur {nr} valeurs" + _bascule(vr)
+          + ("" if rep else " — ABSENT (REQUETES=2 non passé) : seuil = témoin A1/A2"))
+    print(f"P3 B/A1 : Δ {d3:.3g} sur {n3} valeurs{_bascule(v3)} ≤ 2 × témoin reprise = {seuil3:.3g} : {'tenu' if p3 else 'FAUX'}")
     print(f"P4 prompt_tokens {sorted(pt)} ≥ 5120 et égaux : {'tenu' if p4 else 'FAUX'}")
     print(f"P5 exil MLP identique ({[r[b]['exil'] for b in BRAS]}) : {'tenu' if p5 else 'FAUX — comparaison contaminée'}")
     ok = p1 and p2 and p3 and p4 and p5

@@ -692,6 +692,43 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # sur une forme non balayée. La variable reste comme échappement.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
 PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4")
+
+# Réduction bf16 au PRÉFILL (poste6 03/10, scellés revue/poste6-bf16-etroite-scelle-02-10.md et
+# poste6-bf16-prefill-cublas-scelle-03-10.md). Au-delà de `_NVFP4_GEMV_MAX` lignes, tout poids quantifié est confié à
+# cuBLAS en bf16 (chemin naturel déquantifié, Marlin dépaqueté, vue d'une pile) ; cuBLAS y prend, selon le nombre de
+# lignes M, une réduction à précision réduite — 15-30 % des éléments de k / v diffèrent entre un préfill d'un seul tenant
+# et le même découpé en morceaux. Le drapeau global (`ACVRAM_BF16_REDUCTION=exacte`) le retire partout mais coûte +2,40 %
+# de préfill à M = 4 096. `linear_prefill` est le SEUL point d'entrée de ces produits ; son mode est posé par
+# `engine.loader.poser_reduction_bf16` (une seule source, jamais l'environnement ici) :
+#   None : rien (défaut) ·
+#   "appel" (`etroite`) : réduction exacte le temps de cet appel (cuBLAS relit le drapeau à chaque GEMM, mesuré le 02/10),
+#     drapeau rendu après, même si l'appel lève — au bit du drapeau global sur ces produits (E2, 03/10).
+# Carte 03/10 (revue/poste6-bf16-prefill-cublas-verdict-carte-03-10) : `etroite` rend les six produits indépendants de M
+# au bit (down_proj, K = 32 768, en dépendait à 18,6 %) pour +2,32 % à M = 4 096, mais le moteur dépend encore du découpage
+# par un produit cuBLAS hors de ces sites ; un bras « tranches de 1 024 lignes sans drapeau » a été mesuré et RETIRÉ :
+# +7,44 % à 4 096 (cuBLAS à 1 024 lignes perd × 1,17-1,28 sur les GEMM larges) et pas au bit non plus.
+_REDUCTION_ETROITE: Optional[str] = None
+
+
+def _etroite_applicable(x: torch.Tensor) -> bool:
+    return _REDUCTION_ETROITE is not None and x.dtype == torch.bfloat16 and x.is_cuda      # cuBLAS seulement
+
+
+def linear_prefill(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """`F.linear` d'un poids quantifié matérialisé en bf16, au préfill : sous `etroite`, réduction exacte le temps de
+    l'appel ; sans mode, l'appel nu."""
+    if not _etroite_applicable(x):
+        return torch.nn.functional.linear(x, w)
+    m = torch.backends.cuda.matmul
+    avant = m.allow_bf16_reduced_precision_reduction
+    m.allow_bf16_reduced_precision_reduction = False
+    try:
+        return torch.nn.functional.linear(x, w)
+    finally:
+        m.allow_bf16_reduced_precision_reduction = avant
+
+
+_linear_naturel = linear_prefill          # nom du 02/10 (tests, carnet) ; les trois sites du chemin naturel l'appellent
 # Pièce 147 L2 (24/09, poste6) : « marlin » — la GEMM Marlin W4A16 au préfill de la disposition unique, sans dépaquetage —
 # a été mesurée FAUSSE et retirée (166) : TTFT servi b=1 +4 / +27 / +35 % à 512 / 2 048 / 4 096, J +5 / +28 / +36 %, KL 2,3-3 ×
 # les témoins (revue/poste6-piece147L2-verdict-24-09.md). Marlin perd à grand M contre dépaquetage + cuBLAS ; ne pas rouvrir
@@ -810,7 +847,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             if k_pad != t.shape[1]:
                 W = W[:, : t.shape[1]]
             dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
-            return torch.nn.functional.linear(x, W.to(dt).to(x.dtype))
+            return linear_prefill(x, W.to(dt).to(x.dtype))
         return nvfp4_matmul(x, pile, gemv_threshold)[..., d:d + n_lig]
     if getattr(t, "_marlin_unique", False):
         return _marlin_seul(x, t)
@@ -881,7 +918,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         w = _w_partage(("gsr", id(t), x.dtype),
                        lambda: nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16,
                                              gscale_rows=gsr, rows_per_group=1))
-        return torch.nn.functional.linear(x, w.to(x.dtype))
+        return _linear_naturel(x, w.to(x.dtype))
 
     # Prefill. Par défaut ``bf16`` : déquantification exacte puis cuBLAS —
     # W4A16 au sens propre. Les deux autres régimes changent la sortie et se
@@ -928,11 +965,11 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
                              (b - a, t.shape[1]), t.padded_in)
             w = _w_partage(("naturel", id(t), x.dtype, a, b),
                            lambda tr=tr: nvfp4_dequant(tr, dt))
-            out[..., a:b] = torch.nn.functional.linear(x, w.to(x.dtype))
+            out[..., a:b] = _linear_naturel(x, w.to(x.dtype))
         return out
     w = _w_partage(("naturel", id(t), x.dtype),
                    lambda: nvfp4_dequant(t, dt))
-    return torch.nn.functional.linear(x, w.to(x.dtype))
+    return _linear_naturel(x, w.to(x.dtype))
 
 
 # --------------------------------------------------------------------------
@@ -1194,8 +1231,25 @@ def quantifier_a8_i8c(x: torch.Tensor):
     return quantifier_a8_torch(x)
 
 
-def prefill_int8_regime() -> str:
-    return _PREFILL_INT8
+def prefill_int8_regime(model=None) -> str:
+    """Le chemin int8 du préfill tel qu'il sera PRIS, pas tel qu'il est réglé (sonde du 03/10, revue/poste6-bf16-sonde-
+    verdict-carte-03-10) : sous `cublas`, `gemm_i8c_cublas` refuse tout poids qui n'est pas symétrique par canal
+    (`_i8c_eligible`) et `int8_matmul` le déquantifie en bf16 pour cuBLAS — 180 GEMM bf16 sur Devstral-24B que la ligne
+    « prefill_int8=cublas » masquait. Avec le modèle : `cublas×A+repli-bf16×B` (les poids « origine fp8 » déjà nommés
+    par `prefill_i8c_texte` ne sont pas recomptés) ; sans modèle ou sans repli : le réglage seul."""
+    if model is None or _PREFILL_INT8 != "cublas":
+        return _PREFILL_INT8
+    ok = repli = 0
+    for mod in model.modules():
+        q = getattr(mod, "qweight", None)
+        if isinstance(q, INT8Tensor) and not q.__dict__.get("prefill_bf16"):
+            if _i8c_eligible(q):
+                ok += 1
+            else:
+                repli += 1
+    if not repli:
+        return _PREFILL_INT8
+    return f"repli-bf16×{repli}" + (f"+cublas×{ok}" if ok else "")
 
 
 def tete_int8_entree_bf16(n_lignes: int) -> bool:
@@ -1347,10 +1401,10 @@ def _marlin_seul(x: torch.Tensor, t):
             out = torch.empty(xr.shape[0], W.shape[0], dtype=x.dtype, device=x.device)
             for a in range(0, W.shape[0], pas):
                 b = min(a + pas, W.shape[0])
-                out[:, a:b] = torch.nn.functional.linear(xr, W[a:b].to(x.dtype))
+                out[:, a:b] = linear_prefill(xr, W[a:b].to(x.dtype))
             y = out
         else:
-            y = torch.nn.functional.linear(xr, W.to(dt).to(x.dtype))
+            y = linear_prefill(xr, W.to(dt).to(x.dtype))
         return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
     else:
         CHEMINS_NVFP4["marlin_dense_seul"] += 1
@@ -1730,12 +1784,12 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             tr = INT8Tensor(t.qweight[a:b], t.scales[a:b], t.zeros[a:b], t.group_size,
                             (b - a, t.shape[1]), t.format)
             w = _w_partage(cle_int8 + (dt, a, b), lambda tr=tr: int8_dequant(tr, dt))
-            out[..., a:b] = torch.nn.functional.linear(x, w.to(x.dtype))
+            out[..., a:b] = linear_prefill(x, w.to(x.dtype))      # 03/10 : produit cuBLAS bf16 du préfill, sous `etroite`
         return out
     # Pièce 179 : B' (172) étendu à la déquantification int8 — dans la boucle par séquence d'une couche à récurrence
     # linéaire, le poids bf16 est fabriqué une fois ; mêmes valeurs, mêmes appels : au bit.
     w = _w_partage(cle_int8 + (dt,), lambda: int8_dequant(t, dt))
-    return torch.nn.functional.linear(x, w.to(x.dtype))
+    return linear_prefill(x, w.to(x.dtype))                       # 03/10 : idem (sonde : 180 GEMM bf16 masqués sans cela)
 
 
 # --------------------------------------------------------------------------
