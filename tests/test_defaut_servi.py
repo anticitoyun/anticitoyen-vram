@@ -293,10 +293,10 @@ DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_
 # 0.7.18 (en préparation) : B2, PRELECTURE=1 (prélecture des fragments au chargement, aucun octet changé) ; levier 2 + g6r +
 # plongements (poste6 01-02/10) : KV_ANNEAU=auto (anneau seulement si le KV plein exile ou ne loge pas une séquence),
 # EMBED=auto (la table de plongements ne quitte la carte qu'avant un exil de MLP) — rien ne change pour un plan qui tenait ;
-# zzs, troncature causale du cœur MLA au préfill, OPT-IN (MLA_CAUSAL=0 par défaut) — −24 % du GPU du préfill à 8 k sur
-# Kimi-Linear-35B, mais la sortie change ; le défaut ne bascule qu'après la garde de PPL à 8 192 + 512.
+# zzs, troncature causale du cœur MLA au préfill, MLA_CAUSAL=1 par défaut (garde PPL 8 192 + 512 tenue le 03/10,
+# poste2-zzs-garde-ppl-verdict-03-10) — −24 % du GPU du préfill à 8 k sur Kimi-Linear-35B, sortie hors bit du témoin.
 # Réduction bf16 exacte de cuBLAS, OPT-IN (BF16_REDUCTION=reduite par défaut) : morceaux = seul tenant au bit sous `exacte`,
 # mais +2,40 % de préfill à M = 4 096 (seuil scellé 2 %) et la sortie du seul tenant change — garde de qualité d'abord.
 DEFAUTS_PAR_VERSION["0.7.18"] = ({**DEFAUTS_PAR_VERSION["0.7.17"][0], "PRELECTURE": "1", "KV_ANNEAU": "auto", "EMBED": "auto",
-                                  "MLA_CAUSAL": "0", "BF16_REDUCTION": "reduite", "INT8_PROMUS": ""},
+                                  "MLA_CAUSAL": "1", "BF16_REDUCTION": "reduite", "INT8_PROMUS": ""},
                                  DEFAUTS_PAR_VERSION["0.7.17"][1])

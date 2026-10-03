@@ -44,14 +44,15 @@
   témoin reprise × 3,4 (SNR des promus 53,6 → 38,0 dB) : aucun modèle du parc converti avec.
   `acvram-memoire/revue/poste6-ro7-b-conversion-verdict-carte-03-10.md`.
 
-### Troncature causale du cœur MLA au préfill, en option (zzs)
+### Troncature causale du cœur MLA au préfill, par défaut (zzs)
 
-* `ACVRAM_MLA_CAUSAL=1` limite les scores, le masque, le softmax et le produit par V de chaque morceau du préfill aux clés
+* `ACVRAM_MLA_CAUSAL` (défaut 1 ; 0 = témoin, toutes les clés puis masque) limite les scores, le masque, le softmax et le produit par V de chaque morceau du préfill aux clés
   que ce morceau voit, au lieu de toutes les clés puis du masque. Sur Kimi-Linear-35B (RTX 5090, b=1), le préfill gagne
   24 % au GPU à 8 192 jetons, et 27 % à 8 192 et 31 % à 12 288 au mur. Le décodage ne change pas.
-* **Désactivée par défaut** : la sortie n'est pas identique au bit (l'écart reste dans l'erreur d'arrondi du chemin complet
-  contre fp64), et 2 réponses gloutonnes sur 6 divergent. Le défaut ne changera qu'après une garde de qualité (perplexité de
-  décodage à 8 192 + 512 jetons).
+* La sortie n'est pas identique au bit du témoin (l'écart reste dans l'erreur d'arrondi du chemin complet contre fp64),
+  et 2 réponses gloutonnes sur 6 divergent. **Activée par défaut** après la garde de qualité : perplexité de décodage à
+  8 192 + 512 jetons sur 9 tranches, Δ géo +0,198 % (+ 2 SE : 0,504 %), max par tranche 0,928 %, sous les seuils scellés
+  (+0,3 %, +0,6 %, 2 %). La ligne de régime nomme le témoin : `mla_causal=0(témoin)`.
 
 ### gemma-4-31B à 65 536 jetons : cache KV en anneau, cible KV par séquence, plongements en RAM hôte (poste6, levier 2, g6r)
 
