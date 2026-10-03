@@ -72,8 +72,8 @@ def test_un_seul_tenant_egale_un_decoupage_au_bit_sous_le_reglage(drapeau, monke
 
 # ---- réduction au PRÉFILL (03/10, scellés revue/poste6-bf16-etroite-scelle-02-10.md et poste6-bf16-prefill-cublas-
 # scelle-03-10.md) : `kernels.linear_prefill` est le point d'entrée des F.linear cuBLAS bf16 des poids quantifiés au préfill
-# (naturel, Marlin dépaqueté, vue de pile). `etroite` : drapeau posé le temps de l'appel, puis rendu ; `tranches` : drapeau
-# intact, M par blocs de 1 024 lignes alignés.
+# (naturel, Marlin dépaqueté, vue de pile). `etroite` : drapeau posé le temps de l'appel, puis rendu. Le bras `tranches`
+# (blocs de 1 024 lignes) a été mesuré et retiré le 03/10 (+7,44 % à M = 4 096, pas au bit au moteur).
 from acvram import kernels as K  # noqa: E402
 
 
@@ -109,18 +109,6 @@ def test_etroite_rend_le_drapeau_meme_si_l_appel_leve(etroite, drapeau, monkeypa
     assert drapeau.allow_bf16_reduced_precision_reduction is True
 
 
-def test_tranches_decoupe_m_par_1024_sans_toucher_au_drapeau(etroite, drapeau, monkeypatch):
-    monkeypatch.setattr(K, "_REDUCTION_ETROITE", "tranches")
-    x, w = torch.randn(2, 1250, 64), torch.randn(32, 64)                # 2 × 1 250 lignes : 1 024 + 1 024 + 452
-    y = K.linear_prefill(x, w)
-    assert y.shape == (2, 1250, 32) and etroite == [(1024, True), (1024, True), (452, True)], "le drapeau reste tel quel"
-    assert drapeau.allow_bf16_reduced_precision_reduction is True
-    assert torch.allclose(y, torch.nn.functional.linear(x, w), atol=1e-4)      # fp32 processeur : ordre de K selon M
-    etroite.clear()
-    K.linear_prefill(torch.randn(1024, 64), w)                            # ≤ 1 024 lignes : un seul appel
-    assert etroite == [(1024, True)]
-
-
 def test_sans_mode_etroit_rien_ne_change(etroite, drapeau, monkeypatch):
     monkeypatch.setattr(K, "_REDUCTION_ETROITE", None)
     K.linear_prefill(torch.randn(3000, 64), torch.randn(32, 64))
@@ -129,20 +117,20 @@ def test_sans_mode_etroit_rien_ne_change(etroite, drapeau, monkeypatch):
 
 def test_le_chargement_pose_le_mode_etroit_dans_les_noyaux(converted, drapeau, monkeypatch):
     from acvram.engine.loader import load_model
-    for mode, portee, flag in (("etroite", "appel", True), ("tranches", "tranches", True),
-                               ("exacte", None, False), ("reduite", None, True), ("n-importe-quoi", None, True)):
+    for mode, portee, flag in (("etroite", "appel", True), ("exacte", None, False), ("reduite", None, True),
+                               ("tranches", None, True), ("n-importe-quoi", None, True)):       # `tranches` : retirée
         monkeypatch.setattr(LD, "_BF16_REDUCTION", mode)
         load_model(converted, dtype=torch.float32, device_override="cpu", max_concurrent_seqs=2)
         assert K._REDUCTION_ETROITE == portee and drapeau.allow_bf16_reduced_precision_reduction is flag, mode
-        assert LD.reduction_bf16_en_vigueur() == (mode if mode != "n-importe-quoi" else "reduite")
+        assert LD.reduction_bf16_en_vigueur() == (mode if mode in ("etroite", "exacte", "reduite") else "reduite")
 
 
 @pytest.mark.gpu_requis
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuBLAS : carte requise")
 def test_etroite_sur_carte_e1_e3(drapeau, monkeypatch):
     """E1 : sous `etroite`, 7 865 lignes contre 4 096 + 3 769 au bit (témoin `reduite` : des éléments diffèrent) ; E2 : au
-    bit du drapeau global à chaque M ; E3 (03/10, B5) : `tranches` sans drapeau, 7 865 en blocs contre 4 096 + 3 769 en
-    blocs, au bit — à N = 1 024 / K = 5 120 (k, v) et N = 5 120 / K = 32 768 (down_proj) ; E0 : le drapeau est rendu."""
+    bit du drapeau global à chaque M ; E3 (03/10) : `etroite` à la forme de down_proj (N = 5 120, K = 32 768, qui dépend
+    de M à 18,6 % sous le défaut), 7 865 contre 4 096 + 3 769 au bit ; E0 : le drapeau est rendu."""
     g = torch.Generator().manual_seed(0)
     x = torch.randn(7865, 5120, generator=g).to(torch.bfloat16).cuda()
     w = torch.randn(1024, 5120, generator=g).to(torch.bfloat16).cuda()
@@ -166,16 +154,16 @@ def test_etroite_sur_carte_e1_e3(drapeau, monkeypatch):
         print(f"E2 M={M} : {e2} éléments diffèrent du drapeau global")
         assert e2 == 0, f"M={M} : E2 {e2}"
     del un, deux, p, glob
-    for N, Kd in ((1024, 5120), (5120, 32768)):                           # k / v, puis down_proj
+    for N, Kd in ((5120, 32768),):                                       # down_proj
         xb = torch.randn(7865, Kd, generator=g).to(torch.bfloat16).cuda()
         wb = torch.randn(N, Kd, generator=g).to(torch.bfloat16).cuda()
-        un_t = sous("tranches", lambda: K.linear_prefill(xb, wb))
-        deux_t = sous("tranches", lambda: torch.cat([K.linear_prefill(xb[:4096], wb), K.linear_prefill(xb[4096:], wb)]))
+        un_t = sous("etroite", lambda: K.linear_prefill(xb, wb))
+        deux_t = sous("etroite", lambda: torch.cat([K.linear_prefill(xb[:4096], wb), K.linear_prefill(xb[4096:], wb)]))
         nu = sous("reduite", lambda: int((K.linear_prefill(xb, wb) != torch.cat(
             [K.linear_prefill(xb[:4096], wb), K.linear_prefill(xb[4096:], wb)])).sum()))
         e3 = int((un_t != deux_t).sum())
-        print(f"E3 N={N} K={Kd} : tranches {e3} éléments différents entre 7 865 et 4 096 + 3 769 (nu, reduite : {nu}) sur {un_t.numel()}")
-        assert e3 == 0, f"N={N} K={Kd} : E3 {e3} — les blocs de 1 024 ne rendent pas le même noyau"
+        print(f"E3 N={N} K={Kd} : etroite {e3} éléments différents entre 7 865 et 4 096 + 3 769 (nu, reduite : {nu}) sur {un_t.numel()}")
+        assert e3 == 0, f"N={N} K={Kd} : E3 {e3}"
         assert drapeau.allow_bf16_reduced_precision_reduction is True
         del xb, wb, un_t, deux_t
     if temoin == 0:

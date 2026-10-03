@@ -702,13 +702,12 @@ PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4")
 # `engine.loader.poser_reduction_bf16` (une seule source, jamais l'environnement ici) :
 #   None : rien (défaut) ·
 #   "appel" (`etroite`) : réduction exacte le temps de cet appel (cuBLAS relit le drapeau à chaque GEMM, mesuré le 02/10),
-#     drapeau rendu après, même si l'appel lève — au bit du drapeau global sur ces produits (E2, 03/10) ·
-#   "tranches" (`tranches`) : drapeau laissé tel quel, M découpé par blocs de `_TRANCHE_PREFILL` lignes alignés sur le début
-#     de la séquence — un découpage en morceaux multiples de 1 024 lignes rejoue les mêmes blocs que le seul tenant, donc
-#     le même noyau cuBLAS, sans payer la réduction exacte. Limite nommée : un découpage non aligné (cache de préfixe)
-#     ne rend pas le seul tenant.
+#     drapeau rendu après, même si l'appel lève — au bit du drapeau global sur ces produits (E2, 03/10).
+# Carte 03/10 (revue/poste6-bf16-prefill-cublas-verdict-carte-03-10) : `etroite` rend les six produits indépendants de M
+# au bit (down_proj, K = 32 768, en dépendait à 18,6 %) pour +2,32 % à M = 4 096, mais le moteur dépend encore du découpage
+# par un produit cuBLAS hors de ces sites ; un bras « tranches de 1 024 lignes sans drapeau » a été mesuré et RETIRÉ :
+# +7,44 % à 4 096 (cuBLAS à 1 024 lignes perd × 1,17-1,28 sur les GEMM larges) et pas au bit non plus.
 _REDUCTION_ETROITE: Optional[str] = None
-_TRANCHE_PREFILL = 1024
 
 
 def _etroite_applicable(x: torch.Tensor) -> bool:
@@ -716,20 +715,10 @@ def _etroite_applicable(x: torch.Tensor) -> bool:
 
 
 def linear_prefill(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """`F.linear` d'un poids quantifié matérialisé en bf16, au préfill : selon le mode, réduction exacte le temps de
-    l'appel (`appel`) ou blocs de lignes fixes (`tranches`) ; sans mode, l'appel nu."""
-    mode = _REDUCTION_ETROITE
+    """`F.linear` d'un poids quantifié matérialisé en bf16, au préfill : sous `etroite`, réduction exacte le temps de
+    l'appel ; sans mode, l'appel nu."""
     if not _etroite_applicable(x):
         return torch.nn.functional.linear(x, w)
-    if mode == "tranches":
-        lignes = x.numel() // x.shape[-1]
-        if lignes <= _TRANCHE_PREFILL:
-            return torch.nn.functional.linear(x, w)
-        x2 = x.reshape(lignes, x.shape[-1])
-        out = torch.empty(lignes, w.shape[0], dtype=x.dtype, device=x.device)
-        for a in range(0, lignes, _TRANCHE_PREFILL):
-            out[a:a + _TRANCHE_PREFILL] = torch.nn.functional.linear(x2[a:a + _TRANCHE_PREFILL], w)
-        return out.reshape(*x.shape[:-1], w.shape[0])
     m = torch.backends.cuda.matmul
     avant = m.allow_bf16_reduced_precision_reduction
     m.allow_bf16_reduced_precision_reduction = False

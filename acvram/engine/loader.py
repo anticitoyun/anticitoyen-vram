@@ -1613,10 +1613,10 @@ _EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
 # réduction exacte n'est posée que le temps des `F.linear` cuBLAS des poids quantifiés au préfill (`kernels.linear_prefill` :
 # chemin naturel, Marlin dépaqueté, vue de pile), le reste du processus garde le défaut de torch. Première forme (k / v
 # seules, verdict carte 03/10) : au bit au noyau et gratuite, mais les morceaux ne rendaient pas le seul tenant — les
-# projections larges passaient encore par cuBLAS réduit. `tranches` : drapeau intact, M par blocs de 1 024 lignes alignés
-# (mêmes blocs, même noyau, pour un découpage multiple de 1 024). Opt-in tous deux, défaut tranché au verdict.
+# projections larges passaient encore par cuBLAS réduit ; étendue aux six sites : +2,32 % à M = 4 096 et le moteur dépend
+# encore du découpage par un produit hors d'eux (verdict carte 03/10). Opt-in, défaut `reduite` (tranché par le chef).
 _BF16_REDUCTION = (os.environ.get("ACVRAM_BF16_REDUCTION") or "reduite").strip().lower()     # regime.VARIABLES
-_MODES_ETROITS = {"etroite": "appel", "tranches": "tranches"}      # 03/10 : `etroite-tranches` retirée (E9 : sans objet)
+_MODES_ETROITS = {"etroite": "appel"}      # 03/10 : `etroite-tranches` (E9) puis `tranches` (C4 : +7,44 %) retirées
 
 
 def poser_reduction_bf16() -> str:
