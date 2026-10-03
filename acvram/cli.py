@@ -853,6 +853,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
         attn_qkvo_int8_canal=args.attn_qkvo_int8_canal,
         gdn_int8_canal=args.gdn_int8_canal,
+        int8_canal=args.int8_canal,
         q3n_table=(tuple(float(v) for v in args.q3n_table.split(","))
                    if args.q3n_table else None),
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
@@ -1263,6 +1264,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="q/k/v/o en int8 symetrique par canal (une echelle "
                          "par ligne, sans point-zero variable) au lieu du "
                          "groupe de 128 affine du reste du modele")
+    cv.add_argument("--int8-canal", action="store_true",
+                    help="ro7 B : TOUT tenseur int8 (promu ou impose) en int8 symetrique par canal, eligible au GEMM "
+                         "int8 du prefill ; sans lui les int8 promus (groupe 128 affine) sont dequantifies en bf16")
     cv.add_argument("--gdn-int8-canal", action="store_true",
                     help="153 : les cinq projections du GatedDeltaNet "
                          "(qkv/gate/alpha/beta/out) en int8 symetrique par "

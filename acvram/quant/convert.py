@@ -76,6 +76,10 @@ class ConversionOptions:
     # poids du GatedDeltaNet (qkv/gate/alpha/beta/out) -- drapeau distinct,
     # ne change pas le sens de attn_qkvo_int8_canal ci-dessus.
     gdn_int8_canal: bool = False
+    # ro7 B (poste6 03/10, revue/poste6-ro7-b-conversion-scelle-03-10) : TOUT tenseur int8 — promu par le routeur SNR
+    # (PROMOTE) ou imposé — en canal symétrique, parce qu'un int8 g128 affine n'est jamais éligible au GEMM int8 du
+    # préfill (`kernels._i8c_eligible`) et finit déquantifié en bf16 pour cuBLAS (Devstral : 55 poids, −15,8 % de préfill).
+    int8_canal: bool = False
     # Table de niveaux q3n de CE modèle (huit flottants, symétrique, bornes
     # ±1) — écrite dans chaque entrée q3n du manifeste. None : TABLE_Q3N de
     # la spécification. Les niveaux s'ajustent par modèle (Lloyd-Max sur
@@ -426,6 +430,16 @@ def _est_projection_gdn(name: str) -> bool:
     return (".linear_attn." in name and name.endswith(".weight")
            and "norm" not in name
            and not name.endswith(("conv1d.weight", "a_log.weight", "dt_bias.weight")))
+
+
+def _int8_canal(opts, name: str, fmt: str) -> bool:
+    """Un tenseur int8 part-il en canal symétrique (une échelle par ligne, zéros à 128 : format du GEMM int8) ?
+    `int8_canal` (ro7 B) : tous ; sinon q/k/v/o sous `attn_qkvo_int8_canal`, GDN sous `gdn_int8_canal` ; jamais hors int8."""
+    if fmt != "int8":
+        return False
+    return bool(getattr(opts, "int8_canal", False)
+                or (opts.attn_qkvo_int8_canal and _est_projection_attn(name))
+                or (getattr(opts, "gdn_int8_canal", False) and _est_projection_gdn(name)))
 
 
 def _bilan_attn_int8(opts, tensors: dict) -> dict:
@@ -1690,7 +1704,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # poste7-p2-qkvo-int8-canal-18-09 : nom du regime d'attention porte au
         # niveau du manifeste, pas seulement sur chaque tenseur -- "canal"
         # distingue ce converti de la pile classee (q/k/v/o groupe-128).
-        "attn_int8": "canal" if opts.attn_qkvo_int8_canal else "groupe",
+        "attn_int8": "canal" if (opts.attn_qkvo_int8_canal or getattr(opts, "int8_canal", False)) else "groupe",
+        "int8_canal": bool(getattr(opts, "int8_canal", False)),       # ro7 B : tous les int8 par canal symétrique
         "tensors": {},
     }
 
@@ -1888,10 +1903,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # poste7-p2-qkvo-int8-canal-18-09 : q/k/v/o seuls, et seulement si le
         # routeur les a places en int8 -- le reste du modele garde le groupe
         # de 128 affine (opts.group_size) sans y toucher.
-        attn_canal = origine_fp8 or (opts.attn_qkvo_int8_canal and fmt == "int8"
-                                     and _est_projection_attn(name)) or (
-                                     opts.gdn_int8_canal and fmt == "int8"
-                                     and _est_projection_gdn(name))
+        attn_canal = origine_fp8 or _int8_canal(opts, name, fmt)
         group_size_tenseur = tensor.shape[1] if attn_canal else opts.group_size
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
@@ -2048,10 +2060,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             # variables du manifeste que si la promotion est ACCEPTEE
             # plus bas, sinon le tenseur reste nvfp4 et group_size=largeur
             # entiere y serait un mensonge de bilan.
-            attn_canal_candidat = (opts.attn_qkvo_int8_canal and wider == "int8"
-                                   and _est_projection_attn(name)) or (
-                                   opts.gdn_int8_canal and wider == "int8"
-                                   and _est_projection_gdn(name))
+            attn_canal_candidat = _int8_canal(opts, name, wider)
             group_size_candidat = tensor.shape[1] if attn_canal_candidat else opts.group_size
             q2, s2, m2 = _quantize_on(
                 qdev, tensor, wider, st,
