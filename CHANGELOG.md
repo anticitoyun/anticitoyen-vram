@@ -39,6 +39,10 @@
   wiki 2048 × 1,0119 (double quantification + A8). La ligne de régime dit le chemin int8 pris
   (`prefill_int8=repli-bf16×N` / `cublas`). Réserve : au-delà de 16 lignes W8A8, en dessous W8A16 — la sortie dépend du
   chemin selon M. `acvram-memoire/revue/poste6-ro7-int8-promus-verdict-carte-03-10.md`.
+* **`acvram convert --int8-canal`** (option B, mesurée et écartée du parc) : tout int8 promu quantifié par canal
+  symétrique à la conversion. Devstral : même débit que l'opt-in ci-dessus, PPL × 1,0114, mais KL@64 médiane 0,049 nat et
+  témoin reprise × 3,4 (SNR des promus 53,6 → 38,0 dB) : aucun modèle du parc converti avec.
+  `acvram-memoire/revue/poste6-ro7-b-conversion-verdict-carte-03-10.md`.
 
 ### Troncature causale du cœur MLA au préfill, en option (zzs)
 
