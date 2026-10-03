@@ -298,5 +298,5 @@ DEFAUTS_PAR_VERSION["0.7.17"] = ({**DEFAUTS_PAR_VERSION["0.7.16"][0], "PILES_AU_
 # Réduction bf16 exacte de cuBLAS, OPT-IN (BF16_REDUCTION=reduite par défaut) : morceaux = seul tenant au bit sous `exacte`,
 # mais +2,40 % de préfill à M = 4 096 (seuil scellé 2 %) et la sortie du seul tenant change — garde de qualité d'abord.
 DEFAUTS_PAR_VERSION["0.7.18"] = ({**DEFAUTS_PAR_VERSION["0.7.17"][0], "PRELECTURE": "1", "KV_ANNEAU": "auto", "EMBED": "auto",
-                                  "MLA_CAUSAL": "0", "BF16_REDUCTION": "reduite"},
+                                  "MLA_CAUSAL": "0", "BF16_REDUCTION": "reduite", "INT8_PROMUS": ""},
                                  DEFAUTS_PAR_VERSION["0.7.17"][1])

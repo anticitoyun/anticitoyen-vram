@@ -173,6 +173,29 @@ def _avertir_noyaux() -> None:
     print("[acvram] verifiez `python -m acvram doctor`.\n", file=sys.stderr)
 
 
+# ro7 (poste6 03/10, scellé revue/poste6-ro7-int8-promus-scelle-03-10) : les int8 « promus » de la conversion sont
+# quantifiés par groupes de 128, affines — inéligibles au GEMM int8 du préfill (`kernels._i8c_eligible` exige le canal
+# symétrique), donc déquantifiés en bf16 pour cuBLAS (19,8 % des GEMM du préfill de Devstral, parc entier concerné).
+# `canal` (opt-in) les re-quantifie AU CHARGEMENT par canal symétrique (double quantification : qualité à mesurer, R5) ;
+# "" (défaut) : rien. La forme durable serait la promotion par canal à la conversion (option B du scellé).
+_INT8_PROMUS = (os.environ.get("ACVRAM_INT8_PROMUS") or "").strip().lower()
+# rôles seuls à re-quantifier (« down_proj,k_proj ») — bras de mesure pour attribuer un écart de qualité ; vide = tous
+_INT8_PROMUS_ROLES = tuple(r for r in (os.environ.get("ACVRAM_INT8_PROMUS_ROLES") or "").split(",") if r.strip())
+
+
+def _requantifier_par_canal(t: INT8Tensor, pas: int = 1024) -> INT8Tensor:
+    """g128 affine → canal symétrique (une échelle par ligne, zéros à 128), par tranches de lignes pour borner le fp32."""
+    from ..quant.formats import _dequantize_int8, _quantize_int8
+    K = int(t.shape[1])
+    morceaux = []
+    for a in range(0, t.qweight.shape[0], pas):
+        b = min(a + pas, t.qweight.shape[0])
+        tr = INT8Tensor(t.qweight[a:b], t.scales[a:b], t.zeros[a:b], t.group_size, (b - a, K))
+        morceaux.append(_quantize_int8(_dequantize_int8(tr, torch.float32), K, symmetric=True))
+    return INT8Tensor(torch.cat([m.qweight for m in morceaux]), torch.cat([m.scales for m in morceaux]),
+                      torch.cat([m.zeros for m in morceaux]), K, tuple(t.shape))
+
+
 def _build_quant(entry: dict, name: str, reader: _ShardReader,
                  group_size: int) -> Any:
     fmt = entry["format"]
@@ -189,6 +212,10 @@ def _build_quant(entry: dict, name: str, reader: _ShardReader,
     if fmt == "int8":
         t = INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
                        entry.get("group_size", group_size), shape)
+        if (_INT8_PROMUS == "canal" and entry.get("promoted_from") and t.group_size != t.qweight.shape[1]
+                and (not _INT8_PROMUS_ROLES or any(r in name for r in _INT8_PROMUS_ROLES))):
+            t = _requantifier_par_canal(t)                    # ro7 : éligible au GEMM int8 du préfill
+            t.__dict__["requantifie_canal"] = True
         from .. import kernels as _kernels
         if entry.get("origine") == "fp8" and _kernels._I8C_FP8_PREFILL == "bf16":   # 260 : cublas = opt-in W8A8
             # Pièce 139 : préfill en déquant bf16 (W8A16), jamais la copie signée du chemin cublas

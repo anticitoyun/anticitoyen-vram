@@ -426,6 +426,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("EMBED", "auto", ("acvram.engine.loader", "_EMBED_MODE"), None,
              "plongements (02/10) : auto (défaut) — la table bf16 quitte la carte avant le premier MLP quand le plan déborde ; "
              "hote : toujours (bras de mesure) ; carte : jamais. Régime « plongements=hôte »"),
+    Variable("INT8_PROMUS", "", ("acvram.engine.loader", "_INT8_PROMUS"), None,
+             "ro7 (03/10) : `canal` re-quantifie au chargement les int8 promus (g128 affines, inéligibles au GEMM int8) en "
+             "canal symétrique → chemin cublas du préfill ; \"\" (défaut) : repli bf16 déquantifié. Opt-in, qualité à mesurer."),
     Variable("BF16_REDUCTION", "reduite", ("acvram.engine.loader", "_BF16_REDUCTION"), None,
              "02/10 : `exacte` (opt-in) pose torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False au "
              "chargement — sans lui les projections étroites (k/v, N = 1 024) changent de 1 ulp sur 15-30 % de leurs "
