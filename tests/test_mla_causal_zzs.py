@@ -72,9 +72,9 @@ def test_chaque_morceau_ne_traite_que_les_cles_vues(monkeypatch, _regime_servi):
         x0_attendu = [256, 300] if causal else [300, 300]
         assert vues["thr,sr->ths"] == x0_attendu + attendu, (causal, vues)
         assert vues["ths,sr->thr"] == x0_attendu + attendu, (causal, vues)
-    assert M.regime_causal_texte() == ""
+    assert M.regime_causal_texte() == "mla_causal=0(témoin)"
     _bras(monkeypatch, True)
-    assert M.regime_causal_texte() == "mla_causal=1(opt-in)"
+    assert M.regime_causal_texte() == ""
 
 
 def _ecarts(monkeypatch, dev, dt, t0, t, formes, decalage=None, dev_ref="cpu"):
@@ -142,17 +142,20 @@ def test_e2_formes_kimi_sur_carte_et_son_bras_cassant(monkeypatch, _regime_servi
     assert cBref > 2 * cAref and cBA > 2 * cAref, ("bras cassant non vu", t0, t, cBA, cBref, cAref)
 
 
-def test_la_troncature_est_opt_in_defaut_off():
-    """Verdict du 02/10 (chef) : la troncature change la sortie (E1 au bit faux, 2 réponses gloutonnes sur 6 divergent) ;
-    elle reste OPT-IN tant que la garde de PPL de décodage à 8 192 + 512 n'est pas passée. Casse si le défaut bascule —
-    dans le registre, dans le module, ou dans un processus neuf sans aucune variable ACVRAM_*."""
+def test_la_troncature_est_le_defaut():
+    """Garde PPL 8 192 + 512 tenue le 03/10 (poste2-zzs-garde-ppl-verdict-03-10) → défaut 1 (chef). Casse si le défaut
+    rebascule — dans le registre, dans le module, ou dans un processus neuf sans aucune variable ACVRAM_* ; et le témoin
+    0 explicite doit rester nommé sur la ligne de régime."""
     import os
     import subprocess
     import sys
     from acvram import regime
-    assert next(v for v in regime.VARIABLES if v.nom == "MLA_CAUSAL").defaut == "0"
+    assert next(v for v in regime.VARIABLES if v.nom == "MLA_CAUSAL").defaut == "1"
     env = {k: v for k, v in os.environ.items() if not k.startswith("ACVRAM_")}
     env["CUDA_VISIBLE_DEVICES"] = ""
     out = subprocess.run([sys.executable, "-c", "from acvram.engine import mla; print(mla._MLA_CAUSAL, repr(mla.regime_causal_texte()))"],
                          env=env, capture_output=True, text=True, timeout=180)
-    assert out.stdout.strip().splitlines()[-1] == "False ''", out.stdout[-500:] + out.stderr[-500:]
+    assert out.stdout.strip().splitlines()[-1] == "True ''", out.stdout[-500:] + out.stderr[-500:]
+    out = subprocess.run([sys.executable, "-c", "from acvram.engine import mla; print(mla._MLA_CAUSAL, repr(mla.regime_causal_texte()))"],
+                         env={**env, "ACVRAM_MLA_CAUSAL": "0"}, capture_output=True, text=True, timeout=180)
+    assert out.stdout.strip().splitlines()[-1] == "False 'mla_causal=0(témoin)'", out.stdout[-500:] + out.stderr[-500:]

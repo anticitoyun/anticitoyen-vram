@@ -18,14 +18,18 @@ _spec = importlib.util.spec_from_file_location("mla_causal_abba", MESURE / "mla-
 abba = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(abba)
 
-# Le faux serveur suit l'interrupteur comme le vrai : régime (regime.py:737 et :808) et coût du préfill (B = 0,6 × A).
+# Le faux serveur suit l'interrupteur comme le vrai : régime (regime.py:737 et :808) et coût du préfill (clés vues = 0,6 ×
+# témoin). Son défaut est celui du REGISTRE (FAUX_DEFAUT_CAUSAL, posé par le test) : si le défaut rebascule à 0, B (aucune
+# variable) porte la marque du témoin et l'instrument rend 5.
 FAUX = textwrap.dedent('''
     import json, os, sys, time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     port, nom = int(sys.argv[1]), sys.argv[2]
-    optin = os.environ.get("ACVRAM_MLA_CAUSAL", "0") == "1"
-    regime = ("[régime] ACVRAM_MLA_CAUSAL=1" if optin else "[régime] défaut") + " extension=oui torch=faux" \\
-        + (" mla_causal=1(opt-in)" if optin else "") + " mla_prep=grille"
+    defaut = os.environ["FAUX_DEFAUT_CAUSAL"]
+    v = os.environ.get("ACVRAM_MLA_CAUSAL", defaut)
+    optin = v == "1"
+    regime = (f"[régime] ACVRAM_MLA_CAUSAL={v}" if v != defaut else "[régime] défaut") + " extension=oui torch=faux" \\
+        + ("" if optin else " mla_causal=0(témoin)") + " mla_prep=grille"
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a): pass
         def _json(self, d):
@@ -61,8 +65,8 @@ def _port():
 
 
 def _bras(temoin, ms8, ms32, jetons=None, lp=None):
-    regime = ("[régime] défaut" if temoin else "[régime] ACVRAM_MLA_CAUSAL=1") + " torch=x" \
-        + ("" if temoin else " mla_causal=1(opt-in)")
+    regime = ("[régime] ACVRAM_MLA_CAUSAL=0" if temoin else "[régime] défaut") + " torch=x" \
+        + (" mla_causal=0(témoin)" if temoin else "")
     m = {}
     for L, ms in (("8192", ms8), ("16384", ms32)):
         m[L] = [{"k": k, "mur_prefill_ms": ms + k * 0.01, "jetons": list(jetons or ["a", "b", "c"]),
@@ -96,17 +100,17 @@ def test_comparer_faux_si_le_gain_a_16k_est_sous_15_pourcent(tmp_path, capsys):
     assert rc == 9 and "FAUX (gain < 15 %)" in out, out
 
 
-def test_comparer_refuse_un_b_sans_opt_in_ou_un_a_avec(tmp_path, capsys):
+def test_comparer_refuse_un_a_sans_temoin_ou_un_b_avec(tmp_path, capsys):
     a1, b1, b2, a2 = _quatre()
     rc, out = _comparer(tmp_path, a1, b1, b2, _bras(False, 1400.0, 16000.0), capsys)
-    assert rc == 5 and "A2 porte" in out and "bras inversés" in out, out
+    assert rc == 5 and "A2 sans" in out, out
     rc, out = _comparer(tmp_path, a1, _bras(True, 1100.0, 9500.0), b2, a2, capsys)
-    assert rc == 5 and "B1 sans" in out, out
+    assert rc == 5 and "B1 porte" in out and "bras inversés" in out, out
 
 
 def test_comparer_refuse_un_regime_qui_differe_par_autre_chose(tmp_path, capsys):
     a1, b1, b2, a2 = _quatre()
-    a2["regime"] = a2["regime"].replace("défaut", "ACVRAM_GLUE_COMPACT=0")
+    b2["regime"] = b2["regime"].replace("défaut", "ACVRAM_GLUE_COMPACT=0")
     rc, out = _comparer(tmp_path, a1, b1, b2, a2, capsys)
     assert rc == 5 and "autre chose que mla_causal" in out, out
 
@@ -158,6 +162,8 @@ def test_abba_de_bout_en_bout_contre_le_faux_serveur(tmp_path):
            "MLA_ABBA_PORT": str(_port()), "MLA_ABBA_REPS": "1", "MLA_ABBA_DELAI_S": "20", "BRAS_NVIDIA_SMI": str(smi),
            "SORTIE": str(tmp_path / "o"), "HOME": str(tmp_path)}
     env.pop("ACVRAM_MLA_CAUSAL", None)
+    from acvram import regime
+    env["FAUX_DEFAUT_CAUSAL"] = next(v for v in regime.VARIABLES if v.nom == "MLA_CAUSAL").defaut
     out, err = tmp_path / "sortie", tmp_path / "erreurs"
     try:
         with open(out, "w") as o, open(err, "w") as e:
@@ -168,11 +174,11 @@ def test_abba_de_bout_en_bout_contre_le_faux_serveur(tmp_path):
     sortie = out.read_text()
     assert rc == 0, (rc, sortie[-2000:], err.read_text()[-2000:])
     assert "étape 0 et nsys OMIS" in sortie
-    assert "RÉGIMES : B = A + « mla_causal=1(opt-in) »" in sortie
+    assert "RÉGIMES : A = B + « mla_causal=0(témoin) »" in sortie
     assert "TÉMOINS A1 = A2 et B1 = B2" in sortie and "E1(b) : jetons ET logprobs IDENTIQUES" in sortie
     for bras in ("A1", "B1", "B2", "A2"):
         d = json.loads((tmp_path / "o" / f"{bras}.json").read_text())
-        assert (abba.MARQUE in d["regime"]) == (bras[0] == "B"), d["regime"]
+        assert (abba.MARQUE in d["regime"]) == (bras[0] == "A"), d["regime"]
         assert [len(s["jetons"]) for L in d["mesures"] for s in d["mesures"][L]] == [abba.N_GEN, abba.N_GEN]
     # le coût suit l'interrupteur jusque dans le serveur : B (0,6 × A) plus court que A aux deux longueurs
     assert sortie.count("mur du préfill : A") == 2
@@ -193,7 +199,7 @@ def _faux_en_service(tmp_path, env):
     faux = tmp_path / "faux.py"
     faux.write_text(FAUX)
     p = _port()
-    srv = subprocess.Popen([sys.executable, str(faux), str(p), "kimi-zzs"], env={**os.environ, **env},
+    srv = subprocess.Popen([sys.executable, str(faux), str(p), "kimi-zzs"], env={**os.environ, "FAUX_DEFAUT_CAUSAL": "1", **env},
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     import time
     for _ in range(50):

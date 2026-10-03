@@ -115,10 +115,10 @@ _MLA_CORE_MAX_CLES = int(os.environ.get("ACVRAM_MLA_CORE_MAX_CLES", "2048"))
 if _MLA_CORE_MAX_CLES <= 0:
     _MLA_CORE_MAX_CLES = 1 << 62                     # « ≤ ∞ clés » : la règle ne bascule jamais en fp32
 # zzs (poste5-zzs-scelle-01-10) : au préfill par morceaux, scores, masque, softmax et produit par V limités aux
-# clés VUES par le morceau (passe + d1). OPT-IN, défaut 0 (chef 02/10, poste5-zzs-verdict-02-10) : −24 % du GPU du
-# préfill à 8 k, mais la sortie change (E1 au bit tombe, 2 réponses gloutonnes sur 6 divergent) — le défaut ne bascule
-# qu'après la garde de PPL de décodage à 8 192 + 512 (REGLES § 3, poste5-zzs-garde-ppl-scelle-02-10).
-_MLA_CAUSAL = os.environ.get("ACVRAM_MLA_CAUSAL", "0") == "1"
+# clés VUES par le morceau (passe + d1). DÉFAUT 1 depuis le 03/10 (chef, poste2-zzs-garde-ppl-verdict-03-10 : garde PPL
+# 8 192 + 512 tenue, Δ géo +0,198 %, + 2 SE 0,504 %, max 0,928 %) : −24 % du GPU du préfill à 8 k ; la sortie n'est pas
+# au bit du témoin (E1 faux, E2 tenu, poste5-zzs-verdict-02-10). 0 = témoin, toutes les clés puis masque.
+_MLA_CAUSAL = os.environ.get("ACVRAM_MLA_CAUSAL", "1") == "1"
 
 
 def _cles_vues(cles: int, total: int) -> int:
@@ -127,8 +127,8 @@ def _cles_vues(cles: int, total: int) -> int:
 
 
 def regime_causal_texte() -> str:
-    """Rien au défaut (toutes les clés puis masque) ; l'opt-in nommé sinon (REGLES § 4)."""
-    return "mla_causal=1(opt-in)" if _MLA_CAUSAL else ""
+    """Rien au défaut (clés vues seules) ; le témoin nommé sinon (REGLES § 4)."""
+    return "" if _MLA_CAUSAL else "mla_causal=0(témoin)"
 
 
 def _regime_coeur(decode: bool = False, vb: bool = False, cles: int | None = None) -> str:

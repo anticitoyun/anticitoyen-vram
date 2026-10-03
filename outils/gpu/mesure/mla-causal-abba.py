@@ -1,5 +1,5 @@
 """zzs (poste5, 01/10) : troncature causale du cœur MLA au préfill — mur du préfill et jetons gloutons, en SERVICE, ABBA.
-A = défaut (toutes les clés puis masque), B = ACVRAM_MLA_CAUSAL=1 (opt-in depuis le verdict du 02/10) ; MÊME arbre, un serveur neuf par bras, lancé et
+A = témoin ACVRAM_MLA_CAUSAL=0 explicite (toutes les clés puis masque), B = défaut (clés vues, défaut depuis le 03/10) ; MÊME arbre, un serveur neuf par bras, lancé et
 arrêté par le harnais serveur-bras.sh (mla-causal-abba.sh). Prédiction et critère : revue/poste5-zzs-scelle-01-10.md.
 
   bras URL NOM SORTIE.json : contre un `acvram serve --no-prefix-cache` prêt. Lit la ligne de régime dans /metrics (preuve
@@ -9,7 +9,7 @@ arrêté par le harnais serveur-bras.sh (mla-causal-abba.sh). Prédiction et cri
            2) sans flux, max_tokens=64, logprobs=0 : les 64 jetons gloutons (textes par pas) et leurs logprobs.
            Le serveur ne rend pas les ids : deux ids distincts au même texte ne se distinguent que par leur logprob, d'où
            la comparaison des logprobs en plus des textes.
-  comparer A1.json B1.json B2.json A2.json : régimes (B porte mla_causal=1(opt-in), A non, rien d'autre ne diffère :
+  comparer A1.json B1.json B2.json A2.json : régimes (A porte mla_causal=0(témoin), B non, rien d'autre ne diffère :
            sinon rc 5), témoins A1 = A2 et B1 = B2 en jetons (sinon rc 6, aucun verdict), logprobs finis (sinon rc 8),
            jetons A contre B (premier pas divergent), puis mur du préfill (médiane des 2 × REPS mesures par chemin)
            contre les bandes scellées : 8 k −18 à −26 % ; 16 k −25 à −36 %, FAUX si le gain à 16 k est < 15 %
@@ -31,7 +31,7 @@ VOCAB_APPROX = int(os.environ.get("BANC_VOCAB", "150000"))
 # (bas, haut, FAUX si Δ >) ; 12 288 et 14 336 : amendement 3 (bornes −31 et −33 % depuis le ht9, bas = 0,7 × borne)
 BANDES = {8192: (-26.0, -18.0, None), 12288: (-31.0, -22.0, -15.0), 14336: (-33.0, -23.0, -15.0),
           16384: (-36.0, -25.0, -15.0), 32768: (-48.0, -35.0, -20.0)}
-MARQUE = "mla_causal=1(opt-in)"                 # mla.regime_causal_texte, porté par B seul
+MARQUE = "mla_causal=0(témoin)"                 # mla.regime_causal_texte, porté par A seul (B = défaut)
 
 
 def invite(k: int, n: int) -> list:
@@ -119,19 +119,19 @@ def _dlp(a, b):
 
 def comparer(a1: str, b1: str, b2: str, a2: str) -> int:
     A1, B1, B2, A2 = (json.load(open(p)) for p in (a1, b1, b2, a2))
-    for nom, x in (("B1", B1), ("B2", B2)):
+    for nom, x in (("A1", A1), ("A2", A2)):
         if MARQUE not in x["regime"].split():
             print(f"RÉGIME : {nom} sans « {MARQUE} » — l'interrupteur n'a pas pris : {x['regime']}"); return 5
-    for nom, x in (("A1", A1), ("A2", A2)):
+    for nom, x in (("B1", B1), ("B2", B2)):
         if MARQUE in x["regime"].split():
-            print(f"RÉGIME : {nom} porte « {MARQUE} » — bras inversés : {x['regime']}"); return 5
-    # regime.py:737 : B porte aussi la variable hors défaut, et A seul peut porter « défaut » (aucune variable posée)
-    neutres = {MARQUE, "ACVRAM_MLA_CAUSAL=1", "défaut"}
+            print(f"RÉGIME : {nom} porte « {MARQUE} » — bras inversés, ou le défaut a rebasculé : {x['regime']}"); return 5
+    # regime.py:737 : A porte aussi la variable hors défaut, et B seul peut porter « défaut » (aucune variable posée)
+    neutres = {MARQUE, "ACVRAM_MLA_CAUSAL=0", "défaut"}
     sans = {" ".join(t for t in x["regime"].split() if t not in neutres) for x in (A1, B1, B2, A2)}
     if len(sans) != 1:
         print("RÉGIME : les bras diffèrent par autre chose que mla_causal :"); [print(f"  {s}") for s in sorted(sans)]
         return 5
-    print(f"RÉGIMES : B = A + « {MARQUE} », rien d'autre ({next(iter(sans))[:160]})")
+    print(f"RÉGIMES : A = B + « {MARQUE} », rien d'autre ({next(iter(sans))[:160]})")
     for nom, x, y in (("A1/A2", A1, A2), ("B1/B2", B1, B2)):
         if _jetons(x) != _jetons(y):
             print(f"TÉMOIN {nom} ≠ : l'instrument n'est pas déterministe, aucun verdict d'équivalence ni de temps"); return 6
