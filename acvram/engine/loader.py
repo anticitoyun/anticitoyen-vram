@@ -1609,14 +1609,14 @@ _EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
 # POURQUOI OPT-IN (revue/poste6-bf16-reduction-verdict-carte-02-10, seuil scellé avant) : le préfill coûte +2,40 % à
 # M = 4 096 (seuil 2 % ; +0,2 à +0,8 % de 512 à 2 048), et le réglage change AUSSI la sortie servie du seul tenant (premier
 # jeton basculé à 7 865 lignes) : ce n'est pas un réglage neutre, il lui faut la garde de qualité au modèle avant le défaut.
-# `etroite` / `etroite-tranches` (03/10, scellé revue/poste6-bf16-etroite-scelle-02-10) : la réduction exacte n'est posée
-# que le temps du `F.linear` du chemin NVFP4 naturel (`kernels._linear_naturel`), le reste du processus garde le défaut
-# de torch ; `-tranches` découpe M par 1 024 lignes dans cet appel (même valeurs au bit : sous réduction exacte le produit
-# ne dépend pas de M). Carte 03/10 (revue/poste6-bf16-etroite-verdict-carte-03-10) : au bit au noyau et gratuite au
-# moteur (0,02 % à M = 4 096), mais les morceaux ne rendent toujours pas le seul tenant (E4 faux) : un autre produit
-# cuBLAS bf16 du préfill dépend du découpage (attention SDPA présumée, non mesurée) — opt-in, défaut inchangé.
+# `etroite` (03/10, scellés revue/poste6-bf16-etroite-scelle-02-10 et poste6-bf16-prefill-cublas-scelle-03-10) : la
+# réduction exacte n'est posée que le temps des `F.linear` cuBLAS des poids quantifiés au préfill (`kernels.linear_prefill` :
+# chemin naturel, Marlin dépaqueté, vue de pile), le reste du processus garde le défaut de torch. Première forme (k / v
+# seules, verdict carte 03/10) : au bit au noyau et gratuite, mais les morceaux ne rendaient pas le seul tenant — les
+# projections larges passaient encore par cuBLAS réduit. `tranches` : drapeau intact, M par blocs de 1 024 lignes alignés
+# (mêmes blocs, même noyau, pour un découpage multiple de 1 024). Opt-in tous deux, défaut tranché au verdict.
 _BF16_REDUCTION = (os.environ.get("ACVRAM_BF16_REDUCTION") or "reduite").strip().lower()     # regime.VARIABLES
-_MODES_ETROITS = {"etroite": "appel", "etroite-tranches": "tranches"}
+_MODES_ETROITS = {"etroite": "appel", "tranches": "tranches"}      # 03/10 : `etroite-tranches` retirée (E9 : sans objet)
 
 
 def poser_reduction_bf16() -> str:

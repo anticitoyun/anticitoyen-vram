@@ -693,45 +693,53 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
 PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4")
 
-# Réduction bf16 ÉTROITE (poste6 03/10, scellé revue/poste6-bf16-etroite-scelle-02-10.md). Sur les projections qui
-# passent par le `F.linear` bf16 du chemin NVFP4 naturel (k_proj / v_proj, N = 1 024 : exclues de Marlin par
-# `_PROJ_MARLIN_MIN_N`), cuBLAS prend selon M une réduction à précision réduite — 15-30 % des éléments diffèrent entre un
-# préfill d'un seul tenant et le même découpé en morceaux. Le drapeau global du processus
-# (`ACVRAM_BF16_REDUCTION=exacte`) le retire partout, mais coûte +2,40 % de préfill à M = 4 096 et touche d'autres
-# produits. Ici le drapeau n'est posé que le temps de CET appel (cuBLAS le relit à chaque GEMM : mesuré sur carte le 02/10),
-# puis rendu. Posé par `engine.loader.poser_reduction_bf16`, jamais lu de l'environnement ici (une seule source).
-#   None : rien (défaut) · "appel" : réduction exacte le temps de l'appel · "tranches" : idem, et M découpé par tranches
-#   de `_TRANCHE_ETROITE` lignes — à M = 1 024 cuBLAS prend déjà le noyau exact de lui-même (C6 : 0 % d'éléments changés),
-#   le découpage évite la sélection pénalisante du drapeau aux grands M. Sous réduction exacte le produit ne dépend pas de
-#   M (0 élément différent entre 7 865 et 4 096 + 3 769 lignes), donc les deux sont au bit l'un de l'autre.
+# Réduction bf16 au PRÉFILL (poste6 03/10, scellés revue/poste6-bf16-etroite-scelle-02-10.md et
+# poste6-bf16-prefill-cublas-scelle-03-10.md). Au-delà de `_NVFP4_GEMV_MAX` lignes, tout poids quantifié est confié à
+# cuBLAS en bf16 (chemin naturel déquantifié, Marlin dépaqueté, vue d'une pile) ; cuBLAS y prend, selon le nombre de
+# lignes M, une réduction à précision réduite — 15-30 % des éléments de k / v diffèrent entre un préfill d'un seul tenant
+# et le même découpé en morceaux. Le drapeau global (`ACVRAM_BF16_REDUCTION=exacte`) le retire partout mais coûte +2,40 %
+# de préfill à M = 4 096. `linear_prefill` est le SEUL point d'entrée de ces produits ; son mode est posé par
+# `engine.loader.poser_reduction_bf16` (une seule source, jamais l'environnement ici) :
+#   None : rien (défaut) ·
+#   "appel" (`etroite`) : réduction exacte le temps de cet appel (cuBLAS relit le drapeau à chaque GEMM, mesuré le 02/10),
+#     drapeau rendu après, même si l'appel lève — au bit du drapeau global sur ces produits (E2, 03/10) ·
+#   "tranches" (`tranches`) : drapeau laissé tel quel, M découpé par blocs de `_TRANCHE_PREFILL` lignes alignés sur le début
+#     de la séquence — un découpage en morceaux multiples de 1 024 lignes rejoue les mêmes blocs que le seul tenant, donc
+#     le même noyau cuBLAS, sans payer la réduction exacte. Limite nommée : un découpage non aligné (cache de préfixe)
+#     ne rend pas le seul tenant.
 _REDUCTION_ETROITE: Optional[str] = None
-_TRANCHE_ETROITE = 1024
+_TRANCHE_PREFILL = 1024
 
 
 def _etroite_applicable(x: torch.Tensor) -> bool:
     return _REDUCTION_ETROITE is not None and x.dtype == torch.bfloat16 and x.is_cuda      # cuBLAS seulement
 
 
-def _linear_naturel(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """Le `F.linear` du chemin NVFP4 naturel : sous la réduction étroite, cuBLAS bf16 est tenu à la réduction exacte le
-    temps de cet appel seulement ; le drapeau est rendu tel qu'il était, même si l'appel lève."""
+def linear_prefill(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """`F.linear` d'un poids quantifié matérialisé en bf16, au préfill : selon le mode, réduction exacte le temps de
+    l'appel (`appel`) ou blocs de lignes fixes (`tranches`) ; sans mode, l'appel nu."""
     mode = _REDUCTION_ETROITE
     if not _etroite_applicable(x):
         return torch.nn.functional.linear(x, w)
+    if mode == "tranches":
+        lignes = x.numel() // x.shape[-1]
+        if lignes <= _TRANCHE_PREFILL:
+            return torch.nn.functional.linear(x, w)
+        x2 = x.reshape(lignes, x.shape[-1])
+        out = torch.empty(lignes, w.shape[0], dtype=x.dtype, device=x.device)
+        for a in range(0, lignes, _TRANCHE_PREFILL):
+            out[a:a + _TRANCHE_PREFILL] = torch.nn.functional.linear(x2[a:a + _TRANCHE_PREFILL], w)
+        return out.reshape(*x.shape[:-1], w.shape[0])
     m = torch.backends.cuda.matmul
     avant = m.allow_bf16_reduced_precision_reduction
     m.allow_bf16_reduced_precision_reduction = False
     try:
-        lignes = x.numel() // x.shape[-1]
-        if mode != "tranches" or lignes <= _TRANCHE_ETROITE:
-            return torch.nn.functional.linear(x, w)
-        x2 = x.reshape(lignes, x.shape[-1])
-        out = torch.empty(lignes, w.shape[0], dtype=x.dtype, device=x.device)
-        for a in range(0, lignes, _TRANCHE_ETROITE):
-            out[a:a + _TRANCHE_ETROITE] = torch.nn.functional.linear(x2[a:a + _TRANCHE_ETROITE], w)
-        return out.reshape(*x.shape[:-1], w.shape[0])
+        return torch.nn.functional.linear(x, w)
     finally:
         m.allow_bf16_reduced_precision_reduction = avant
+
+
+_linear_naturel = linear_prefill          # nom du 02/10 (tests, carnet) ; les trois sites du chemin naturel l'appellent
 # Pièce 147 L2 (24/09, poste6) : « marlin » — la GEMM Marlin W4A16 au préfill de la disposition unique, sans dépaquetage —
 # a été mesurée FAUSSE et retirée (166) : TTFT servi b=1 +4 / +27 / +35 % à 512 / 2 048 / 4 096, J +5 / +28 / +36 %, KL 2,3-3 ×
 # les témoins (revue/poste6-piece147L2-verdict-24-09.md). Marlin perd à grand M contre dépaquetage + cuBLAS ; ne pas rouvrir
@@ -850,7 +858,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             if k_pad != t.shape[1]:
                 W = W[:, : t.shape[1]]
             dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
-            return torch.nn.functional.linear(x, W.to(dt).to(x.dtype))
+            return linear_prefill(x, W.to(dt).to(x.dtype))
         return nvfp4_matmul(x, pile, gemv_threshold)[..., d:d + n_lig]
     if getattr(t, "_marlin_unique", False):
         return _marlin_seul(x, t)
@@ -1387,10 +1395,10 @@ def _marlin_seul(x: torch.Tensor, t):
             out = torch.empty(xr.shape[0], W.shape[0], dtype=x.dtype, device=x.device)
             for a in range(0, W.shape[0], pas):
                 b = min(a + pas, W.shape[0])
-                out[:, a:b] = torch.nn.functional.linear(xr, W[a:b].to(x.dtype))
+                out[:, a:b] = linear_prefill(xr, W[a:b].to(x.dtype))
             y = out
         else:
-            y = torch.nn.functional.linear(xr, W.to(dt).to(x.dtype))
+            y = linear_prefill(xr, W.to(dt).to(x.dtype))
         return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
     else:
         CHEMINS_NVFP4["marlin_dense_seul"] += 1
