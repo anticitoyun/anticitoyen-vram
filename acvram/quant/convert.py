@@ -477,6 +477,10 @@ class TensorRouter:
             # jamais quantifiée, jamais fp16 même sous --format fp16 : le
             # contrat multimodal sert la tour en bf16 eager (VISION_PREFIXES)
             return "bf16"
+        if name.endswith("self_attn.sinks"):
+            # evp (gpt-oss) : un logit par tête, gardé tel que la source (bf16) — sans cette ligne il héritait du
+            # format de la couche (manifeste « nvfp4 » sur un tenseur écrit en fp16 brut)
+            return "bf16"
         if name.endswith("e_score_correction_bias"):
             # fp32 INCONDITIONNEL, pas seulement "16 bits protégés" : ce biais
             # porte une grande valeur commune (~9 pour GLM-4.7-Flash) et une
@@ -1779,6 +1783,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             entry = {"format": "nvfp4", "shape": list(qt.shape), "keys": list(sd.keys()),
                      "group_size": opts.group_size, "hadamard_block": 0, "has_act_scale": False,
                      "bpw": round(float(qt.bits_per_weight), 3), "passage_direct": True}
+            if getattr(qt, "arrondi_mxfp4", None):
+                entry["arrondi_mxfp4"] = qt.arrondi_mxfp4      # evp 120b : le seul écart à la source, au manifeste
             report.per_format["nvfp4"] = report.per_format.get("nvfp4", 0) + qt.nbytes
             manifest["tensors"][name] = entry
             keys.append(name)

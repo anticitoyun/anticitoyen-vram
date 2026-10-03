@@ -9,6 +9,66 @@
   4,9 s ; à chaud inchangé (+0,05 s). Aucun octet chargé ne change (test d'identité de tous les tenseurs avec et sans) ;
   coupée si les fragments dépassent 80 % de la RAM disponible. `acvram-memoire/revue/poste6-prelecture-verdict-02-10.md`.
 
+### Réduction bf16 exacte de cuBLAS, en option (poste6)
+
+* **`ACVRAM_BF16_REDUCTION=exacte`** (défaut `reduite`, celui de torch) pose
+  `torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False` au chargement. Sous le défaut, cuBLAS prend
+  pour les produits bf16 étroits (k_proj / v_proj, N ≤ 1 024) une réduction à précision réduite selon le nombre de lignes :
+  27 à 42 % des éléments changent de 1 ulp, et un préfill découpé (4 096 + 3 769) ne rend pas la sortie du seul tenant
+  (Devstral, 7 865 jetons : premier jeton basculé). Sous `exacte` : morceaux et seul tenant **au bit** (352 valeurs sur
+  352). Opt-in parce que le préfill coûte **+2,40 % à M = 4 096** (+0,2 à +0,8 % de 512 à 2 048) pour un seuil écrit avant
+  de 2 %, et que le réglage change aussi la sortie servie du seul tenant. La ligne de régime dit `reduction_bf16=`.
+  `etroite` / `etroite-tranches` (03/10) : la réduction exacte seulement le temps du `F.linear` du chemin NVFP4 naturel
+  (k_proj / v_proj) — au bit du drapeau global sur ces produits, gratuite au moteur (+0,02 % à M = 4 096), mais un
+  préfill découpé ne rend toujours pas le seul tenant : un autre produit cuBLAS du préfill dépend du découpage.
+  Opt-in aussi. `acvram-memoire/revue/poste6-bf16-etroite-verdict-carte-03-10.md`. Étendue le 03/10 aux six `F.linear`
+  cuBLAS des poids quantifiés au préfill (`kernels.linear_prefill` : naturel, Marlin dépaqueté, vue de pile ; `down_proj`
+  K = 32 768 dépendait de M à 18,6 %) : +2,32 % à M = 4 096, et le moteur dépend encore du découpage par un produit
+  hors de ces sites ; un bras « tranches » (blocs de 1 024 lignes, drapeau intact) mesuré à +7,44 % et retiré. Le produit
+  manquant, nommé au profileur : le repli bf16 des couches int8 au préfill (`int8_matmul`, quand `gemm_i8c_cublas` refuse
+  le poids) — 180 GEMM cuBLAS sur Devstral-24B, désormais sous `linear_prefill` ; la ligne de régime dit le chemin int8
+  PRIS (`prefill_int8=repli-bf16×N+cublas×M`) et non plus le seul réglage. `etroite` reste opt-in, défaut inchangé.
+  `acvram-memoire/revue/poste6-bf16-prefill-cublas-verdict-carte-03-10.md`, `poste6-bf16-sonde-verdict-carte-03-10.md`.
+  `acvram-memoire/revue/poste6-bf16-reduction-verdict-carte-02-10.md`.
+
+### Int8 promus servis par le GEMM int8 au préfill, en option (poste6, ro7)
+
+* **`ACVRAM_INT8_PROMUS=canal`** (défaut vide) : les poids int8 « promus » de la conversion (g128 affines, 47-370 par
+  modèle du parc) sont re-quantifiés au chargement par canal symétrique et prennent le GEMM int8 cuBLASLt du préfill au
+  lieu d'être déquantifiés en bf16 pour cuBLAS. Devstral-24B : préfill **+15,8 % à M = 4 096, +31,6 % à 512** ; PPL
+  wiki 2048 × 1,0119 (double quantification + A8). La ligne de régime dit le chemin int8 pris
+  (`prefill_int8=repli-bf16×N` / `cublas`). Réserve : au-delà de 16 lignes W8A8, en dessous W8A16 — la sortie dépend du
+  chemin selon M. `acvram-memoire/revue/poste6-ro7-int8-promus-verdict-carte-03-10.md`.
+
+### Troncature causale du cœur MLA au préfill, en option (zzs)
+
+* `ACVRAM_MLA_CAUSAL=1` limite les scores, le masque, le softmax et le produit par V de chaque morceau du préfill aux clés
+  que ce morceau voit, au lieu de toutes les clés puis du masque. Sur Kimi-Linear-35B (RTX 5090, b=1), le préfill gagne
+  24 % au GPU à 8 192 jetons, et 27 % à 8 192 et 31 % à 12 288 au mur. Le décodage ne change pas.
+* **Désactivée par défaut** : la sortie n'est pas identique au bit (l'écart reste dans l'erreur d'arrondi du chemin complet
+  contre fp64), et 2 réponses gloutonnes sur 6 divergent. Le défaut ne changera qu'après une garde de qualité (perplexité de
+  décodage à 8 192 + 512 jetons).
+
+### gemma-4-31B à 65 536 jetons : cache KV en anneau, cible KV par séquence, plongements en RAM hôte (poste6, levier 2, g6r)
+
+* **Cache KV en anneau** (`ACVRAM_KV_ANNEAU`, défaut `auto` ; `1` toujours, `0` jamais) : les couches à fenêtre glissante
+  ne gardent que R blocs par séquence (gemma-4 : R = 67) — une séquence de 65 536 jetons coûte 5,45 Gio de cache au lieu de
+  30,2. Au bit du cache plein à 16 384 et 27 648 (carte, 01/10). Sous l'anneau le cache de préfixe est coupé et un lot à
+  images refusé. En `auto`, l'anneau n'est pris que si le plan au cache plein exile des poids ou ne loge pas une séquence :
+  un contexte qui tenait garde son plan à l'identique.
+* **Cible KV du planificateur** : sous l'anneau le cache se dimensionne en séquences × octets d'une séquence, et cède jusqu'au
+  plancher d'une séquence avant tout poids (avant : 9,44 Gio de cache et 39 MLP sur 60 en RAM hôte).
+* **Table de plongements en RAM hôte avant tout MLP** (`ACVRAM_EMBED`, défaut `auto` ; `hote`, `carte`) : quand le plan
+  déborde encore, la table bf16 (2,62 Gio sur gemma-4-31B) quitte la carte avant le premier MLP ; la tête de sortie garde sa
+  copie quantifiée. Mêmes ids table hôte / table sur la carte (carte, 8 192). Ligne de régime : `plongements=hôte|carte`.
+* **Réserve des tampons denses** : elle n'est plus comptée quand le plan n'exile aucun poids dense (le pool n'existe que
+  sous exil). Comptée, elle faisait exiler 2 MLP un chargement sur deux dès que la chauffe avait enregistré un excès.
+* **Mesuré sur carte (02/10)** : gemma-4-31B, 65 536 jetons tenus, 0 couche exilée, NOMINAL, 31 j/s sur une invite de
+  61 942 jetons (la veille : 39 exilées, 3,5 j/s) ; deux chargements consécutifs dans le même régime, mêmes ids.
+  `acvram-memoire/revue/poste6-g6r-stabilite-verdict-carte-02-10.md`.
+* **Corrigé en chemin** : l'appareil de calcul du modèle n'est plus celui de la table de plongements (tour de vision, chauffe
+  du contexte : avec une table en RAM hôte la chauffe ne jugeait plus la réserve de la carte).
+
 ## 0.7.17 (01/10/2026)
 
 ### Piles d'experts MoE construites au chargement, avant le KV (aym)

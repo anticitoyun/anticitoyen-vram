@@ -57,6 +57,10 @@ class ForwardBatch:
     # d19 (poste6 01/10) : lot d'un préfill par morceaux — (rang, total, fin, transitoires) ; `transitoires` vrai quand la passe
     # est couche-majeure (forward_tranches) : l'attention garde alors en bf16 les K/V des morceaux précédents de la couche
     morceau: Optional[tuple] = None
+    # levier 2 (poste6 01/10) : créneau d'anneau de chaque séquence (−1 : aucun) et R ; les couches à fenêtre en dérivent leurs tables
+    # et emplacements (`tables_fenetre`, `slots_fenetre`, `fixed_decode_views_fenetre`) — rien ne change pour les couches pleines
+    anneau: Optional[list] = None
+    R: int = 0
 
     def images_de(self, i: int) -> list:
         """Plages (debut, fin) de la séquence i, [] sans image."""
@@ -111,6 +115,50 @@ class ForwardBatch:
                 tables.to(device, non_blocking=True),
                 torch.tensor(self.seq_lens, dtype=torch.long).to(
                     device, non_blocking=True))
+        return got
+
+    def creneaux_on(self, device: torch.device) -> torch.Tensor:
+        cache = self.__dict__.setdefault("_cren_cache", {})
+        t = cache.get(device)
+        if t is None:
+            t = cache[device] = torch.tensor(self.anneau or [-1] * self.batch_size, dtype=torch.long).to(device, non_blocking=True)
+        return t
+
+    def tables_fenetre(self, i: int, device: torch.device) -> torch.Tensor:
+        """Table d'anneau de la séquence i (même longueur logique que sa table pleine)."""
+        from ..memory.kvcache import tables_anneau
+        cache = self.__dict__.setdefault("_tfen_cache", {})
+        t = cache.get((i, device))
+        if t is None:
+            c = torch.tensor([self.anneau[i]], dtype=torch.long, device=device)
+            t = cache[(i, device)] = tables_anneau(c, int(self.block_tables[i].shape[0]), self.R)[0]
+        return t
+
+    def slots_fenetre(self, device: torch.device) -> torch.Tensor:
+        """Emplacements d'anneau des jetons du lot ; au préfill, seuls les (R − 1) derniers blocs de chaque séquence sont écrits
+        (les autres ne seront jamais relus : −1, ignoré par `write`) — deux positions d'un même scatter ne visent jamais le même bloc."""
+        from ..memory.kvcache import slots_anneau, BLOCK_SIZE as _bs
+        cache = self.__dict__.setdefault("_sfen_cache", {})
+        t = cache.get(device)
+        if t is None:
+            cren, fins = [], []
+            for i, ql in enumerate(self.query_lens):
+                cren += [self.anneau[i]] * ql; fins += [self.seq_lens[i]] * ql
+            cren_t = torch.tensor(cren, dtype=torch.long); fins_t = torch.tensor(fins, dtype=torch.long)
+            pos = self.positions.to(torch.long)
+            if self.is_prefill:
+                cren_t = torch.where(pos >= fins_t - (self.R - 1) * _bs, cren_t, torch.full_like(cren_t, -1))
+            t = cache[device] = slots_anneau(pos, cren_t, self.R, _bs).to(device, non_blocking=True)
+        return t
+
+    def fixed_decode_views_fenetre(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Comme `fixed_decode_views`, tables d'anneau (même godet, mêmes longueurs)."""
+        from ..memory.kvcache import tables_anneau
+        cache = self.__dict__.setdefault("_fixed_fen_cache", {})
+        got = cache.get(device)
+        if got is None:
+            tables, lens = self.fixed_decode_views(device)
+            got = cache[device] = (tables_anneau(self.creneaux_on(device), int(tables.shape[1]), self.R), lens)
         return got
 
     def slots_on(self, device: torch.device) -> torch.Tensor:

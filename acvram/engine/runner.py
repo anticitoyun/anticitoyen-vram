@@ -104,6 +104,11 @@ _MORCEAU_AU_DELA = max(0, int(os.environ.get("ACVRAM_PREFILL_MORCEAU_AU_DELA", "
 _MORCEAU_SEUIL: Optional[int] = None
 
 
+def _reduction_bf16_en_vigueur() -> str:
+    from .loader import reduction_bf16_en_vigueur
+    return reduction_bf16_en_vigueur()
+
+
 def definir_seuil_morceaux(n: Optional[int]) -> None:
     """Jetons au-delà desquels l'attention passe par morceaux de `_MORCEAU_AU_DELA` (None : jamais) ; posé par la chauffe."""
     global _MORCEAU_SEUIL
@@ -133,6 +138,7 @@ class Sequence:
     id: int = field(default_factory=lambda: next(_ids))
     output_ids: list[int] = field(default_factory=list)
     blocks: list[int] = field(default_factory=list)
+    anneau_slot: int = -1               # levier 2 : créneau d'anneau (couches à fenêtre), −1 sans anneau
     finished: bool = False
     finish_reason: str = ""
     arrival: float = field(default_factory=time.time)
@@ -664,7 +670,7 @@ def _mla_core_texte() -> str:
     """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum) ; `flash(fp32)` (C13-c) ;
     puis `mla_prep=grille|temoin` (C14-b geste 3)."""
     from . import mla
-    txt = mla.regime_coeur_texte()
+    txt = " ".join(m for m in (mla.regime_coeur_texte(), mla.regime_causal_texte()) if m)
     return (f" {txt}" if txt else "") + " " + mla.regime_prep_texte() + " " + mla.regime_glue_texte()
 
 
@@ -758,7 +764,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         from .. import regime as _regime
         _regime.declarer_modele_charge(loaded.manifest)          # vision=off sur la ligne d'un alias texte (pièce a)
         self.vision: Optional[TourVision] = TourVision.depuis_dossier(
-            loaded.path, loaded.manifest, self.model.embed_tokens.device)
+            loaded.path, loaded.manifest, getattr(self.model, "appareil", None) or self.model.embed_tokens.device)
         # Une tour servie exige un masque de plage image connu pour sa famille : refus NOMMÉ au chargement
         # (MasqueImageInconnu), jamais un bloc bidirectionnel appliqué par défaut (Qwen3-VL, 20/09 18:57)
         self.masque_images: Optional[str] = None
@@ -776,8 +782,18 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         self._max_insta = int(os.environ.get("ACVRAM_INSTA_MAX", "3"))
         self._insta: "OrderedDict[int, list]" = OrderedDict()
 
-        if self.model.caches:
-            n_blocks = min(c.cfg.num_blocks for c in self.model.caches.values())
+        # levier 2 (poste6 01/10) : les caches en anneau (couches à fenêtre) ont leur propre pool de créneaux ; ils ne comptent pas
+        # dans les blocs paginés partagés. Le cache de préfixe ne peut pas servir un anneau (blocs recyclés, pas adressables par
+        # hachage — vLLM fait de même hors fenêtre) : coupé, dit au régime.
+        self.R = int(getattr(self.spec, "kv_anneau", 0) or 0)
+        anneaux = [c for c in self.model.caches.values() if getattr(c.cfg, "anneau", 0)]
+        pleins = [c for c in self.model.caches.values() if not getattr(c.cfg, "anneau", 0)]
+        self._anneau_libres: list[int] = list(range(min(c.cfg.num_blocks for c in anneaux) // self.R)) if (self.R and anneaux) else []
+        if self.R and enable_prefix_cache:
+            print(f"[acvram] KV en anneau (R={self.R} blocs par séquence, {len(self._anneau_libres)} créneaux) : cache de préfixe coupé", flush=True)
+            enable_prefix_cache = False
+        if pleins:
+            n_blocks = min(c.cfg.num_blocks for c in pleins)
         else:
             # Modèle sans cache paginé (MLA latent contigu, GLM ; ou
             # récurrence linéaire pure) : `self.model.caches` est vide, le
@@ -921,7 +937,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         plan = self.loaded.plan
         couches_exilees = sum(1 for lp in plan.layers if lp.streamed)
         cartes = sorted({lp.exec_device for lp in plan.layers}
-                        | {plan.embed_device, plan.lm_head_device})
+                        | {plan.lm_head_device} | ({plan.embed_device} - {"cpu"}))      # table en RAM hôte : pas une carte
 
         etats_piles: set[str] = set()
         raisons_piles: set[str] = set()
@@ -929,7 +945,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # Pièce 268 : UN parcours de l'arbre des modules (il en faisait quatre, ~20 000 modules sur un MoE de 48 couches ×
         # 128 experts, et /metrics appelait regime() sept fois : 343 ms dans la boucle HTTP, 262). Pas de cache entre
         # appels : `streamed` change en service (`_promote_expert`), l'état rendu doit rester vivant.
-        blocs = [m for m in self.model.modules() if isinstance(m, MoEBlock)]
+        modules = list(self.model.modules())  # le seul parcours ; prefill_int8_regime le réutilise
+        blocs = [m for m in modules if isinstance(m, MoEBlock)]
         for m in blocs:
             etats_piles.add(m._stack_state)
             if m._stack_state == "non" and getattr(m, "_raison_repli", ""):
@@ -1024,6 +1041,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "piles_ok": piles_ok,
             "piles_raison": sorted(raisons_piles),
             "cartes": cartes,
+            "plongements": "hôte" if plan.embed_device == "cpu" else "carte",
+            "reduction_bf16": _reduction_bf16_en_vigueur(),
             "chemin_moe": chemin_moe,
             # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
@@ -1031,7 +1050,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                        + ("(relu)" if _att_relire_kv() else ""),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             # pièce 139 : « cublas+bf16(origine fp8 ×233) » quand des int8 ré-encodés du fp8 passent en déquant bf16
-            "prefill_int8": kernels.prefill_int8_regime() + (
+            "prefill_int8": kernels.prefill_int8_regime(modules=modules) + (
                 "+" + _prefill_i8c().split("=", 1)[1] if _prefill_i8c() else ""),
             # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
@@ -1141,7 +1160,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 f"replays={r['graphes_replays']} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
-               f"{piles_txt} cartes={r['cartes']} "
+               f"{piles_txt} cartes={r['cartes']} plongements={r['plongements']} reduction_bf16={r['reduction_bf16']} "
                f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} prefill_int8={r['prefill_int8']} dense={r['dense']} "
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
                f"echelle_awq={r['echelle_awq']} "
@@ -1149,7 +1168,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + f"kv_budget={kv_cap}/{kv_seqs} "
                + (f"kv_sous_demande={kv_cap}/{kv_dem} " if kv_dem and kv_cap < kv_dem else "")
                + _falaise_texte(getattr(self.loaded.plan, "falaise", None))
-               + f"kv={self.kv_format_servi()} "
+               + f"kv={self.kv_format_servi()}{f'(anneau R={self.R}, préfixe off)' if getattr(self, 'R', 0) else ''} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "
                + f"etroites={etroites_texte()} "
@@ -1205,6 +1224,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     ids.add(v)
                 elif isinstance(v, list):
                     ids.update(int(x) for x in v if isinstance(x, int))
+        # evp (gpt-oss) : en harmony, <|end|> ferme un MESSAGE (l'analyse), pas le tour — un manifeste converti avant le
+        # correctif le porte dans ses fins (FINS_DE_TOUR) et la génération s'arrêtait avant le canal final ou l'appel.
+        if self.tokenizer is not None:
+            ids -= set(getattr(self.tokenizer, "fins_de_message", lambda: [])())
         return ids
 
     def _positions_images(self, seq: "Sequence") -> None:
@@ -1346,6 +1369,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                     continue
                 if need > self.allocator.num_free:
                     break
+                if self.R and not self._anneau_libres:          # levier 2 : un créneau d'anneau par séquence vivante
+                    break
                 self.waiting.pop(0)
 
                 # Tour de vision : une passe eager par image, ici, avant le
@@ -1425,6 +1450,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 seq.prefill_len = seq.cached_len
                 seq.hashes = list(hashes[:len(matched)])
                 seq.blocks.extend(self.allocator.allocate(need - len(matched)))
+                if self.R:
+                    seq.anneau_slot = self._anneau_libres.pop()
                 self.stats.cached_prompt_tokens += seq.cached_len
 
                 self.running.append(seq)
@@ -1758,6 +1785,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                 self._register_complete_blocks(seq)
             self.allocator.free(seq.blocks)
             seq.blocks = []
+        if seq.anneau_slot >= 0:
+            self._anneau_libres.append(seq.anneau_slot)
+            seq.anneau_slot = -1
         # HORS du bloc ci-dessus : l'état récurrent n'a aucun rapport avec le
         # fait que la séquence détienne encore des blocs KV. Les deux étaient
         # liés, si bien qu'un `_finish` appelé sur une séquence déjà libérée —
@@ -1842,6 +1872,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             block_tables=block_tables,
             slot_mapping=torch.tensor(slots, dtype=torch.long),
             is_prefill=prefill,
+            anneau=[s.anneau_slot for s in seqs] if self.R else None, R=self.R,
             seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states,
             images=images, deepstack=deepstack,
             **self._mrope_du_lot(seqs, prefill, query_lens, seq_lens))
@@ -2073,7 +2104,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         en_vol: Optional[dict] = None
         # le device du modèle : celui de la table d'embeddings (runner:666, chargement de la tour) — `Model` n'a pas de `.device`
         # (essai 2, 07 h 06 : `getattr(self.model, "device", cpu)` rendait cpu et le chemin épinglé ne s'appliquait jamais)
-        device = getattr(getattr(self.model, "embed_tokens", None), "device", None) or torch.device("cpu")
+        device = (getattr(self.model, "appareil", None)
+                  or getattr(getattr(self.model, "embed_tokens", None), "device", None) or torch.device("cpu"))
         cuda = torch.cuda.is_available() and device.type == "cuda"
 
         def rapatrier(v: dict) -> list[GenerationOutput]:
@@ -2391,6 +2423,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             block_tables=block_tables,
             slot_mapping=torch.tensor(slots, dtype=torch.long),
             is_prefill=False,
+            anneau=[s.anneau_slot for s in seqs] if self.R else None, R=self.R,
             seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states)
 
     def _append(self, seq: Sequence, tokens: list[int]) -> GenerationOutput:

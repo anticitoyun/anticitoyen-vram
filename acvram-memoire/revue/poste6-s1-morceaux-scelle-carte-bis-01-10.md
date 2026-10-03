@@ -29,3 +29,41 @@ sur 40-60 couches, là où la reprise ne relit que pour les lignes nouvelles ; l
 bf16 » (bead lic : budget bf16 à 325 blocs) ou l'acceptation d'un seuil absolu scellé par chef. Issues : (a) Q4 tenu → levier 2 ouvert ;
 (b) Q5 faux → la frontière d'instantané n'explique pas 0,60 : chercher dans `_prefill_morceaux` × `coupe` (prefill_len/cached_len) ;
 (c) témoin gemma vide (g9m) → dit, pas remplacé par un chiffre.
+
+## Addendum du 02/10 15 h — rejeu de S1 bis sur fusion-2 (62396fcba), écrit AVANT la prise (ordre chef)
+
+Ce qui a changé depuis le 01/10 et oblige à réécrire les bras et les prédictions (le reste du scellé tient) :
+* **d19** : les morceaux ne relisent plus leurs K/V int8 du cache, ils gardent des K/V bf16 transitoires par couche
+  (`attention._kv_transitoires`) — la cause du Q4 FAUX d'hier (0,041 sur Devstral, 0,436 sur gemma long) n'est plus là ;
+* **g9m** : gemma sert son cache de préfixe → son témoin reprise n'est plus vide (0,144 court, 0,027 long le 01/10) ;
+* **anneau** : à 20 480 gemma passe sous l'anneau en `auto`, où le cache de préfixe est COUPÉ — aucune reprise n'existe,
+  donc aucun témoin : la chaîne longue se joue sous `ACVRAM_KV_ANNEAU=0` (KV plein, 16/60 MLP exilés à sec, DÉGRADÉ) ;
+* **d19 encore** : un bras A laissé au défaut passerait lui aussi par morceaux au-delà du tenu → les bras A portent
+  `ACVRAM_PREFILL_MORCEAU_AU_DELA=0` ; la chaîne « insta » (frontière d'instantané d'un faux hybride) n'a plus d'objet.
+
+Script : `scratchpad/poste6-s1-bis/carte-s1-bis.sh [court|long|dense]` (relu : arbre propre exigé, HEAD asserté par la
+prise, sha des invites vérifiés contre git, `set -euo pipefail`, comparateur par chaîne à sec).
+
+| chaîne | modèle, régime prévu à sec | invite | ctx | bras |
+|---|---|---|---|---|
+| court | gemma-4-31B, KV plein, 0 exilé, NOMINAL | `87d8bfe0a:README.md`, 7 953 jetons | 8 192 | A1 (2 requêtes), A2, B |
+| long | gemma-4-31B, `ACVRAM_KV_ANNEAU=0`, 16/60 exilés, table hôte | `a77970f45` README + REPRISE, 17 859 jetons | 20 480 | A1 (2 requêtes), A2, B |
+| dense | Devstral-24B (19 Go, sur disque dur) | court, 7 865 jetons | 10 240 | A1 (2 requêtes), A2, B |
+
+**Durée chiffrée** (d'après les prises d'aujourd'hui : 37-40 s par bras à 8 192 ; d'hier : 177 s le long A1, 28-60 s
+Devstral) : court ≈ 2 min ; long ≈ 7 min 30 ; dense ≈ 3 min si le cache de pages est chaud, +4 min sinon (19 Go à
+0,07-0,15 Go/s sur le disque dur : à préchauffer par une lecture hors carte et hors mesure). **Total ≈ 13 min, plafond 20.**
+Segmentable : `court long` (≈ 9 min 30) puis `dense` (≈ 3 min).
+
+| # | grandeur | prédit | FAUX si |
+|---|---|---|---|
+| Q1' | B : `(morceaux@4096)`, `prefill_morceaux` > 0 ; A : 0 | tenu sur les 3 chaînes | A > 0 (le témoin découpe aussi) ou B = 0 |
+| Q2' | A1 / A2 | Δ = 0, ids égaux | Δ ≠ 0 |
+| Q3' | témoin reprise | gemma court 0,05-0,30 ; gemma long 0,01-0,10 ; Devstral 0,002-0,01 | nul (cache non servi) : témoin vide, dit |
+| Q4' | B / A1 avec K/V transitoires | gemma court 0,02-0,15 → **tenu** (≤ 2 × témoin) ; gemma long 0,02-0,15 → incertain, plutôt FAUX au seuil (≈ 0,05) ; Devstral 0,003-0,02 → incertain, plutôt FAUX au seuil (≈ 0,008) | un écart ≥ celui d'hier (0,436 long, 0,041 Devstral) : les transitoires n'ont rien amélioré |
+| Q5' | exil égal entre les bras d'une chaîne ; durée par bras ≤ 1 min (court, dense chaud), ≤ 3 min (long) | tenu | sinon dit, rejeu |
+
+Issues nommées : (a) long A1 d'un seul tenant ne tient pas 17 859 jetons (réserve planifiée pour un plafond de 4 096,
+≈ 5,7 Gio libres à sec) → 400, chaîne non jouable telle quelle, dite ; (b) Q4' tenu partout → les morceaux passent le
+critère § 4 avec d19, à dire à chef pour la 0.7.18 ; (c) le premier bras Devstral lit 19 Go sur le disque dur avec la
+prélecture B2 active — jamais mesuré sur disque dur (verdict B2) : son temps de chargement sera relevé, sans conclure.

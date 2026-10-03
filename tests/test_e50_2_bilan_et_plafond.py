@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 ICI = Path(__file__).resolve().parent.parent
-PY = "/usr/bin/python3"
+PY = sys.executable  # le module se charge dans CET interpréteur : la garde doit le sonder lui, pas /usr/bin/python3
 CAMPAGNE = ICI / "outils" / "campagne-e50.2-nocturne.py"
 
 
@@ -30,7 +30,7 @@ def _gi_ok():
     return r.returncode == 0
 
 
-pytestmark = pytest.mark.skipif(not _gi_ok(), reason="GTK4/libadwaita absent (/usr/bin/python3)")
+pytestmark = pytest.mark.skipif(not _gi_ok(), reason="GTK4/libadwaita absent de cet interpréteur")
 
 
 def _charger_module():

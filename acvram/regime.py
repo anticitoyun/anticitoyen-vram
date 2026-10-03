@@ -308,6 +308,8 @@ VARIABLES: tuple[Variable, ...] = (
              "C13 (poste7-c13a-defaut § 2) : 1 = le 3e produit du préfill y = v_b·o_lat (8ae21997) suit MLA_CORE ; 0 = fp32 ; scellé prefill ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits → défaut 1"),
     Variable("MLA_CORE_MAX_CLES", "2048", ("acvram.engine.mla", "_MLA_CORE_MAX_CLES"), "2048",
              "diagnostic (prise à 36 tranches, poste2 20/09) : seuil de la règle des clés vues au préfill — au-delà, fp32 pour le morceau ; 0 = règle neutralisée (tf32/bf16 à toutes longueurs, ligne mla_core=tf32(sans règle des clés)) ; 2048 = défaut servi"),
+    Variable("MLA_CAUSAL", "0", ("acvram.engine.mla", "_MLA_CAUSAL"), "0",
+             "zzs (poste5-zzs-scelle-01-10, verdict 02-10) : OPT-IN — 1 = au préfill par morceaux, scores, masque, softmax et produit par V limités aux clés VUES (passe + d1), −24 % du GPU du préfill à 8 k mais sortie changée (E1 au bit faux, E2 tenu) ; 0 = défaut, toutes les clés puis masque ; le défaut ne bascule qu après la garde PPL 8 192 + 512 (ligne mla_causal=1(opt-in))"),
     Variable("MLA_CORE_DECODE", "fp32", ("acvram.engine.mla", "_MLA_CORE_DECODE"), "fp32",
              "C13 niveau 2 (poste7-c13a-defaut § 2) : régime du cœur au DÉCODAGE (y = v_b·o_lat, sgemm fp32 1,5 ms/pas à b=12), indépendant de MLA_CORE — fp32 défaut | tf32 | bf16 ; scellé sgemm ≤ 0,6 ms ET ppl-decode-kv 3 tranches ± 0,001 ET capture {1,2,8,12,16} 5/5 → défaut"),
     Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,
@@ -417,6 +419,27 @@ VARIABLES: tuple[Variable, ...] = (
              "kv31b levier 2 étape 1 (30/09, OPT-IN, défaut 0 = un seul tenant) : préfill de l'attention par morceaux de N jetons "
              "d'invite, lots passés couche par couche (forward_tranches) ; au bit d'un seul tenant sous les mêmes chemins (morceau ≥ 128 "
              "lignes et > seuil de fusion gate/up pour une invite qui le dépasse, sinon ignoré et dit) ; hors récurrence linéaire"),
+    Variable("KV_ANNEAU", "auto", ("acvram.engine.loader", "_KV_ANNEAU_MODE"), "1",
+             "levier 2 (01/10) : cache KV en ANNEAU (R blocs par séquence) pour les couches à fenêtre glissante — auto (défaut) : seulement "
+             "si le KV plein ne tient pas la fenêtre demandée ; 1 : toujours (bras de mesure) ; 0 : jamais. Sous l'anneau le cache de "
+             "préfixe est coupé et un lot à images refusé ; régime « kv=int8(anneau R=N, préfixe off) »"),
+    Variable("EMBED", "auto", ("acvram.engine.loader", "_EMBED_MODE"), None,
+             "plongements (02/10) : auto (défaut) — la table bf16 quitte la carte avant le premier MLP quand le plan déborde ; "
+             "hote : toujours (bras de mesure) ; carte : jamais. Régime « plongements=hôte »"),
+    Variable("INT8_PROMUS", "", ("acvram.engine.loader", "_INT8_PROMUS"), None,
+             "ro7 (03/10) : `canal` re-quantifie au chargement les int8 promus (g128 affines, inéligibles au GEMM int8) en "
+             "canal symétrique → chemin cublas du préfill ; \"\" (défaut) : repli bf16 déquantifié. Opt-in, qualité à mesurer."),
+    # lue à l'import comme un tuple (loader._INT8_PROMUS_ROLES) : comparée ici par l'environnement, str(()) mentirait
+    Variable("INT8_PROMUS_ROLES", "", None, None,
+             "ro7 (03/10) : rôles seuls re-quantifiés sous INT8_PROMUS=canal (« down_proj,k_proj ») — bras de mesure pour "
+             "attribuer un écart de qualité ; \"\" (défaut) : tous les int8 promus."),
+    Variable("BF16_REDUCTION", "reduite", ("acvram.engine.loader", "_BF16_REDUCTION"), None,
+             "02/10 : `exacte` (opt-in) pose torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False au "
+             "chargement — sans lui les projections étroites (k/v, N = 1 024) changent de 1 ulp sur 15-30 % de leurs "
+             "éléments selon le découpage du préfill ; `reduite` (défaut) : le défaut de torch. Opt-in parce que le préfill "
+             "coûte +2,40 % à M = 4 096 (seuil 2 %) et que la sortie du seul tenant change aussi. `etroite` (03/10) : "
+             "réduction exacte le temps des seuls F.linear cuBLAS des poids quantifiés au préfill (kernels.linear_prefill) — "
+             "+2,32 % à M = 4 096, et le moteur dépend encore du découpage par un produit hors d'eux. Régime « reduction_bf16= »"),
     Variable("PRELECTURE", "1", ("acvram.engine.loader", "_PRELECTURE"), None,
              "B2 (02/10) : fils qui remplissent le cache de pages des fragments (readahead par pas de 128 Kio) pendant le "
              "chargement ; 0 : jamais. Ne change aucun octet chargé ; coupée si les fragments dépassent 80 % de la RAM disponible"),
@@ -806,6 +829,8 @@ def regime_ligne() -> str:
         from .engine import mla as _mla
         if _mla.regime_coeur_texte():                     # tf32/bf16(≤2048 clés) | flash(fp32) | flash(repli fp32: …)
             parts.append(_mla.regime_coeur_texte())
+        if _mla.regime_causal_texte():                    # mla_causal=1(opt-in) (zzs), rien au défaut
+            parts.append(_mla.regime_causal_texte())
         parts.append(_mla.regime_prep_texte())            # mla_prep=grille|temoin (C14-b geste 3, défaut 1 en 0.6.31)
         parts.append(_mla.regime_glue_texte())            # mla_glue=2|1(temoin)|0 (C15 2a-bis, défaut 2 en 0.6.32)
     except Exception:                                     # noqa: BLE001

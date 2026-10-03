@@ -118,11 +118,16 @@ class ModelSpec:
     # d19 (poste6 01/10) : jetons au-delà desquels l'attention passe par morceaux (chauffe / `loader._plafonner_mlp_prefill`) ;
     # le flux résiduel, q/k/v et les sorties ne vivent alors que pour un morceau, et une couche garde ses K/V bf16 transitoires
     prefill_morceau_plafond: Optional[int] = None
+    # levier 2 (poste6 01/10) : R > 0 = les couches à fenêtre glissante gardent leur KV dans un ANNEAU de R blocs par séquence
+    # (posé par le chargeur : ACVRAM_KV_ANNEAU=1, ou auto quand le plein ne tient pas la fenêtre demandée) ; 0 = plein
+    kv_anneau: int = 0
     rotary_dim: Optional[int] = None      # RoPE partiel (None = tête entière)
     attn_output_gate: bool = False
     # gemma4 : couches locales (fenêtre) / globales (têtes plus larges, RoPE
     # proportionnel), v normalisé, k = v global, softcap final
     sliding_window: int = 0
+    # evp (gpt-oss) : borne de la SwiGLU des experts (`swiglu_limit`, 7 sur les deux gpt-oss) ; 0 = SwiGLU ordinaire
+    swiglu_limit: float = 0.0
     global_head_dim: int = 0
     num_global_key_value_heads: int = 0
     rope_theta_swa: float = 0.0
@@ -283,6 +288,33 @@ class ModelSpec:
         """
         return self.kv_lora_rank > 0
 
+    @property
+    def couches_fenetre(self) -> list[int]:
+        """Indices des couches à fenêtre glissante (`sliding_attention`, fenêtre > 0) — candidates à l'anneau (levier 2)."""
+        if self.sliding_window <= 0 or not self.layer_types:
+            return []
+        return [i for i, t in enumerate(self.layer_types) if "sliding" in t]
+
+    def anneau_R(self, lot_speculatif: int = 8) -> int:
+        """Blocs d'un anneau : la fenêtre, le bloc en cours d'écriture et un lot spéculatif (k ≤ 8), plus un de garde — gemma-4 :
+        ⌈(1 024 + 16 + 8)/16⌉ + 1 = 67. Un morceau de préfill ne lit JAMAIS l'anneau (K/V bf16 transitoires, d19), sinon il faudrait
+        y ajouter le morceau (321 blocs pour 4 096)."""
+        if not self.couches_fenetre:
+            return 0
+        return -(-(self.sliding_window + 16 + lot_speculatif) // 16) + 1
+
+    def kv_bytes_pour_sequence(self, n_jetons: int, kv_bits: int = 8, fmt: Optional[str] = None,
+                               anneau: Optional[int] = None) -> int:
+        """Octets de cache d'UNE séquence de ``n_jetons`` : plein (toutes les couches à KV × n), ou sous l'anneau (R blocs × 16
+        jetons pour chaque couche à fenêtre, n pour les autres) — gemma-4-31B à 65 536 : 30,2 Gio → 5,45 (R = 67)."""
+        R = self.kv_anneau if anneau is None else int(anneau)
+        par_jeton = self.kv_bytes_per_token(kv_bits, fmt)
+        total = max(1, self.couches_avec_kv)
+        if R <= 0 or not self.couches_fenetre or self.est_mla:
+            return int(par_jeton * n_jetons)
+        fen = len(self.couches_fenetre)
+        return int(par_jeton * ((total - fen) * n_jetons + fen * R * 16) // total)
+
     def couche_a_kv(self, index: int) -> bool:
         """La couche ``index`` alloue-t-elle un cache PAGINÉ ?
 
@@ -368,7 +400,7 @@ class ModelSpec:
                 overhead += (self.num_key_value_heads * self.head_dim + 4) / BLOCK_SIZE
         return int((per_layer + overhead) * self.couches_avec_kv)
 
-    def activations_prefill_bytes(self, n_jetons: int) -> int:
+    def activations_prefill_bytes(self, n_jetons: int, seul_tenant: bool = False) -> int:
         """Octets TRANSITOIRES de VRAM qu'un préfill de ``n_jetons`` demande
         au-delà des poids résidents et du cache KV — le terme que le budget
         d'exil ne comptait pas (poste3, verdict-palier1-bloc6-17-09 :
@@ -388,7 +420,11 @@ class ModelSpec:
         470 Mio (28672 × 8192 × 2) qui manquait au 70B. Les logits n'y sont
         pas : le moteur ne les calcule que pour les positions échantillonnées.
         Un préfill groupé de plusieurs invites (ACVRAM_PREFILL_BATCH) peut
-        dépasser cette estimation : elle couvre une invite, la plus longue."""
+        dépasser cette estimation : elle couvre une invite, la plus longue.
+
+        ``seul_tenant`` (g6r, 02/10) : la passe d'un SEUL TENANT de ``n_jetons`` d'un modèle à fenêtre glissante, que la
+        chauffe essaie au-delà du plafond de morceaux (phase 1) — lignes et clés en T. La réserve du PLAN, elle, couvre
+        le régime par morceaux (défaut) : un seul tenant au-delà du plafond n'est servi que si la chauffe l'a tenu."""
         T = max(1, int(n_jetons))
         H = self.hidden_size
         D = self.head_dim or (H // max(1, self.num_attention_heads))
@@ -396,7 +432,10 @@ class ModelSpec:
         # d19 : au-delà du plafond de morceaux S, une invite passe par morceaux — le pire cas admissible d'un seul tenant est S
         # lignes (flux résiduel, ligne normée, sorties, q/k/v : ces termes s'arrêtent à S) ; reste linéaire en T le tampon
         # bf16 des K/V d'une couche (2 × T × têtes_KV × D × 2) — Devstral 65 536 : 256 Mio contre 3,25 Gio de résiduel.
+        fenetre = self.sliding_window > 0 or any("sliding" in t for t in (self.layer_types or []))
         S = int(self.prefill_morceau_plafond) if self.prefill_morceau_plafond else 0
+        if seul_tenant and fenetre:
+            S = 0
         lignes_res = min(T, S) if S > 0 else T
         fixe = (4 * H * 2 + qkv * 2) * lignes_res
         par_jeton = (2 * self.num_key_value_heads * D * 2) if 0 < S < T else 0
@@ -423,8 +462,12 @@ class ModelSpec:
         # tenant ne matérialise rien (flash is_causal — Devstral : chauffe 1,12 Gio à 10 240 sous ce seul terme de 1,25) sauf à
         # relire un préfixe en cache (masque dense, cqy) : jusqu'à S clés ; au-delà de S les morceaux prennent le biais bas-droite
         # (flash). Pire cas admissible sans fenêtre : min(T, S) clés — T quand aucun plafond n'est posé (l'ancien terme).
-        fenetre = self.sliding_window > 0 or any("sliding" in t for t in (self.layer_types or []))
-        cles = T if (fenetre or S <= 0) else min(T, S)
+        # levier 2 (carte 01/10 18 h) : les MORCEAUX d'une couche à fenêtre lisent leurs clés tranchées à fenêtre + M ; un seul
+        # tenant à fenêtre matérialise [1 024 × T] (16 384 : pic 3,91 Gio pour 2,07 bornés à S).
+        # g6r (02/10) : ce pic-là est celui de ``seul_tenant`` (S = 0 ci-dessus), pas de la réserve du plan — laissé en T
+        # dans la réserve (2808a8190), il valait 8,0 Gio à 65 536 et faisait REFUSER ce que la carte avait tenu par morceaux
+        # (G1 : pic 1,93 Gio pour 2,82 réservés).
+        cles = T if S <= 0 else min(T, S + (self.sliding_window if fenetre else 0))
         fixe += self.num_attention_heads * min(T, LIGNES_BLOC_ATTENTION) * 4 * cles
         # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
         # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),
@@ -602,6 +645,7 @@ _ARCH_ALIASES = {
     "Qwen2MoeForCausalLM": "moe",
     "Qwen3MoeForCausalLM": "moe",
     "MixtralForCausalLM": "moe",
+    "GptOssForCausalLM": "moe",          # evp : puits, fenêtre alternée, experts à biais et SwiGLU bornée
     "DeepseekV2ForCausalLM": "moe",
     "DeepseekV3ForCausalLM": "moe",
     "GemmaForCausalLM": "llama",
@@ -649,10 +693,14 @@ def _fins_de_tour_du_gabarit(dossier: str) -> list[int]:
     tokenizer.json, sans gabarit, ou sur une lecture impossible (jamais une exception au chargement)."""
     try:
         with open(os.path.join(dossier, "tokenizer.json"), "r", encoding="utf-8") as fh:
-            speciaux = {t["content"]: int(t["id"]) for t in json.load(fh).get("added_tokens", [])
-                        if t.get("special") and t.get("content") in FINS_DE_TOUR}
+            tous = {t["content"]: int(t["id"]) for t in json.load(fh).get("added_tokens", []) if t.get("special")}
     except (OSError, ValueError, KeyError, TypeError):
         return []
+    speciaux = {t: i for t, i in tous.items() if t in FINS_DE_TOUR}
+    if "<|channel|>" in tous and "<|message|>" in tous:
+        # evp : harmony (gpt-oss) — <|end|> ferme l'analyse, pas le tour ; l'ajouter arrêtait la génération avant la
+        # réponse (preuve de service 02/10 14:12 : content vide, 46 jetons d'analyse puis <|end|>)
+        speciaux.pop("<|end|>", None)
     if not speciaux:
         return []
     gabarit = ""
@@ -884,6 +932,7 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         mlp_gated=bool(cfg.get("mlp_gated", cfg.get("model_type") != "starcoder2")),
         conv_L_cache=int(cfg.get("conv_L_cache") or 3),
         sliding_window=int(cfg.get("sliding_window") or 0),
+        swiglu_limit=float(cfg.get("swiglu_limit") or 0.0),
         global_head_dim=int(cfg.get("global_head_dim") or 0),
         num_global_key_value_heads=int(cfg.get("num_global_key_value_heads") or 0),
         rope_theta_swa=float(cfg.get("rope_theta_swa") or 0.0),
@@ -1043,6 +1092,7 @@ def _affiner_couches(spec: ModelSpec, path: str) -> None:
     norm: dict[int, int] = {}
     partage: dict[int, int] = {}
     experts: dict[int, set] = {}
+    fusionnes: dict[int, int] = {}                     # experts empilés [E, …] : E lu sur la première dimension
     for nom, forme in tenseurs.items():
         if not nom.startswith("model.layers."):
             continue
@@ -1056,9 +1106,21 @@ def _affiner_couches(spec: ModelSpec, path: str) -> None:
         if "norm" in nom.rsplit(".", 2)[-2:][0] or nom.endswith("norm.weight"):
             norm[i] = norm.get(i, 0) + n
         elif ".mlp." in nom or ".feed_forward." in nom:
+            queue = nom.split(".experts.")[1] if ".experts." in nom else ""
+            # gu1 : experts FUSIONNÉS d'une source HF (gpt-oss : `experts.gate_up_proj_blocks` [E, sortie, nb, 16]) — le
+            # suffixe n'est pas un numéro d'expert (6 suffixes comptés comme 6 experts) et un octet MXFP4 porte DEUX codes
+            # E2M1 ; les échelles E8M0 ne sont pas des paramètres. Le plan donnait 36,3 Go pour un 120b de ≈ 68,8.
+            if queue.endswith("_scales"):
+                continue
+            if queue.endswith("_blocks"):
+                n *= 2
             mlp[i] = mlp.get(i, 0) + n
-            if ".experts." in nom:
-                experts.setdefault(i, set()).add(nom.split(".experts.")[1].split(".")[0])
+            if queue:
+                tete = queue.split(".")[0]
+                if tete.isdigit():
+                    experts.setdefault(i, set()).add(tete)
+                else:
+                    fusionnes[i] = max(fusionnes.get(i, 0), int(forme[0]))
             else:
                 partage[i] = partage.get(i, 0) + n      # routeur et expert partagé
         else:
@@ -1071,7 +1133,7 @@ def _affiner_couches(spec: ModelSpec, path: str) -> None:
         if i not in attn and i not in mlp:
             couches.append(l)                           # couche absente : on garde l'estimation
             continue
-        n_ex = len(experts.get(i, ()))
+        n_ex = len(experts.get(i, ())) or fusionnes.get(i, 0)
         couches.append(LayerSpec(i, attn.get(i, 0), mlp.get(i, 0), norm.get(i, l.norm_params),
                                  n_ex > 0, n_ex,
                                  min(l.n_experts_active, n_ex) if n_ex else 0,

@@ -11,20 +11,26 @@ cible (témoin + lots de 10), imprime l'ordre et la durée prédite (méthode §
 `--executer` : pour chaque lot, joue le témoin (`acvram-qwen3-4b-srcgguf-nvfp4`) EN TÊTE, puis
 les 10 alias du lot via `outils/qualite-e50.sh <alias> --executer
 --je-sais-que-la-carte-est-libre` ; écrit un journal (`campagne-qualite-e50.tsv`, un rang par
-alias, rc et durée). Garde témoin (méthode § 4, E1) : si le S du témoin au lot N s'écarte de
-plus de 0,05 (abs) de son premier S mesuré dans CETTE campagne, le lot s'arrête et la campagne
-REFUSE de continuer (dérive de l'instrument, pas des modèles) — **ceci est une garde de
-cohérence simple, pas le test de McNemar item par item prescrit en § 4 : celui-ci exige les
-échantillons appariés (`panel-taches-resume.py`) et reste à la charge de qui mesure (poste2 ou
-poste1) avant de publier une étoile, jamais sauté ici.** Pause coopérative : si
-`~/.config/acvram/campagne-qualite-e50.pause` existe entre deux alias, la carte est rendue et la
-campagne attend sa disparition (même convention que campagne-e50.2-nocturne.py, 01/10).
+alias, rc et durée). Garde témoin (méthode § 4, E1, chef 01/10) : **McNemar ITEM PAR ITEM**
+(`outils/qualite-e50-mcnemar.py`), pas un simple écart de S — la 1re passe du témoin pose la
+référence (`~/.cache/acvram/qualite-e50-temoin-reference.json`, persiste entre deux lancements de
+cette campagne) ; chaque passe suivante compare ses échantillons (`SAMPLES <tâche>: <chemin>`,
+imprimés par `qualite-e50.sh`) à cette référence par `qualite_e50_mcnemar.temoin_tenu` : TENU
+seulement si p > 0,05 ET taux de discordance ≤ 10 % (E1 : « réponses identiques ≥ 90 % ») — les
+deux conditions sont nécessaires, une dérive SYMÉTRIQUE (autant d'items justes→faux que
+faux→justes) donne un p proche de 1 malgré 100 % de discordance ; voir
+`tests/test_qualite_e50_mcnemar.py` pour ce cas construit. Rejeu FAUX → le lot s'arrête, la
+campagne REFUSE de continuer (dérive de l'instrument, pas des modèles, § 4). Pause coopérative :
+si `~/.config/acvram/campagne-qualite-e50.pause` existe entre deux alias, la carte est rendue et
+la campagne attend sa disparition (même convention que campagne-e50.2-nocturne.py, 01/10).
 
 Usage :
   outils/campagne-qualite-e50.py --simule
   outils/campagne-qualite-e50.py --executer --je-sais-que-la-carte-est-libre
 """
 import argparse
+import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -35,7 +41,15 @@ from pathlib import Path
 RACINE = Path(__file__).resolve().parent.parent
 TEMOIN = "acvram-qwen3-4b-srcgguf-nvfp4"
 TAILLE_LOT = 10
-ECART_TEMOIN_MAX = 0.05   # garde de cohérence simple (pas McNemar, voir docstring)
+TACHES_E50 = ("mmlu_e50_hsm", "mmlu_e50_law", "mmlu_e50_ccs", "gsm8k_e50", "humaneval_e50")
+REFERENCE_TEMOIN = Path(os.path.expanduser("~/.cache/acvram/qualite-e50-temoin-reference.json"))
+
+
+def _mcnemar_lib():
+    spec = importlib.util.spec_from_file_location("qe50_mcnemar", RACINE / "outils" / "qualite-e50-mcnemar.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 # Durées prédites par catégorie (méthode § 2, poste6, scellées AVANT mesure) — minutes.
 DUREE_MIN = {"dense_30b": 10, "moe": 3.5, "petit_dense": 3, "grand_dense_exile": 60}
@@ -125,13 +139,36 @@ def _jouer_un(alias):
     )
     duree = time.monotonic() - debut
     s = None
+    echantillons = {}
     for ligne in r.stdout.splitlines():
         if ligne.startswith("S="):
             try:
                 s = float(ligne.split()[0].split("=", 1)[1])
             except ValueError:
                 pass
-    return r.returncode, s, duree, r.stdout, r.stderr
+        elif ligne.startswith("SAMPLES "):
+            # "SAMPLES <tâche>: <chemin|?>"
+            reste = ligne[len("SAMPLES "):]
+            tache, _, chemin = reste.partition(":")
+            chemin = chemin.strip()
+            if chemin and chemin != "?":
+                echantillons[tache.strip()] = chemin
+    return r.returncode, s, duree, echantillons, r.stdout, r.stderr
+
+
+def _corrects_echantillons(echantillons):
+    """{tâche: chemin} -> {tâche: {doc_id: correct}}, via qualite-e50-mcnemar.py (bac à sable
+    pour HumanEval, lecture directe des métriques lm-eval pour MMLU/GSM8K)."""
+    mcn = _mcnemar_lib()
+    out = {}
+    for tache, chemin in echantillons.items():
+        if not os.path.exists(chemin):
+            continue
+        if tache == "humaneval_e50":
+            out[tache] = mcn.corrects_humaneval(chemin)
+        else:
+            out[tache] = mcn.corrects_mmlu_gsm8k(chemin)
+    return out
 
 
 def executer():
@@ -139,30 +176,44 @@ def executer():
     if not cibles:
         print("=== rien à mesurer (aucun alias non mesuré au parc)")
         return 0
+    mcn = _mcnemar_lib()
     journal = RACINE / "outils" / "campagne-qualite-e50.tsv"
-    s_temoin_initial = None
+    reference = None
+    if REFERENCE_TEMOIN.exists():
+        try:
+            reference = json.loads(REFERENCE_TEMOIN.read_text())
+            print(f"référence témoin reprise de {REFERENCE_TEMOIN} (campagne précédente)")
+        except (json.JSONDecodeError, OSError):
+            reference = None
+
     for num_lot, lot in enumerate(lots, 1):
         _attendre_pause()
         print(f"=== lot {num_lot}/{len(lots)} — témoin {TEMOIN}")
-        rc, s, duree, out, err = _jouer_un(TEMOIN)
+        rc, s, duree, echantillons, out, err = _jouer_un(TEMOIN)
         with journal.open("a") as f:
             f.write(f"{TEMOIN}\tlot{num_lot}-temoin\t{rc}\t{s}\t{duree:.0f}\n")
         if rc != 0:
             print(f"ÉCHEC témoin (rc={rc}) — campagne arrêtée au lot {num_lot}\n{err}", file=sys.stderr)
             return 1
-        if s_temoin_initial is None:
-            s_temoin_initial = s
-            print(f"témoin de référence S={s}")
-        elif s is None or abs(s - s_temoin_initial) > ECART_TEMOIN_MAX:
-            print(f"TÉMOIN FAUX : S={s} s'écarte de plus de {ECART_TEMOIN_MAX} du premier S={s_temoin_initial} "
-                  f"— dérive de l'instrument suspectée, campagne arrêtée au lot {num_lot} "
-                  "(garde de cohérence simple ; McNemar item par item reste à faire avant de publier, voir § 4)",
-                  file=sys.stderr)
-            return 1
+        corrects = _corrects_echantillons(echantillons)
+        if reference is None:
+            reference = corrects
+            REFERENCE_TEMOIN.parent.mkdir(parents=True, exist_ok=True)
+            REFERENCE_TEMOIN.write_text(json.dumps(corrects))
+            print(f"témoin de référence posé (S={s}), {sum(len(d) for d in corrects.values())} items, "
+                  f"{REFERENCE_TEMOIN}")
+        else:
+            tenu, disc_b, disc_c, p, taux = mcn.temoin_tenu(reference, corrects)
+            print(f"témoin lot {num_lot} : S={s}, McNemar b={disc_b} c={disc_c} p={p:.4f} "
+                  f"discordance={taux:.1%} -> {'TENU' if tenu else 'FAUX'}")
+            if not tenu:
+                print(f"TÉMOIN FAUX (McNemar, méthode §4/E1) au lot {num_lot} — dérive de "
+                      "l'instrument suspectée, campagne arrêtée (pas des modèles)", file=sys.stderr)
+                return 1
         for alias in lot:
             _attendre_pause()
             print(f"--- {alias}")
-            rc, s, duree, out, err = _jouer_un(alias)
+            rc, s, duree, echantillons, out, err = _jouer_un(alias)
             with journal.open("a") as f:
                 f.write(f"{alias}\tlot{num_lot}\t{rc}\t{s}\t{duree:.0f}\n")
             if rc != 0:

@@ -372,6 +372,51 @@ un essaim, pas deux cartes), le KV 4 bits de FlexGen (mesuré ici : INT8 par
 (jeton, tête) bat le FP8, et 4 bits dégraderait), l'échange inter-GPU de
 ZeRO-Inference (lien plus lent que la RAM).
 
+### Grappes d'inférence distribuée : Exo et Petals (relu le 2 octobre)
+
+Deux projets libres répartissent un modèle sur plusieurs machines. Ce qu'ils
+annoncent, d'après leurs dépôts au 2 octobre 2026 :
+
+* **Exo** (exo-explore/exo, v1.0.71 du 23 avril 2026) : découverte automatique
+  des pairs, découpage « selon la topologie » qui tient compte des ressources de
+  chaque appareil et de la latence et du débit de chaque lien, parallélisme de
+  tenseur (×1,8 annoncé sur 2 appareils, ×3,2 sur 4), RDMA sur Thunderbolt 5
+  (« −99 % de latence »). Moteur MLX et MLX distributed : **sous Linux, Exo ne
+  calcule que sur le processeur**, le GPU y est « en développement ». API
+  OpenAI Chat Completions, Claude Messages, OpenAI Responses et Ollama.
+* **Petals** (bigscience-workshop/petals ; Borzunov et al., arXiv 2209.01188 et
+  2312.08361) : chaque serveur héberge une plage de blocs du transformeur,
+  annoncée sur une DHT (hivemind) ; le client enchaîne les serveurs et garde
+  les entrées qu'il leur a envoyées, pour rejouer le préfill sur un remplaçant
+  si un pair tombe ; les serveurs choisissent leur plage pour équilibrer le
+  débit de l'essaim. Annonce : jusqu'à 6 jetons/s en lot 1 pour Llama 2 70B.
+  **Dernier commit le 25 août 2024** : projet à l'arrêt.
+
+Ce qui se transpose ici, deux cartes dans une machine sans pair-à-pair :
+
+1. **Le découpage par la mesure, pas par le profil** — c'est le principe
+   d'Exo, et déjà le nôtre (MATERIEL.md : « si `bench` contredit `detect`,
+   croyez `bench` »). Rien à ajouter au planificateur.
+2. **Le parallélisme de tenseur reste écarté.** Le ×1,8 d'Exo suppose un lien
+   à faible latence (RDMA) ; ici chaque échange passe par la mémoire hôte
+   épinglée, et le parallélisme de tenseur en demande deux par couche et par
+   jeton, contre un seul franchissement par jeton pour notre pipeline. Le
+   refus d'entrelacer les couches entre les cartes tient ; une mesure de
+   l'aller-retour hôte par échange serait le seul fait qui pourrait le rouvrir.
+3. **Le rejeu de Petals** — garder les entrées et refaire le préfill plutôt
+   que perdre le travail — n'a pas d'équivalent chez nous : une séquence qui
+   épuise le budget KV est tronquée et livrée (pièce 146, ARCHITECTURE.md),
+   jamais mise de côté puis rejouée. C'est la même idée qu'InferCept
+   (BIBLIOGRAPHIE.md, n° 9) : préempter et rejouer au lieu de tronquer.
+   Candidat, sans mesure à ce jour.
+4. **Les API côté client** : nous servons déjà OpenAI Chat Completions et
+   Claude Messages (`acvram/server/app.py:1215`). Exo y ajoute **Ollama**
+   (`/api/chat`, `/api/tags`, utilisé par OpenWebUI) et **OpenAI Responses**,
+   que nous ne servons pas : tickets `4i9` et `u0h`.
+
+Ni l'un ni l'autre ne peut servir de moteur de comparaison au duel des moteurs :
+Exo ne calcule pas sur nos GPU sous Linux, et Petals n'est plus maintenu.
+
 ## Version 0.3.0 (31 août 2026, soir)
 
 * **Graphes CUDA sur le pas de décodage** : capture par godet (lot, blocs KV),

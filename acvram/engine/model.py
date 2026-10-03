@@ -101,6 +101,15 @@ from .couches import (   # noqa: F401
 class ACVRamModel(nn.Module):
     """Le modèle assemblé, ses couches réparties sur plusieurs appareils."""
 
+    @property
+    def appareil(self) -> torch.device:
+        """L'appareil de CALCUL : celui de la première couche. Pas celui de la table de plongements, qui peut vivre en
+        RAM hôte (plongements, 02/10) — la tour de vision, la chauffe et le chemin épinglé le prenaient pour celui du
+        modèle : table hôte = tour sur le processeur, et une chauffe qui ne jugeait plus la réserve de la carte."""
+        if len(self.layers):
+            return torch.device(self.layers[0].device)
+        return self.embed_tokens.device
+
     def __init__(self, spec: ModelSpec, embed: torch.Tensor,
                  layers: list[DecoderLayer], norm: RMSNorm,
                  lm_head: QuantLinear, caches: dict[int, PagedKVCache],
