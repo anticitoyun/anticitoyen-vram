@@ -945,7 +945,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # Pièce 268 : UN parcours de l'arbre des modules (il en faisait quatre, ~20 000 modules sur un MoE de 48 couches ×
         # 128 experts, et /metrics appelait regime() sept fois : 343 ms dans la boucle HTTP, 262). Pas de cache entre
         # appels : `streamed` change en service (`_promote_expert`), l'état rendu doit rester vivant.
-        blocs = [m for m in self.model.modules() if isinstance(m, MoEBlock)]
+        modules = list(self.model.modules())  # le seul parcours ; prefill_int8_regime le réutilise
+        blocs = [m for m in modules if isinstance(m, MoEBlock)]
         for m in blocs:
             etats_piles.add(m._stack_state)
             if m._stack_state == "non" and getattr(m, "_raison_repli", ""):
@@ -1049,7 +1050,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                        + ("(relu)" if _att_relire_kv() else ""),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             # pièce 139 : « cublas+bf16(origine fp8 ×233) » quand des int8 ré-encodés du fp8 passent en déquant bf16
-            "prefill_int8": kernels.prefill_int8_regime(self.model) + (
+            "prefill_int8": kernels.prefill_int8_regime(modules=modules) + (
                 "+" + _prefill_i8c().split("=", 1)[1] if _prefill_i8c() else ""),
             # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)

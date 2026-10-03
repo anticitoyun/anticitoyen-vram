@@ -1231,16 +1231,17 @@ def quantifier_a8_i8c(x: torch.Tensor):
     return quantifier_a8_torch(x)
 
 
-def prefill_int8_regime(model=None) -> str:
+def prefill_int8_regime(model=None, modules=None) -> str:
     """Le chemin int8 du préfill tel qu'il sera PRIS, pas tel qu'il est réglé (sonde du 03/10, revue/poste6-bf16-sonde-
     verdict-carte-03-10) : sous `cublas`, `gemm_i8c_cublas` refuse tout poids qui n'est pas symétrique par canal
     (`_i8c_eligible`) et `int8_matmul` le déquantifie en bf16 pour cuBLAS — 180 GEMM bf16 sur Devstral-24B que la ligne
     « prefill_int8=cublas » masquait. Avec le modèle : `cublas×A+repli-bf16×B` (les poids « origine fp8 » déjà nommés
-    par `prefill_i8c_texte` ne sont pas recomptés) ; sans modèle ou sans repli : le réglage seul."""
-    if model is None or _PREFILL_INT8 != "cublas":
+    par `prefill_i8c_texte` ne sont pas recomptés) ; sans modèle ou sans repli : le réglage seul. `modules` : la liste
+    déjà parcourue par `Engine.regime` (pièce 268 : un seul parcours de l'arbre par appel)."""
+    if (model is None and modules is None) or _PREFILL_INT8 != "cublas":
         return _PREFILL_INT8
     ok = repli = 0
-    for mod in model.modules():
+    for mod in (modules if modules is not None else model.modules()):
         q = getattr(mod, "qweight", None)
         if isinstance(q, INT8Tensor) and not q.__dict__.get("prefill_bf16"):
             if _i8c_eligible(q):
