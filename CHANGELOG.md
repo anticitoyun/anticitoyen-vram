@@ -1,6 +1,6 @@
 # Journal des changements
 
-## En préparation (0.7.18)
+## 0.7.18 (03/10/2026)
 
 ### gpt-oss (20b, 120b) servi par acvram (poste1, evp)
 
