@@ -1602,7 +1602,7 @@ _EMBED_MODE = (os.environ.get("ACVRAM_EMBED") or "auto").strip().lower()
 # pas le réglage »). `exacte` pose `torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False` ;
 # `reduite` (défaut) = le défaut de torch. Cause mesurée sur carte (revue/poste6-s1-dense-h4-verdict-carte-02-10) : les
 # projections étroites k_proj / v_proj (N = 1 024, exclues de Marlin par `_PROJ_MARLIN_MIN_N`, kernels/__init__.py:1270)
-# passent par `F.linear` (kernels/__init__.py:935), et cuBLAS y prend pour certaines formes (M, N ≤ 1 024) une réduction à
+# passent par `F.linear` (kernels/__init__.py:975), et cuBLAS y prend pour certaines formes (M, N ≤ 1 024) une réduction à
 # précision réduite : 15 % (k) et 30 % (v) des éléments différaient entre 7 865 lignes d'un seul tenant et 4 096 + 3 769 —
 # Devstral s'écartait de 10 × son témoin reprise sous les morceaux. Sous `exacte` : morceaux et seul tenant au bit (352
 # valeurs sur 352). Drapeau GLOBAL du processus.
