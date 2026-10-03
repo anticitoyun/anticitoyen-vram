@@ -429,6 +429,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("INT8_PROMUS", "", ("acvram.engine.loader", "_INT8_PROMUS"), None,
              "ro7 (03/10) : `canal` re-quantifie au chargement les int8 promus (g128 affines, inéligibles au GEMM int8) en "
              "canal symétrique → chemin cublas du préfill ; \"\" (défaut) : repli bf16 déquantifié. Opt-in, qualité à mesurer."),
+    # lue à l'import comme un tuple (loader._INT8_PROMUS_ROLES) : comparée ici par l'environnement, str(()) mentirait
+    Variable("INT8_PROMUS_ROLES", "", None, None,
+             "ro7 (03/10) : rôles seuls re-quantifiés sous INT8_PROMUS=canal (« down_proj,k_proj ») — bras de mesure pour "
+             "attribuer un écart de qualité ; \"\" (défaut) : tous les int8 promus."),
     Variable("BF16_REDUCTION", "reduite", ("acvram.engine.loader", "_BF16_REDUCTION"), None,
              "02/10 : `exacte` (opt-in) pose torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False au "
              "chargement — sans lui les projections étroites (k/v, N = 1 024) changent de 1 ulp sur 15-30 % de leurs "
