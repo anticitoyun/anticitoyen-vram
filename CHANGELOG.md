@@ -24,8 +24,11 @@
   Opt-in aussi. `acvram-memoire/revue/poste6-bf16-etroite-verdict-carte-03-10.md`. Étendue le 03/10 aux six `F.linear`
   cuBLAS des poids quantifiés au préfill (`kernels.linear_prefill` : naturel, Marlin dépaqueté, vue de pile ; `down_proj`
   K = 32 768 dépendait de M à 18,6 %) : +2,32 % à M = 4 096, et le moteur dépend encore du découpage par un produit
-  hors de ces sites ; `tranches` (blocs de 1 024 lignes, drapeau intact) : +7,44 % à 4 096, pas au bit — tous deux
-  opt-in, défaut inchangé. `acvram-memoire/revue/poste6-bf16-prefill-cublas-verdict-carte-03-10.md`.
+  hors de ces sites ; un bras « tranches » (blocs de 1 024 lignes, drapeau intact) mesuré à +7,44 % et retiré. Le produit
+  manquant, nommé au profileur : le repli bf16 des couches int8 au préfill (`int8_matmul`, quand `gemm_i8c_cublas` refuse
+  le poids) — 180 GEMM cuBLAS sur Devstral-24B, désormais sous `linear_prefill` ; la ligne de régime dit le chemin int8
+  PRIS (`prefill_int8=repli-bf16×N+cublas×M`) et non plus le seul réglage. `etroite` reste opt-in, défaut inchangé.
+  `acvram-memoire/revue/poste6-bf16-prefill-cublas-verdict-carte-03-10.md`, `poste6-bf16-sonde-verdict-carte-03-10.md`.
   `acvram-memoire/revue/poste6-bf16-reduction-verdict-carte-02-10.md`.
 
 ### Troncature causale du cœur MLA au préfill, en option (zzs)

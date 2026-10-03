@@ -1049,7 +1049,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                        + ("(relu)" if _att_relire_kv() else ""),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             # pièce 139 : « cublas+bf16(origine fp8 ×233) » quand des int8 ré-encodés du fp8 passent en déquant bf16
-            "prefill_int8": kernels.prefill_int8_regime() + (
+            "prefill_int8": kernels.prefill_int8_regime(self.model) + (
                 "+" + _prefill_i8c().split("=", 1)[1] if _prefill_i8c() else ""),
             # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)

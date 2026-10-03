@@ -168,3 +168,45 @@ def test_etroite_sur_carte_e1_e3(drapeau, monkeypatch):
         del xb, wb, un_t, deux_t
     if temoin == 0:
         pytest.skip("cette carte ne prend pas la réduction réduite à cette forme : le témoin ne prouve rien ici")
+
+
+# ---- 03/10, sonde (revue/poste6-bf16-sonde-verdict-carte-03-10.md) : le repli bf16 des couches int8 au préfill passe
+# par `linear_prefill` (sinon `etroite` ne tient pas ce qu'il promet : 180 GEMM cuBLAS bf16 hors de sa portée sur
+# Devstral-24B), et la ligne de régime dit le chemin int8 PRIS (`repli-bf16×N`), pas le réglage.
+from acvram.quant.formats import _quantize_int8  # noqa: E402
+
+
+def _int8_cas():
+    torch.manual_seed(7)
+    t = _quantize_int8(torch.randn(1000, 256), 64)                       # groupe 64 : repli déquant bf16 sur processeur
+    return t, torch.randn(40, 256, dtype=torch.bfloat16)
+
+
+def test_le_repli_int8_du_prefill_passe_par_linear_prefill(etroite, drapeau, monkeypatch):
+    monkeypatch.setattr(K, "_REDUCTION_ETROITE", "appel")
+    t, x = _int8_cas()
+    K.int8_matmul(x, t)                                                  # matrice entière
+    assert etroite and all(flag is False for _, flag in etroite), "repli int8 entier : hors de linear_prefill"
+    etroite.clear()
+    par_ligne = 256 * (4 + 2)
+    monkeypatch.setattr(K, "_DEQUANT_TRANCHE_MAX", 128 * par_ligne)     # tranches de 128 lignes de sortie
+    K.int8_matmul(x, t)
+    assert len(etroite) == 8 and all(flag is False for _, flag in etroite), "repli int8 par tranches : hors de linear_prefill"
+    assert drapeau.allow_bf16_reduced_precision_reduction is True
+
+
+def test_la_ligne_de_regime_dit_le_chemin_int8_pris(monkeypatch):
+    class Lin(torch.nn.Module):
+        def __init__(self, q):
+            super().__init__(); self.qweight = q
+    symetrique = _quantize_int8(torch.randn(64, 256), 256)               # groupe = K : éligible si zéros à 128
+    symetrique.zeros.fill_(128)
+    groupe = _quantize_int8(torch.randn(64, 256), 64)                    # par groupes : gemm_i8c_cublas rend None
+    fp8 = _quantize_int8(torch.randn(64, 256), 64); fp8.__dict__["prefill_bf16"] = True   # déjà dit par prefill_i8c_texte
+    modele = torch.nn.Sequential(Lin(symetrique), Lin(groupe), Lin(groupe), Lin(fp8))
+    monkeypatch.setattr(K, "_PREFILL_INT8", "cublas")
+    assert K.prefill_int8_regime() == "cublas"                           # sans modèle : le réglage
+    assert K.prefill_int8_regime(modele) == "repli-bf16×2+cublas×1"
+    assert K.prefill_int8_regime(torch.nn.Sequential(Lin(symetrique))) == "cublas"
+    monkeypatch.setattr(K, "_PREFILL_INT8", "bf16")
+    assert K.prefill_int8_regime(modele) == "bf16"

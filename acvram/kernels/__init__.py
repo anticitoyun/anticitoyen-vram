@@ -1231,8 +1231,25 @@ def quantifier_a8_i8c(x: torch.Tensor):
     return quantifier_a8_torch(x)
 
 
-def prefill_int8_regime() -> str:
-    return _PREFILL_INT8
+def prefill_int8_regime(model=None) -> str:
+    """Le chemin int8 du préfill tel qu'il sera PRIS, pas tel qu'il est réglé (sonde du 03/10, revue/poste6-bf16-sonde-
+    verdict-carte-03-10) : sous `cublas`, `gemm_i8c_cublas` refuse tout poids qui n'est pas symétrique par canal
+    (`_i8c_eligible`) et `int8_matmul` le déquantifie en bf16 pour cuBLAS — 180 GEMM bf16 sur Devstral-24B que la ligne
+    « prefill_int8=cublas » masquait. Avec le modèle : `cublas×A+repli-bf16×B` (les poids « origine fp8 » déjà nommés
+    par `prefill_i8c_texte` ne sont pas recomptés) ; sans modèle ou sans repli : le réglage seul."""
+    if model is None or _PREFILL_INT8 != "cublas":
+        return _PREFILL_INT8
+    ok = repli = 0
+    for mod in model.modules():
+        q = getattr(mod, "qweight", None)
+        if isinstance(q, INT8Tensor) and not q.__dict__.get("prefill_bf16"):
+            if _i8c_eligible(q):
+                ok += 1
+            else:
+                repli += 1
+    if not repli:
+        return _PREFILL_INT8
+    return f"repli-bf16×{repli}" + (f"+cublas×{ok}" if ok else "")
 
 
 def tete_int8_entree_bf16(n_lignes: int) -> bool:
@@ -1767,12 +1784,12 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             tr = INT8Tensor(t.qweight[a:b], t.scales[a:b], t.zeros[a:b], t.group_size,
                             (b - a, t.shape[1]), t.format)
             w = _w_partage(cle_int8 + (dt, a, b), lambda tr=tr: int8_dequant(tr, dt))
-            out[..., a:b] = torch.nn.functional.linear(x, w.to(x.dtype))
+            out[..., a:b] = linear_prefill(x, w.to(x.dtype))      # 03/10 : produit cuBLAS bf16 du préfill, sous `etroite`
         return out
     # Pièce 179 : B' (172) étendu à la déquantification int8 — dans la boucle par séquence d'une couche à récurrence
     # linéaire, le poids bf16 est fabriqué une fois ; mêmes valeurs, mêmes appels : au bit.
     w = _w_partage(cle_int8 + (dt,), lambda: int8_dequant(t, dt))
-    return torch.nn.functional.linear(x, w.to(x.dtype))
+    return linear_prefill(x, w.to(x.dtype))                       # 03/10 : idem (sonde : 180 GEMM bf16 masqués sans cela)
 
 
 # --------------------------------------------------------------------------
