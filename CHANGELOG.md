@@ -31,6 +31,15 @@
   `acvram-memoire/revue/poste6-bf16-prefill-cublas-verdict-carte-03-10.md`, `poste6-bf16-sonde-verdict-carte-03-10.md`.
   `acvram-memoire/revue/poste6-bf16-reduction-verdict-carte-02-10.md`.
 
+### Int8 promus servis par le GEMM int8 au préfill, en option (poste6, ro7)
+
+* **`ACVRAM_INT8_PROMUS=canal`** (défaut vide) : les poids int8 « promus » de la conversion (g128 affines, 47-370 par
+  modèle du parc) sont re-quantifiés au chargement par canal symétrique et prennent le GEMM int8 cuBLASLt du préfill au
+  lieu d'être déquantifiés en bf16 pour cuBLAS. Devstral-24B : préfill **+15,8 % à M = 4 096, +31,6 % à 512** ; PPL
+  wiki 2048 × 1,0119 (double quantification + A8). La ligne de régime dit le chemin int8 pris
+  (`prefill_int8=repli-bf16×N` / `cublas`). Réserve : au-delà de 16 lignes W8A8, en dessous W8A16 — la sortie dépend du
+  chemin selon M. `acvram-memoire/revue/poste6-ro7-int8-promus-verdict-carte-03-10.md`.
+
 ### Troncature causale du cœur MLA au préfill, en option (zzs)
 
 * `ACVRAM_MLA_CAUSAL=1` limite les scores, le masque, le softmax et le produit par V de chaque morceau du préfill aux clés
